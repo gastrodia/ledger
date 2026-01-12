@@ -1,4 +1,4 @@
-import { SignJWT, jwtVerify } from 'jose';
+import { SignJWT, jwtVerify, JWTPayload } from 'jose';
 import { cookies } from 'next/headers';
 
 const JWT_SECRET = new TextEncoder().encode(
@@ -7,7 +7,7 @@ const JWT_SECRET = new TextEncoder().encode(
 
 const SESSION_DURATION = 30 * 24 * 60 * 60 * 1000; // 30天
 
-export interface SessionData {
+export interface SessionData extends JWTPayload {
   userId: string;
   username: string;
   email: string;
@@ -33,7 +33,7 @@ export async function verifySession(token: string): Promise<SessionData | null> 
   try {
     const verified = await jwtVerify(token, JWT_SECRET);
     return verified.payload as SessionData;
-  } catch (error) {
+  } catch {
     return null;
   }
 }
