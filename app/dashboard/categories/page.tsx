@@ -160,20 +160,6 @@ export default function CategoriesPage() {
           </Button>
         </div>
 
-        {/* Filter */}
-        <div className="flex items-center gap-4">
-          <Select value={filterType} onValueChange={(value) => setFilterType(value as TransactionType | "all")}>
-            <SelectTrigger className="w-40">
-              <SelectValue placeholder="全部类型" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部类型</SelectItem>
-              <SelectItem value="income">收入</SelectItem>
-              <SelectItem value="expense">支出</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
         {/* Loading State */}
         {isLoading ? (
           <Card>

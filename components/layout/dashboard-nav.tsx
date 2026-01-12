@@ -9,12 +9,11 @@ import {
   Wallet,
   LogOut,
   Menu,
-  X,
+  BarChart3,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { toast } from "@/hooks/use-toast";
 
 const navItems = [
@@ -22,6 +21,11 @@ const navItems = [
     href: "/dashboard",
     label: "交易记录",
     icon: LayoutDashboard,
+  },
+  {
+    href: "/dashboard/stats",
+    label: "统计分析",
+    icon: BarChart3,
   },
   {
     href: "/dashboard/categories",
@@ -66,20 +70,18 @@ export function DashboardNav() {
 
   return (
     <>
-      {/* Mobile menu button */}
-      <Button
-        variant="outline"
-        size="icon"
-        className="lg:hidden fixed top-4 left-4 z-50"
-        onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-        aria-label={isMobileMenuOpen ? "关闭菜单" : "打开菜单"}
-      >
-        {isMobileMenuOpen ? (
-          <X className="h-5 w-5" />
-        ) : (
+      {/* Mobile menu button - 仅在菜单关闭时显示 */}
+      {!isMobileMenuOpen && (
+        <Button
+          variant="outline"
+          size="icon"
+          className="lg:hidden fixed top-4 left-4 z-50"
+          onClick={() => setIsMobileMenuOpen(true)}
+          aria-label="打开菜单"
+        >
           <Menu className="h-5 w-5" />
-        )}
-      </Button>
+        </Button>
+      )}
 
       {/* Sidebar */}
       <aside
