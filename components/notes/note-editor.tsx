@@ -6,6 +6,7 @@ import { upload } from "@vercel/blob/client";
 import { Button } from "@/components/ui/button";
 import { Image as ImageIcon } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
+import { commands as mdCommands, type ICommand } from "@uiw/react-md-editor";
 
 import "@uiw/react-md-editor/markdown-editor.css";
 import "@uiw/react-markdown-preview/markdown.css";
@@ -49,28 +50,42 @@ export function NoteEditor({
     }
   };
 
-  const toolbar = useMemo(() => {
+  const toolbar = useMemo<ICommand[]>(() => {
     return [
-      "bold",
-      "italic",
-      "strikethrough",
-      "hr",
-      "|",
-      "title",
-      "quote",
-      "code",
-      "codeBlock",
-      "|",
-      "unorderedList",
-      "orderedList",
-      "checkedList",
-      "|",
-      "link",
-      "|",
-      "preview",
-      "live",
-      "fullscreen",
-    ] as const;
+      mdCommands.bold,
+      mdCommands.italic,
+      mdCommands.strikethrough,
+      mdCommands.hr,
+      mdCommands.divider,
+      mdCommands.group(
+        [
+          mdCommands.title1,
+          mdCommands.title2,
+          mdCommands.title3,
+          mdCommands.title4,
+          mdCommands.title5,
+          mdCommands.title6,
+        ],
+        {
+          name: "title",
+          groupName: "title",
+          buttonProps: { "aria-label": "Insert title", title: "Insert title" },
+        }
+      ),
+      mdCommands.quote,
+      mdCommands.code,
+      mdCommands.codeBlock,
+      mdCommands.divider,
+      mdCommands.unorderedListCommand,
+      mdCommands.orderedListCommand,
+      mdCommands.checkedListCommand,
+      mdCommands.divider,
+      mdCommands.link,
+    ];
+  }, []);
+
+  const extraCommands = useMemo<ICommand[]>(() => {
+    return [mdCommands.codePreview, mdCommands.codeLive, mdCommands.fullscreen];
   }, []);
 
   return (
@@ -108,7 +123,8 @@ export function NoteEditor({
           height={520}
           preview="live"
           visibleDragbar={false}
-          toolbarCommands={toolbar as unknown}
+          commands={toolbar}
+          extraCommands={extraCommands}
         />
       </div>
     </div>
