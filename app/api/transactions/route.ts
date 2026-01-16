@@ -63,7 +63,7 @@ export async function GET(request: NextRequest) {
         WHERE t.user_id = $1
       `;
       
-      const params: any[] = [session.userId];
+      const params: unknown[] = [session.userId];
       let paramIndex = 2;
 
       if (type && (type === 'income' || type === 'expense')) {
@@ -96,13 +96,13 @@ export async function GET(request: NextRequest) {
     }
 
     // 转换数据格式，将关联的 category 和 member 组织为嵌套对象
-    const formattedTransactions = transactions.map((t: any) => ({
+    const formattedTransactions = transactions.map((t: Record<string, unknown>) => ({
       id: t.id,
       user_id: t.user_id,
       category_id: t.category_id,
       member_id: t.member_id,
       type: t.type,
-      amount: parseFloat(t.amount),
+      amount: parseFloat(String(t.amount)),
       description: t.description,
       attachment_key: t.attachment_key,
       attachment_name: t.attachment_name,
@@ -111,19 +111,19 @@ export async function GET(request: NextRequest) {
       created_at: t.created_at,
       updated_at: t.updated_at,
       category: t.category_id ? {
-        id: t.category_id,
-        user_id: t.user_id,
-        name: t.category_name,
-        type: t.category_type,
-        icon: t.category_icon,
-        color: t.category_color,
+        id: t.category_id as string,
+        user_id: t.user_id as string,
+        name: t.category_name as string,
+        type: t.category_type as "income" | "expense",
+        icon: t.category_icon as string | null,
+        color: t.category_color as string | null,
         created_at: null,
       } : undefined,
       member: t.member_id ? {
-        id: t.member_id,
-        user_id: t.user_id,
-        name: t.member_name,
-        avatar: t.member_avatar,
+        id: t.member_id as string,
+        user_id: t.user_id as string,
+        name: t.member_name as string,
+        avatar: t.member_avatar as string | null,
         created_at: null,
       } : undefined,
     }));
@@ -148,7 +148,7 @@ export async function GET(request: NextRequest) {
         WHERE user_id = $1
       `;
       
-      const params: any[] = [session.userId];
+      const params: unknown[] = [session.userId];
       let paramIndex = 2;
 
       if (type && (type === 'income' || type === 'expense')) {

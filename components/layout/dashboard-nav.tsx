@@ -10,6 +10,9 @@ import {
   LogOut,
   Menu,
   BarChart3,
+  Gift,
+  MessageSquare,
+  HandCoins,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
@@ -37,6 +40,26 @@ const navItems = [
     label: "家庭成员",
     icon: Users,
   },
+  {
+    href: "/dashboard/loans",
+    label: "欠款/借款",
+    icon: HandCoins,
+  },
+  {
+    href: "/dashboard/giftbooks",
+    label: "礼簿",
+    icon: Gift,
+  },
+  {
+    href: "/dashboard/gifts-given",
+    label: "送礼",
+    icon: Gift,
+  },
+  {
+    href: "/dashboard/notes",
+    label: "留言",
+    icon: MessageSquare,
+  }
 ];
 
 export function DashboardNav() {
@@ -94,7 +117,7 @@ export function DashboardNav() {
       >
         {/* Logo */}
         <div className="flex items-center gap-3 h-16 px-6 border-b">
-          <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-secondary shadow-md">
+          <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-linear-to-br from-primary to-secondary shadow-md">
             <Wallet className="h-5 w-5 text-white" />
           </div>
           <div>
@@ -118,13 +141,14 @@ export function DashboardNav() {
                 onClick={() => setIsMobileMenuOpen(false)}
                 className={cn(
                   "flex items-center gap-3 px-3 py-2 rounded-lg transition-all",
-                  "hover:bg-accent",
                   isActive
                     ? "bg-primary text-primary-foreground font-medium"
-                    : "text-muted-foreground hover:text-foreground"
+                      // 当前激活项：hover 时保持可读性（不要切到 accent 导致白字看不见）
+                      + " hover:bg-primary/90 hover:text-primary-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
                 )}
               >
-                <Icon className="h-5 w-5 flex-shrink-0" />
+                <Icon className="h-5 w-5 shrink-0" />
                 <span className="text-sm">{item.label}</span>
               </Link>
             );
@@ -138,7 +162,7 @@ export function DashboardNav() {
             disabled={isLoggingOut}
             className="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-all w-full disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <LogOut className="h-5 w-5 flex-shrink-0" />
+            <LogOut className="h-5 w-5 shrink-0" />
             <span className="text-sm font-medium">
               {isLoggingOut ? "退出中..." : "退出登录"}
             </span>

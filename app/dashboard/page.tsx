@@ -41,11 +41,63 @@ import {
   Paperclip,
   Trash2,
   Edit,
+  FileText,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import type { Transaction, TransactionType, Summary, Category, Member } from "@/types";
 import { toast } from "@/hooks/use-toast";
+import { upload } from "@vercel/blob/client";
+
+function SummaryCards({ summary }: { summary: Summary }) {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-muted-foreground">总收入</p>
+              <p className="text-2xl font-bold text-green-600">{formatCurrency(summary.totalIncome)}</p>
+            </div>
+            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-green-100">
+              <TrendingUp className="h-6 w-6 text-green-600" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-muted-foreground">总支出</p>
+              <p className="text-2xl font-bold text-red-600">{formatCurrency(summary.totalExpense)}</p>
+            </div>
+            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-100">
+              <TrendingDown className="h-6 w-6 text-red-600" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-muted-foreground">结余</p>
+              <p className="text-2xl font-bold text-primary">{formatCurrency(summary.balance)}</p>
+            </div>
+            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-primary/10">
+              <Calendar className="h-6 w-6 text-primary" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -64,6 +116,13 @@ export default function DashboardPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [filterType, setFilterType] = useState<TransactionType | "all">("all");
   const [filterCategoryId, setFilterCategoryId] = useState<string>("__all__");
+  const [isMobileSummaryOpen, setIsMobileSummaryOpen] = useState(false);
+  const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
+  const [previewAttachment, setPreviewAttachment] = useState<{
+    url: string;
+    name?: string;
+    type?: string;
+  } | null>(null);
   
   // 获取当月第一天
   const getFirstDayOfMonth = () => {
@@ -202,8 +261,9 @@ export default function DashboardPage() {
                 添加记录
               </Button>
             </DialogTrigger>
-            <AddTransactionModal 
+            <TransactionModal 
               key={isAddModalOpen ? 'open' : 'closed'} // 每次打开时重新挂载组件，确保表单是干净的
+              mode="add"
               categories={categories} 
               members={members}
               onClose={(shouldRefresh?: boolean) => {
@@ -218,63 +278,76 @@ export default function DashboardPage() {
         </div>
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {/* 移动端：折叠统计卡片（可手动展开） */}
+        <div className="md:hidden">
           <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-muted-foreground">总收入</p>
-                  <p className="text-2xl font-bold text-green-600">
-                    {formatCurrency(summary.totalIncome)}
-                  </p>
-                </div>
-                <div className="flex items-center justify-center w-12 h-12 rounded-full bg-green-100">
-                  <TrendingUp className="h-6 w-6 text-green-600" />
-                </div>
+            <CardHeader className="py-4">
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="text-base">统计概览</CardTitle>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2"
+                  onClick={() => setIsMobileSummaryOpen((v) => !v)}
+                >
+                  {isMobileSummaryOpen ? (
+                    <>
+                      收起
+                      <ChevronUp className="h-4 w-4" />
+                    </>
+                  ) : (
+                    <>
+                      展开
+                      <ChevronDown className="h-4 w-4" />
+                    </>
+                  )}
+                </Button>
               </div>
-            </CardContent>
+            </CardHeader>
+            {isMobileSummaryOpen ? (
+              <CardContent className="pt-0">
+                <SummaryCards summary={summary} />
+              </CardContent>
+            ) : null}
           </Card>
+        </div>
 
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-muted-foreground">总支出</p>
-                  <p className="text-2xl font-bold text-red-600">
-                    {formatCurrency(summary.totalExpense)}
-                  </p>
-                </div>
-                <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-100">
-                  <TrendingDown className="h-6 w-6 text-red-600" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="pt-6">
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <p className="text-sm font-medium text-muted-foreground">结余</p>
-                  <p className="text-2xl font-bold text-primary">
-                    {formatCurrency(summary.balance)}
-                  </p>
-                </div>
-                <div className="flex items-center justify-center w-12 h-12 rounded-full bg-primary/10">
-                  <Calendar className="h-6 w-6 text-primary" />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+        {/* 桌面端：始终显示 */}
+        <div className="hidden md:block">
+          <SummaryCards summary={summary} />
         </div>
 
         {/* Transactions */}
         <Card>
           <CardHeader className="border-b">
             <div className="flex flex-col gap-4">
-              <CardTitle>交易明细</CardTitle>
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle>交易明细</CardTitle>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 md:hidden"
+                  onClick={() => setIsMobileFiltersOpen((v) => !v)}
+                >
+                  {isMobileFiltersOpen ? (
+                    <>
+                      收起筛选
+                      <ChevronUp className="h-4 w-4" />
+                    </>
+                  ) : (
+                    <>
+                      展开筛选
+                      <ChevronDown className="h-4 w-4" />
+                    </>
+                  )}
+                </Button>
+              </div>
               {/* 筛选器 */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+              <div
+                className={`${isMobileFiltersOpen ? "grid" : "hidden"} grid-cols-1 sm:grid-cols-2 md:grid md:grid-cols-4 gap-3`}
+              >
                 <div className="space-y-1">
                   <Label htmlFor="filter-type" className="text-xs text-muted-foreground">类型</Label>
                   <Select value={filterType} onValueChange={(value) => setFilterType(value as TransactionType | "all")}>
@@ -353,6 +426,7 @@ export default function DashboardPage() {
                         <th className="text-left p-4 font-semibold text-sm text-muted-foreground">成员</th>
                         <th className="text-left p-4 font-semibold text-sm text-muted-foreground">日期</th>
                         <th className="text-right p-4 font-semibold text-sm text-muted-foreground">金额</th>
+                        <th className="text-left p-4 font-semibold text-sm text-muted-foreground">附件</th>
                         <th className="text-right p-4 font-semibold text-sm text-muted-foreground w-24">操作</th>
                       </tr>
                     </thead>
@@ -410,6 +484,28 @@ export default function DashboardPage() {
                               {transaction.type === "income" ? "+" : "-"}
                               {formatCurrency(transaction.amount)}
                             </span>
+                          </td>
+                          <td className="p-4">
+                            {transaction.attachment_key ? (
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                                onClick={() =>
+                                  setPreviewAttachment({
+                                    url: transaction.attachment_key!,
+                                    name: transaction.attachment_name,
+                                    type: transaction.attachment_type,
+                                  })
+                                }
+                              >
+                                <Paperclip className="h-4 w-4" />
+                                <span className="truncate max-w-[160px]">
+                                  {transaction.attachment_name || "附件"}
+                                </span>
+                              </button>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">-</span>
+                            )}
                           </td>
                           <td className="p-4">
                             <div className="flex items-center justify-end gap-1">
@@ -532,10 +628,20 @@ export default function DashboardPage() {
                               </span>
                             )}
                             {transaction.attachment_key && (
-                              <span className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                className="flex items-center gap-1 hover:underline"
+                                onClick={() =>
+                                  setPreviewAttachment({
+                                    url: transaction.attachment_key!,
+                                    name: transaction.attachment_name,
+                                    type: transaction.attachment_type,
+                                  })
+                                }
+                              >
                                 <Paperclip className="h-3.5 w-3.5" />
                                 <span>附件</span>
-                              </span>
+                              </button>
                             )}
                           </div>
                         </div>
@@ -561,8 +667,9 @@ export default function DashboardPage() {
             }
           }}
         >
-          <EditTransactionModal
+          <TransactionModal
             key={selectedTransaction.id} // 使用 key 确保每次编辑不同记录时重新挂载组件
+            mode="edit"
             transaction={selectedTransaction}
             categories={categories}
             members={members}
@@ -595,254 +702,195 @@ export default function DashboardPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* 附件预览对话框 */}
+      <Dialog
+        open={!!previewAttachment}
+        onOpenChange={(open) => {
+          if (!open) setPreviewAttachment(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[900px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {previewAttachment?.type === "application/pdf" ? (
+                <FileText className="h-4 w-4" />
+              ) : (
+                <Paperclip className="h-4 w-4" />
+              )}
+              <span>附件预览</span>
+            </DialogTitle>
+            <DialogDescription>
+              {previewAttachment?.name || "未命名附件"}
+            </DialogDescription>
+          </DialogHeader>
+
+          {previewAttachment?.url ? (
+            previewAttachment.type?.startsWith("image/") ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={previewAttachment.url}
+                alt={previewAttachment.name || "附件图片"}
+                className="w-full max-h-[70vh] object-contain rounded-md border"
+              />
+            ) : (
+              <iframe
+                title={previewAttachment.name || "附件"}
+                src={previewAttachment.url}
+                className="w-full h-[70vh] rounded-md border"
+              />
+            )
+          ) : null}
+
+          {previewAttachment?.url ? (
+            <DialogFooter>
+              <Button asChild variant="outline">
+                <a href={previewAttachment.url} target="_blank" rel="noreferrer">
+                  新窗口打开
+                </a>
+              </Button>
+              <Button onClick={() => setPreviewAttachment(null)}>关闭</Button>
+            </DialogFooter>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </DashboardLayout>
   );
 }
 
-function AddTransactionModal({ 
-  categories, 
-  members, 
-  onClose 
-}: { 
+function TransactionModal({
+  mode,
+  transaction,
+  categories,
+  members,
+  onClose,
+}: {
+  mode: "add" | "edit";
+  transaction?: Transaction;
   categories: Category[];
   members: Member[];
   onClose: (shouldRefresh?: boolean) => void;
 }) {
-  // 获取今天日期的辅助函数，使用本地时区
+  const idPrefix = mode === "edit" ? "edit-" : "";
+
   const getTodayDate = () => {
     const now = new Date();
     const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
   };
 
-  const [formData, setFormData] = useState({
-    type: "expense" as TransactionType,
-    amount: "",
-    description: "",
-    category_id: "",
-    member_id: "",
-    transaction_date: getTodayDate(),
-  });
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // 根据类型筛选分类
-  const filteredCategories = categories.filter(cat => cat.type === formData.type);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-
-    try {
-      const response = await fetch("/api/transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          type: formData.type,
-          amount: parseFloat(formData.amount),
-          description: formData.description || undefined,
-          category_id: formData.category_id || undefined,
-          member_id: formData.member_id || undefined,
-          transaction_date: formData.transaction_date,
-        }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "创建失败");
-      }
-
-      // 保存成功时传递 true，触发列表刷新
-      onClose(true);
-    } catch (error) {
-      console.error("创建交易记录失败:", error);
-      toast.error(error instanceof Error ? error.message : "创建失败，请重试");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  return (
-    <DialogContent className="sm:max-w-[500px]">
-      <DialogHeader>
-        <DialogTitle>添加交易记录</DialogTitle>
-        <DialogDescription>
-          填写交易详情，记录您的收支情况
-        </DialogDescription>
-      </DialogHeader>
-      <form onSubmit={handleSubmit} className="space-y-4 py-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor="type">交易类型 *</Label>
-            <Select 
-              value={formData.type} 
-              onValueChange={(value) => setFormData({ 
-                ...formData, 
-                type: value as TransactionType,
-                category_id: "" // 重置分类
-              })}
-            >
-              <SelectTrigger id="type">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="income">收入</SelectItem>
-                <SelectItem value="expense">支出</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="amount">金额 *</Label>
-            <Input
-              id="amount"
-              type="number"
-              step="0.01"
-              min="0.01"
-              placeholder="请输入金额"
-              value={formData.amount}
-              onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-              required
-            />
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="category">分类</Label>
-          <Select 
-            value={formData.category_id} 
-            onValueChange={(value) => setFormData({ ...formData, category_id: value })}
-            disabled={filteredCategories.length === 0}
-          >
-            <SelectTrigger id="category">
-              <SelectValue placeholder={
-                filteredCategories.length === 0 
-                  ? `暂无${formData.type === "income" ? "收入" : "支出"}分类` 
-                  : "请选择分类（可选）"
-              } />
-            </SelectTrigger>
-            <SelectContent>
-              {filteredCategories.map((cat) => (
-                <SelectItem key={cat.id} value={cat.id}>
-                  {cat.icon} {cat.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="description">描述</Label>
-          <Input
-            id="description"
-            type="text"
-            placeholder="请输入描述（可选）"
-            value={formData.description}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="member">家庭成员</Label>
-          <Select 
-            value={formData.member_id} 
-            onValueChange={(value) => setFormData({ ...formData, member_id: value })}
-            disabled={members.length === 0}
-          >
-            <SelectTrigger id="member">
-              <SelectValue placeholder={members.length === 0 ? "暂无成员" : "请选择成员（可选）"} />
-            </SelectTrigger>
-            <SelectContent>
-              {members.map((member) => (
-                <SelectItem key={member.id} value={member.id}>
-                  {member.avatar} {member.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="date">交易日期 *</Label>
-          <Input
-            id="date"
-            type="date"
-            value={formData.transaction_date}
-            onChange={(e) => setFormData({ ...formData, transaction_date: e.target.value })}
-            required
-          />
-        </div>
-
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onClose(false)} disabled={isSubmitting}>
-            取消
-          </Button>
-          <Button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? "保存中..." : "保存"}
-          </Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
-  );
-}
-
-function EditTransactionModal({ 
-  transaction,
-  categories, 
-  members, 
-  onClose 
-}: { 
-  transaction: Transaction;
-  categories: Category[];
-  members: Member[];
-  onClose: (shouldRefresh?: boolean) => void;
-}) {
-  // 格式化日期的辅助函数，确保使用本地时区
   const formatDateForInput = (dateString: string) => {
     const date = new Date(dateString);
     const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
     return `${year}-${month}-${day}`;
   };
 
-  const [formData, setFormData] = useState({
-    type: transaction.type,
-    amount: transaction.amount.toString(),
-    description: transaction.description || "",
-    category_id: transaction.category_id || "",
-    member_id: transaction.member_id || "",
-    transaction_date: formatDateForInput(transaction.transaction_date),
-  });
+  const initial = (() => {
+    if (mode === "edit" && transaction) {
+      return {
+        type: transaction.type,
+        amount: transaction.amount.toString(),
+        description: transaction.description || "",
+        category_id: transaction.category_id || "",
+        member_id: transaction.member_id || "",
+        transaction_date: formatDateForInput(transaction.transaction_date),
+      };
+    }
+    return {
+      type: "expense" as TransactionType,
+      amount: "",
+      description: "",
+      category_id: "",
+      member_id: "",
+      transaction_date: getTodayDate(),
+    };
+  })();
+
+  const [formData, setFormData] = useState(initial);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [attachment, setAttachment] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
-  // 当 transaction 变化时，重新初始化表单数据
   useEffect(() => {
-    setFormData({
-      type: transaction.type,
-      amount: transaction.amount.toString(),
-      description: transaction.description || "",
-      category_id: transaction.category_id || "",
-      member_id: transaction.member_id || "",
-      transaction_date: formatDateForInput(transaction.transaction_date),
-    });
-  }, [transaction]);
+    if (mode === "edit" && transaction) {
+      setFormData({
+        type: transaction.type,
+        amount: transaction.amount.toString(),
+        description: transaction.description || "",
+        category_id: transaction.category_id || "",
+        member_id: transaction.member_id || "",
+        transaction_date: formatDateForInput(transaction.transaction_date),
+      });
+    }
+    if (mode === "add") {
+      setFormData({
+        type: "expense" as TransactionType,
+        amount: "",
+        description: "",
+        category_id: "",
+        member_id: "",
+        transaction_date: getTodayDate(),
+      });
+    }
+    setAttachment(null);
+    setRemoveExistingAttachment(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, transaction?.id]);
 
-  // 根据类型筛选分类
-  const filteredCategories = categories.filter(cat => cat.type === formData.type);
+  const filteredCategories = categories.filter((cat) => cat.type === formData.type);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
 
     try {
-      const response = await fetch(`/api/transactions/${transaction.id}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
+      let attachment_key: string | null | undefined;
+      let attachment_name: string | null | undefined;
+      let attachment_type: string | null | undefined;
+
+      if (mode === "edit" && removeExistingAttachment) {
+        attachment_key = null;
+        attachment_name = null;
+        attachment_type = null;
+      } else if (attachment) {
+        const isAllowed =
+          attachment.type === "application/pdf" || attachment.type.startsWith("image/");
+        const maxBytes = 10 * 1024 * 1024;
+        if (!isAllowed) throw new Error("仅支持上传图片或 PDF");
+        if (attachment.size > maxBytes) throw new Error("附件过大（最大 10MB）");
+
+        setIsUploading(true);
+        const safeName = attachment.name.replace(/[^\w.\-() ]+/g, "_");
+        const pathname = `transactions/${Date.now()}_${safeName}`;
+        const blob = await upload(pathname, attachment, {
+          access: "public",
+          handleUploadUrl: "/api/blob/upload",
+          contentType: attachment.type || undefined,
+        });
+        attachment_key = blob.url;
+        attachment_name = attachment.name;
+        attachment_type = blob.contentType || attachment.type || undefined;
+      } else {
+        // 不动附件：PATCH 时不传字段即可
+        attachment_key = undefined;
+        attachment_name = undefined;
+        attachment_type = undefined;
+      }
+
+      const url =
+        mode === "add"
+          ? "/api/transactions"
+          : `/api/transactions/${transaction?.id}`;
+      const method = mode === "add" ? "POST" : "PATCH";
+
+      const response = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: formData.type,
           amount: parseFloat(formData.amount),
@@ -850,45 +898,52 @@ function EditTransactionModal({
           category_id: formData.category_id || undefined,
           member_id: formData.member_id || undefined,
           transaction_date: formData.transaction_date,
+          attachment_key,
+          attachment_name,
+          attachment_type,
         }),
       });
 
       if (!response.ok) {
         const error = await response.json();
-        throw new Error(error.error || "更新失败");
+        throw new Error(error.error || (mode === "add" ? "创建失败" : "更新失败"));
       }
 
-      // 保存成功时传递 true，触发列表刷新
       onClose(true);
     } catch (error) {
-      console.error("更新交易记录失败:", error);
-      toast.error(error instanceof Error ? error.message : "更新失败，请重试");
+      console.error(mode === "add" ? "创建交易记录失败:" : "更新交易记录失败:", error);
+      toast.error(error instanceof Error ? error.message : "操作失败，请重试");
     } finally {
       setIsSubmitting(false);
+      setIsUploading(false);
     }
   };
+
+  const hasExistingAttachment = !!transaction?.attachment_key;
 
   return (
     <DialogContent className="sm:max-w-[500px]">
       <DialogHeader>
-        <DialogTitle>编辑交易记录</DialogTitle>
+        <DialogTitle>{mode === "add" ? "添加交易记录" : "编辑交易记录"}</DialogTitle>
         <DialogDescription>
-          修改交易详情
+          {mode === "add" ? "填写交易详情，记录您的收支情况" : "修改交易详情"}
         </DialogDescription>
       </DialogHeader>
       <form onSubmit={handleSubmit} className="space-y-4 py-4">
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label htmlFor="edit-type">交易类型 *</Label>
-            <Select 
-              value={formData.type} 
-              onValueChange={(value) => setFormData({ 
-                ...formData, 
-                type: value as TransactionType,
-                category_id: "" // 重置分类
-              })}
+            <Label htmlFor={`${idPrefix}type`}>交易类型 *</Label>
+            <Select
+              value={formData.type}
+              onValueChange={(value) =>
+                setFormData({
+                  ...formData,
+                  type: value as TransactionType,
+                  category_id: "",
+                })
+              }
             >
-              <SelectTrigger id="edit-type">
+              <SelectTrigger id={`${idPrefix}type`}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -898,9 +953,9 @@ function EditTransactionModal({
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="edit-amount">金额 *</Label>
+            <Label htmlFor={`${idPrefix}amount`}>金额 *</Label>
             <Input
-              id="edit-amount"
+              id={`${idPrefix}amount`}
               type="number"
               step="0.01"
               min="0.01"
@@ -913,18 +968,20 @@ function EditTransactionModal({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="edit-category">分类</Label>
-          <Select 
-            value={formData.category_id} 
+          <Label htmlFor={`${idPrefix}category`}>分类</Label>
+          <Select
+            value={formData.category_id}
             onValueChange={(value) => setFormData({ ...formData, category_id: value })}
             disabled={filteredCategories.length === 0}
           >
-            <SelectTrigger id="edit-category">
-              <SelectValue placeholder={
-                filteredCategories.length === 0 
-                  ? `暂无${formData.type === "income" ? "收入" : "支出"}分类` 
-                  : "请选择分类（可选）"
-              } />
+            <SelectTrigger id={`${idPrefix}category`}>
+              <SelectValue
+                placeholder={
+                  filteredCategories.length === 0
+                    ? `暂无${formData.type === "income" ? "收入" : "支出"}分类`
+                    : "请选择分类（可选）"
+                }
+              />
             </SelectTrigger>
             <SelectContent>
               {filteredCategories.map((cat) => (
@@ -937,9 +994,9 @@ function EditTransactionModal({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="edit-description">描述</Label>
+          <Label htmlFor={`${idPrefix}description`}>描述</Label>
           <Input
-            id="edit-description"
+            id={`${idPrefix}description`}
             type="text"
             placeholder="请输入描述（可选）"
             value={formData.description}
@@ -948,13 +1005,13 @@ function EditTransactionModal({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="edit-member">家庭成员</Label>
-          <Select 
-            value={formData.member_id} 
+          <Label htmlFor={`${idPrefix}member`}>家庭成员</Label>
+          <Select
+            value={formData.member_id}
             onValueChange={(value) => setFormData({ ...formData, member_id: value })}
             disabled={members.length === 0}
           >
-            <SelectTrigger id="edit-member">
+            <SelectTrigger id={`${idPrefix}member`}>
               <SelectValue placeholder={members.length === 0 ? "暂无成员" : "请选择成员（可选）"} />
             </SelectTrigger>
             <SelectContent>
@@ -968,9 +1025,9 @@ function EditTransactionModal({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="edit-date">交易日期 *</Label>
+          <Label htmlFor={`${idPrefix}date`}>交易日期 *</Label>
           <Input
-            id="edit-date"
+            id={`${idPrefix}date`}
             type="date"
             value={formData.transaction_date}
             onChange={(e) => setFormData({ ...formData, transaction_date: e.target.value })}
@@ -978,12 +1035,87 @@ function EditTransactionModal({
           />
         </div>
 
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}attachment`}>附件（图片 / PDF，可选）</Label>
+
+          {mode === "edit" && hasExistingAttachment && !removeExistingAttachment && !attachment ? (
+            <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs">
+              <a
+                href={transaction!.attachment_key!}
+                target="_blank"
+                rel="noreferrer"
+                className="truncate text-primary hover:underline"
+              >
+                {transaction!.attachment_name || "当前附件"}
+              </a>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setRemoveExistingAttachment(true)}
+                disabled={isSubmitting || isUploading}
+              >
+                移除
+              </Button>
+            </div>
+          ) : null}
+
+          {mode === "edit" && removeExistingAttachment ? (
+            <div className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs text-muted-foreground">
+              <span>将移除现有附件</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setRemoveExistingAttachment(false)}
+                disabled={isSubmitting || isUploading}
+              >
+                撤销
+              </Button>
+            </div>
+          ) : null}
+
+          <Input
+            id={`${idPrefix}attachment`}
+            type="file"
+            accept="image/*,application/pdf"
+            onChange={(e) => {
+              const file = e.target.files?.[0] || null;
+              setAttachment(file);
+              if (file) setRemoveExistingAttachment(false);
+            }}
+            disabled={isSubmitting || isUploading}
+          />
+
+          {attachment ? (
+            <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+              <span className="truncate">
+                {attachment.name}（{Math.ceil(attachment.size / 1024)}KB）
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setAttachment(null)}
+                disabled={isSubmitting || isUploading}
+              >
+                移除
+              </Button>
+            </div>
+          ) : null}
+        </div>
+
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onClose(false)} disabled={isSubmitting}>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onClose(false)}
+            disabled={isSubmitting || isUploading}
+          >
             取消
           </Button>
-          <Button type="submit" disabled={isSubmitting}>
-            {isSubmitting ? "保存中..." : "保存"}
+          <Button type="submit" disabled={isSubmitting || isUploading}>
+            {isSubmitting || isUploading ? "保存中..." : "保存"}
           </Button>
         </DialogFooter>
       </form>

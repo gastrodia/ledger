@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
+import { del } from '@vercel/blob';
 
 /**
  * PATCH /api/transactions/[id]
@@ -48,6 +49,7 @@ export async function PATCH(
     }
 
     const existingTransaction = existingTransactions[0];
+    const oldAttachmentKey = (existingTransaction.attachment_key as string | null | undefined) ?? null;
 
     // 如果更新了 type，验证其值
     const newType = type || existingTransaction.type;
@@ -129,6 +131,15 @@ export async function PATCH(
       RETURNING *
     `;
 
+    // 如果附件发生变化（替换/移除），尽力删除旧 blob，避免产生孤儿文件
+    if (attachment_key !== undefined && oldAttachmentKey && attachment_key !== oldAttachmentKey) {
+      try {
+        await del(oldAttachmentKey);
+      } catch (error) {
+        console.error('更新交易时删除旧附件失败:', error);
+      }
+    }
+
     return NextResponse.json({
       message: '交易记录更新成功',
       data: {
@@ -167,7 +178,7 @@ export async function DELETE(
 
     // 检查交易记录是否存在且属于当前用户
     const existingTransactions = await sql`
-      SELECT id FROM transactions 
+      SELECT id, attachment_key FROM transactions 
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
 
@@ -176,6 +187,20 @@ export async function DELETE(
         { error: '交易记录不存在' },
         { status: 404 }
       );
+    }
+
+    // 先删除附件，保证“删除交易=同时删除附件”语义（避免留下孤儿文件）
+    const attachmentKey = existingTransactions[0]?.attachment_key as string | null | undefined;
+    if (attachmentKey) {
+      try {
+        await del(attachmentKey);
+      } catch (error) {
+        console.error('删除交易附件失败:', error);
+        return NextResponse.json(
+          { error: '删除附件失败，请稍后重试' },
+          { status: 500 }
+        );
+      }
     }
 
     // 删除交易记录
