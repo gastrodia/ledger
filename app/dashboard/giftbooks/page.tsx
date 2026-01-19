@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -401,59 +402,61 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
         <DialogTitle>新建礼簿</DialogTitle>
         <DialogDescription>建议用“事件名+日期”，例如：张三婚礼 2026-02-01</DialogDescription>
       </DialogHeader>
-      <form onSubmit={handleSubmit} className="space-y-4 py-4">
-        <div className="space-y-2">
-          <Label htmlFor="gb-name">礼簿名 *</Label>
-          <Input
-            id="gb-name"
-            value={formData.name}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            placeholder="例如：张三婚礼"
-            required
-            maxLength={128}
-          />
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+        <DialogBody className="space-y-4 py-4">
           <div className="space-y-2">
-            <Label htmlFor="gb-type">事件类型</Label>
+            <Label htmlFor="gb-name">礼簿名 *</Label>
             <Input
-              id="gb-type"
-              value={formData.event_type}
-              onChange={(e) => setFormData({ ...formData, event_type: e.target.value })}
-              placeholder="例如：婚礼/乔迁/满月"
+              id="gb-name"
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              placeholder="例如：张三婚礼"
+              required
+              maxLength={128}
             />
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="gb-type">事件类型</Label>
+              <Input
+                id="gb-type"
+                value={formData.event_type}
+                onChange={(e) => setFormData({ ...formData, event_type: e.target.value })}
+                placeholder="例如：婚礼/乔迁/满月"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="gb-date">事件日期</Label>
+              <Input
+                id="gb-date"
+                type="date"
+                value={formData.event_date}
+                onChange={(e) => setFormData({ ...formData, event_date: e.target.value })}
+              />
+            </div>
+          </div>
+
           <div className="space-y-2">
-            <Label htmlFor="gb-date">事件日期</Label>
+            <Label htmlFor="gb-location">地点</Label>
             <Input
-              id="gb-date"
-              type="date"
-              value={formData.event_date}
-              onChange={(e) => setFormData({ ...formData, event_date: e.target.value })}
+              id="gb-location"
+              value={formData.location}
+              onChange={(e) => setFormData({ ...formData, location: e.target.value })}
+              placeholder="可选"
             />
           </div>
-        </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="gb-location">地点</Label>
-          <Input
-            id="gb-location"
-            value={formData.location}
-            onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-            placeholder="可选"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="gb-desc">备注</Label>
-          <Input
-            id="gb-desc"
-            value={formData.description}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            placeholder="可选"
-          />
-        </div>
+          <div className="space-y-2">
+            <Label htmlFor="gb-desc">备注</Label>
+            <Input
+              id="gb-desc"
+              value={formData.description}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              placeholder="可选"
+            />
+          </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onClose(false)} disabled={isSubmitting}>
@@ -532,58 +535,60 @@ function EditGiftBookModal({
         <DialogTitle>编辑礼簿</DialogTitle>
         <DialogDescription>更新礼簿名、日期、地点等信息</DialogDescription>
       </DialogHeader>
-      <form onSubmit={handleSubmit} className="space-y-4 py-4">
-        <div className="space-y-2">
-          <Label htmlFor="gb-edit-name">礼簿名 *</Label>
-          <Input
-            id="gb-edit-name"
-            value={formData.name}
-            onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-            required
-            maxLength={128}
-          />
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+        <DialogBody className="space-y-4 py-4">
           <div className="space-y-2">
-            <Label htmlFor="gb-edit-type">事件类型</Label>
+            <Label htmlFor="gb-edit-name">礼簿名 *</Label>
             <Input
-              id="gb-edit-type"
-              value={formData.event_type}
-              onChange={(e) => setFormData({ ...formData, event_type: e.target.value })}
-              placeholder="例如：婚礼/乔迁/满月"
+              id="gb-edit-name"
+              value={formData.name}
+              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              required
+              maxLength={128}
             />
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor="gb-edit-type">事件类型</Label>
+              <Input
+                id="gb-edit-type"
+                value={formData.event_type}
+                onChange={(e) => setFormData({ ...formData, event_type: e.target.value })}
+                placeholder="例如：婚礼/乔迁/满月"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="gb-edit-date">事件日期</Label>
+              <Input
+                id="gb-edit-date"
+                type="date"
+                value={formData.event_date}
+                onChange={(e) => setFormData({ ...formData, event_date: e.target.value })}
+              />
+            </div>
+          </div>
+
           <div className="space-y-2">
-            <Label htmlFor="gb-edit-date">事件日期</Label>
+            <Label htmlFor="gb-edit-location">地点</Label>
             <Input
-              id="gb-edit-date"
-              type="date"
-              value={formData.event_date}
-              onChange={(e) => setFormData({ ...formData, event_date: e.target.value })}
+              id="gb-edit-location"
+              value={formData.location}
+              onChange={(e) => setFormData({ ...formData, location: e.target.value })}
+              placeholder="可选"
             />
           </div>
-        </div>
 
-        <div className="space-y-2">
-          <Label htmlFor="gb-edit-location">地点</Label>
-          <Input
-            id="gb-edit-location"
-            value={formData.location}
-            onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-            placeholder="可选"
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="gb-edit-desc">备注</Label>
-          <Input
-            id="gb-edit-desc"
-            value={formData.description}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-            placeholder="可选"
-          />
-        </div>
+          <div className="space-y-2">
+            <Label htmlFor="gb-edit-desc">备注</Label>
+            <Input
+              id="gb-edit-desc"
+              value={formData.description}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              placeholder="可选"
+            />
+          </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => onClose(false)} disabled={isSubmitting}>

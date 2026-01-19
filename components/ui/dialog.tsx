@@ -40,7 +40,7 @@ const DialogContent = React.forwardRef<
         event.preventDefault()
       }}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] rounded-lg",
+        "fixed left-[50%] top-[50%] z-50 flex w-full max-w-lg max-h-[85vh] translate-x-[-50%] translate-y-[-50%] flex-col gap-4 overflow-hidden border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] rounded-lg",
         className
       )}
       {...props}
@@ -55,15 +55,32 @@ const DialogContent = React.forwardRef<
 ))
 DialogContent.displayName = DialogPrimitive.Content.displayName
 
+const DialogBody = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      // 只让内容区域滚动（配合 DialogContent 的 max-h + overflow-hidden）
+      "flex-1 min-h-0 overflow-y-auto overscroll-contain pr-1",
+      className
+    )}
+    data-slot="dialog-body"
+    {...props}
+  />
+)
+DialogBody.displayName = "DialogBody"
+
 const DialogHeader = ({
   className,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-col space-y-1.5 text-center sm:text-left",
+      "flex flex-col space-y-1.5 text-center sm:text-left shrink-0",
       className
     )}
+    data-slot="dialog-header"
     {...props}
   />
 )
@@ -75,9 +92,10 @@ const DialogFooter = ({
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-row flex-wrap justify-end gap-2",
+      "flex flex-row flex-wrap justify-end gap-2 shrink-0",
       className
     )}
+    data-slot="dialog-footer"
     {...props}
   />
 )
@@ -117,6 +135,7 @@ export {
   DialogTrigger,
   DialogClose,
   DialogContent,
+  DialogBody,
   DialogHeader,
   DialogFooter,
   DialogTitle,

@@ -17,6 +17,7 @@ type GiftRecordRow = {
   attachment_type: string | null;
   item_name: string | null;
   quantity: string | number | null;
+  unit: string | null;
   estimated_value: string | number | null;
   gift_date: string;
   notes: string | null;
@@ -71,6 +72,7 @@ export async function PATCH(
     const attachment_type =
       body.attachment_type !== undefined ? body.attachment_type : undefined;
     const item_name = body.item_name !== undefined ? body.item_name : existing.item_name;
+    const unit = body.unit !== undefined ? body.unit : (existing as GiftRecordRow).unit;
     const gift_date = body.gift_date !== undefined ? body.gift_date : existing.gift_date;
     const notes = body.notes !== undefined ? body.notes : existing.notes;
 
@@ -87,6 +89,7 @@ export async function PATCH(
     let amountNum: number | null = null;
     let qtyNum: number | null = null;
     let estimatedNum: number | null = null;
+    let unitVal: string | null = null;
 
     if (gift_type === "cash") {
       const amountVal = body.amount !== undefined ? body.amount : existing.amount;
@@ -99,6 +102,8 @@ export async function PATCH(
       if (!item_name || typeof item_name !== "string" || item_name.trim().length === 0) {
         return NextResponse.json({ error: "礼品名称为必填项" }, { status: 400 });
       }
+      unitVal =
+        typeof unit === "string" && unit.trim().length > 0 ? unit.trim() : (existing as GiftRecordRow).unit || "件";
 
       const qtyVal = body.quantity !== undefined ? body.quantity : existing.quantity;
       if (qtyVal !== undefined && qtyVal !== null && qtyVal !== "") {
@@ -132,6 +137,7 @@ export async function PATCH(
         attachment_type = ${attachment_type !== undefined ? attachment_type : existing.attachment_type},
         item_name = ${gift_type === "item" ? item_name.trim() : null},
         quantity = ${qtyNum},
+        unit = ${gift_type === "item" ? unitVal : null},
         estimated_value = ${estimatedNum},
         gift_date = ${gift_date},
         notes = ${notes || null},

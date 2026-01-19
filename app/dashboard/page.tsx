@@ -17,6 +17,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -44,6 +45,8 @@ import {
   FileText,
   ChevronDown,
   ChevronUp,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useRouter } from "next/navigation";
@@ -51,15 +54,37 @@ import type { Transaction, TransactionType, Summary, Category, Member } from "@/
 import { toast } from "@/hooks/use-toast";
 import { upload } from "@vercel/blob/client";
 
-function SummaryCards({ summary }: { summary: Summary }) {
+function SummaryCards({
+  summary,
+  showIncome,
+  onToggleIncomeVisibility,
+}: {
+  summary: Summary;
+  showIncome: boolean;
+  onToggleIncomeVisibility: () => void;
+}) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
       <Card>
         <CardContent className="pt-6">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
-              <p className="text-sm font-medium text-muted-foreground">总收入</p>
-              <p className="text-2xl font-bold text-green-600">{formatCurrency(summary.totalIncome)}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-medium text-muted-foreground">总收入</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={onToggleIncomeVisibility}
+                  aria-label={showIncome ? "隐藏收入金额" : "显示收入金额"}
+                >
+                  {showIncome ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </Button>
+              </div>
+              <p className="text-2xl font-bold text-green-600">
+                {showIncome ? formatCurrency(summary.totalIncome) : "****"}
+              </p>
             </div>
             <div className="flex items-center justify-center w-12 h-12 rounded-full bg-green-100">
               <TrendingUp className="h-6 w-6 text-green-600" />
@@ -87,7 +112,9 @@ function SummaryCards({ summary }: { summary: Summary }) {
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <p className="text-sm font-medium text-muted-foreground">结余</p>
-              <p className="text-2xl font-bold text-primary">{formatCurrency(summary.balance)}</p>
+              <p className="text-2xl font-bold text-primary">
+                {showIncome ? formatCurrency(summary.balance) : "****"}
+              </p>
             </div>
             <div className="flex items-center justify-center w-12 h-12 rounded-full bg-primary/10">
               <Calendar className="h-6 w-6 text-primary" />
@@ -106,6 +133,7 @@ export default function DashboardPage() {
     totalExpense: 0,
     balance: 0,
   });
+  const [showIncome, setShowIncome] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
@@ -307,7 +335,11 @@ export default function DashboardPage() {
             </CardHeader>
             {isMobileSummaryOpen ? (
               <CardContent className="pt-0">
-                <SummaryCards summary={summary} />
+                <SummaryCards
+                  summary={summary}
+                  showIncome={showIncome}
+                  onToggleIncomeVisibility={() => setShowIncome((v) => !v)}
+                />
               </CardContent>
             ) : null}
           </Card>
@@ -315,7 +347,11 @@ export default function DashboardPage() {
 
         {/* 桌面端：始终显示 */}
         <div className="hidden md:block">
-          <SummaryCards summary={summary} />
+          <SummaryCards
+            summary={summary}
+            showIncome={showIncome}
+            onToggleIncomeVisibility={() => setShowIncome((v) => !v)}
+          />
         </div>
 
         {/* Transactions */}
@@ -482,7 +518,9 @@ export default function DashboardPage() {
                               }`}
                             >
                               {transaction.type === "income" ? "+" : "-"}
-                              {formatCurrency(transaction.amount)}
+                              {transaction.type === "income" && !showIncome
+                                ? "****"
+                                : formatCurrency(transaction.amount)}
                             </span>
                           </td>
                           <td className="p-4">
@@ -611,7 +649,9 @@ export default function DashboardPage() {
                               }`}
                             >
                               {transaction.type === "income" ? "+" : "-"}
-                              {formatCurrency(transaction.amount)}
+                              {transaction.type === "income" && !showIncome
+                                ? "****"
+                                : formatCurrency(transaction.amount)}
                             </span>
                           </div>
 
@@ -725,22 +765,24 @@ export default function DashboardPage() {
             </DialogDescription>
           </DialogHeader>
 
-          {previewAttachment?.url ? (
-            previewAttachment.type?.startsWith("image/") ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={previewAttachment.url}
-                alt={previewAttachment.name || "附件图片"}
-                className="w-full max-h-[70vh] object-contain rounded-md border"
-              />
-            ) : (
-              <iframe
-                title={previewAttachment.name || "附件"}
-                src={previewAttachment.url}
-                className="w-full h-[70vh] rounded-md border"
-              />
-            )
-          ) : null}
+          <DialogBody className="flex items-center justify-center">
+            {previewAttachment?.url ? (
+              previewAttachment.type?.startsWith("image/") ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={previewAttachment.url}
+                  alt={previewAttachment.name || "附件图片"}
+                  className="w-full max-h-full object-contain rounded-md border"
+                />
+              ) : (
+                <iframe
+                  title={previewAttachment.name || "附件"}
+                  src={previewAttachment.url}
+                  className="w-full h-full rounded-md border"
+                />
+              )
+            ) : null}
+          </DialogBody>
 
           {previewAttachment?.url ? (
             <DialogFooter>
@@ -929,7 +971,8 @@ function TransactionModal({
           {mode === "add" ? "填写交易详情，记录您的收支情况" : "修改交易详情"}
         </DialogDescription>
       </DialogHeader>
-      <form onSubmit={handleSubmit} className="space-y-4 py-4">
+      <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+        <DialogBody className="space-y-4 py-4">
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
             <Label htmlFor={`${idPrefix}type`}>交易类型 *</Label>
@@ -1104,6 +1147,7 @@ function TransactionModal({
             </div>
           ) : null}
         </div>
+        </DialogBody>
 
         <DialogFooter>
           <Button

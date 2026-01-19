@@ -13,11 +13,20 @@ import {
   Gift,
   MessageSquare,
   HandCoins,
+  Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{
+    outcome: "accepted" | "dismissed";
+    platform: string;
+  }>;
+};
 
 const navItems = [
   {
@@ -57,7 +66,7 @@ const navItems = [
   },
   {
     href: "/dashboard/notes",
-    label: "留言",
+    label: "笔记",
     icon: MessageSquare,
   }
 ];
@@ -67,6 +76,59 @@ export function DashboardNav() {
   const router = useRouter();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] =
+    useState<BeforeInstallPromptEvent | null>(null);
+  const [isInstalling, setIsInstalling] = useState(false);
+
+  useEffect(() => {
+    const onBeforeInstallPrompt = (e: Event) => {
+      // 允许我们用自定义按钮触发安装
+      e.preventDefault();
+      setDeferredPrompt(e as BeforeInstallPromptEvent);
+    };
+
+    const onAppInstalled = () => {
+      setDeferredPrompt(null);
+      toast.success("已安装到桌面/主屏幕");
+    };
+
+    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+    window.addEventListener("appinstalled", onAppInstalled);
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", onAppInstalled);
+    };
+  }, []);
+
+  const handleInstall = async () => {
+    if (!("serviceWorker" in navigator)) {
+      toast.info("当前浏览器不支持 PWA 安装");
+      return;
+    }
+
+    if (!deferredPrompt) {
+      toast.info("若要安装，请使用浏览器菜单“添加到主屏幕/安装应用”");
+      return;
+    }
+
+    try {
+      setIsInstalling(true);
+      await deferredPrompt.prompt();
+      const choice = await deferredPrompt.userChoice;
+
+      if (choice.outcome === "accepted") {
+        toast.success("已发起安装");
+      } else {
+        toast.info("已取消安装");
+      }
+    } catch {
+      toast.error("安装失败，请重试");
+    } finally {
+      setDeferredPrompt(null);
+      setIsInstalling(false);
+    }
+  };
 
   const handleLogout = async () => {
     try {
@@ -131,7 +193,10 @@ export function DashboardNav() {
         {/* Navigation */}
         <nav className="p-4 space-y-2">
           {navItems.map((item) => {
-            const isActive = pathname === item.href;
+            const isActive =
+              item.href === "/dashboard"
+                ? pathname === "/dashboard"
+                : pathname === item.href || pathname.startsWith(`${item.href}/`);
             const Icon = item.icon;
 
             return (
@@ -157,16 +222,29 @@ export function DashboardNav() {
 
         {/* Logout */}
         <div className="absolute bottom-0 left-0 right-0 p-4 border-t">
-          <button
-            onClick={handleLogout}
-            disabled={isLoggingOut}
-            className="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-all w-full disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <LogOut className="h-5 w-5 shrink-0" />
-            <span className="text-sm font-medium">
-              {isLoggingOut ? "退出中..." : "退出登录"}
-            </span>
-          </button>
+          <div className="space-y-2">
+            <button
+              onClick={handleInstall}
+              disabled={isInstalling}
+              className="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-all w-full disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Download className="h-5 w-5 shrink-0" />
+              <span className="text-sm font-medium">
+                {isInstalling ? "安装中..." : "安装"}
+              </span>
+            </button>
+
+            <button
+              onClick={handleLogout}
+              disabled={isLoggingOut}
+              className="flex items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-all w-full disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <LogOut className="h-5 w-5 shrink-0" />
+              <span className="text-sm font-medium">
+                {isLoggingOut ? "退出中..." : "退出登录"}
+              </span>
+            </button>
+          </div>
         </div>
       </aside>
 

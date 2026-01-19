@@ -17,6 +17,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -396,7 +397,8 @@ function CategoryModal({
             {category ? "修改分类的信息" : "创建一个新的收支分类"}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4 py-4">
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+          <DialogBody className="space-y-4 py-4">
           <div className="space-y-2">
             <Label htmlFor="type">类型</Label>
             <Select 
@@ -457,6 +459,7 @@ function CategoryModal({
               maxLength={10}
             />
           </div>
+          </DialogBody>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={isSubmitting}>

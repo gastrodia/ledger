@@ -33,6 +33,7 @@ export async function ensureGiftBooksSchema() {
       id VARCHAR(36) PRIMARY KEY,
       user_id VARCHAR(36) NOT NULL,
       giftbook_id VARCHAR(36) NOT NULL,
+      group_id VARCHAR(36),
       direction VARCHAR(20) NOT NULL DEFAULT 'received' CHECK (direction IN ('received', 'given')),
       gift_type VARCHAR(20) NOT NULL CHECK (gift_type IN ('cash', 'item')),
       counterparty_name VARCHAR(128) NOT NULL,
@@ -43,6 +44,7 @@ export async function ensureGiftBooksSchema() {
       attachment_type VARCHAR(50),
       item_name VARCHAR(255),
       quantity DECIMAL(15, 2),
+      unit VARCHAR(32),
       estimated_value DECIMAL(15, 2),
       gift_date TIMESTAMP NOT NULL,
       notes TEXT,
@@ -54,12 +56,18 @@ export async function ensureGiftBooksSchema() {
   `;
 
   // If the table already existed before we added columns, ensure columns are present.
+  await sql`ALTER TABLE gift_records ADD COLUMN IF NOT EXISTS group_id VARCHAR(36)`;
   await sql`ALTER TABLE gift_records ADD COLUMN IF NOT EXISTS attachment_key VARCHAR(255)`;
   await sql`ALTER TABLE gift_records ADD COLUMN IF NOT EXISTS attachment_name VARCHAR(255)`;
   await sql`ALTER TABLE gift_records ADD COLUMN IF NOT EXISTS attachment_type VARCHAR(50)`;
+  await sql`ALTER TABLE gift_records ADD COLUMN IF NOT EXISTS unit VARCHAR(32)`;
 
   await sql`CREATE INDEX IF NOT EXISTS idx_gift_records_user_id ON gift_records(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_gift_records_giftbook_id ON gift_records(giftbook_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_gift_records_gift_date ON gift_records(gift_date)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_gift_records_group_id ON gift_records(group_id)`;
+
+  // 历史数据兼容：旧数据没有 group_id，按自身 id 回填
+  await sql`UPDATE gift_records SET group_id = id WHERE group_id IS NULL`;
 }
 

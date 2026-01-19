@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS gift_records (
     id VARCHAR(36) PRIMARY KEY,
     user_id VARCHAR(36) NOT NULL,
     giftbook_id VARCHAR(36) NOT NULL,
+    group_id VARCHAR(36),
     direction VARCHAR(20) NOT NULL DEFAULT 'received' CHECK (direction IN ('received', 'given')),
     gift_type VARCHAR(20) NOT NULL CHECK (gift_type IN ('cash', 'item')),
     counterparty_name VARCHAR(128) NOT NULL,
@@ -126,6 +127,7 @@ CREATE TABLE IF NOT EXISTS gift_records (
     attachment_type VARCHAR(50),
     item_name VARCHAR(255),
     quantity DECIMAL(15, 2),
+    unit VARCHAR(32),
     estimated_value DECIMAL(15, 2),
     gift_date TIMESTAMP NOT NULL,
     notes TEXT,
@@ -138,6 +140,7 @@ CREATE TABLE IF NOT EXISTS gift_records (
 CREATE INDEX IF NOT EXISTS idx_gift_records_user_id ON gift_records(user_id);
 CREATE INDEX IF NOT EXISTS idx_gift_records_giftbook_id ON gift_records(giftbook_id);
 CREATE INDEX IF NOT EXISTS idx_gift_records_gift_date ON gift_records(gift_date);
+CREATE INDEX IF NOT EXISTS idx_gift_records_group_id ON gift_records(group_id);
 
 -- =========================
 -- 送礼模块（独立台账：我送给别人的）

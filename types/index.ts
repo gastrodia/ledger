@@ -113,6 +113,7 @@ export interface GiftRecord {
   id: string;
   user_id: string;
   giftbook_id: string;
+  group_id?: string | null;
   gift_type: GiftRecordType;
   counterparty_name: string;
   amount?: number | null;
@@ -122,6 +123,7 @@ export interface GiftRecord {
   attachment_type?: string | null;
   item_name?: string | null;
   quantity?: number | null;
+  unit?: string | null;
   estimated_value?: number | null;
   gift_date: string;
   notes?: string | null;
