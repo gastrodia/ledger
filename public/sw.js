@@ -1,4 +1,4 @@
-const CACHE_NAME = "ledger-pwa-v1";
+const CACHE_NAME = "ledger-pwa-v2";
 const OFFLINE_URL = "/offline.html";
 
 self.addEventListener("install", (event) => {
@@ -32,6 +32,12 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
+  // API 一律走网络，避免缓存导致“列表不更新”
+  if (url.pathname.startsWith("/api/")) {
+    event.respondWith(fetch(request));
+    return;
+  }
+
   // 对页面导航使用“网络优先”，离线时回退到离线页
   if (request.mode === "navigate") {
     event.respondWith(
@@ -49,7 +55,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // 对静态资源使用“缓存优先 + 后台刷新”
+  // 静态资源：缓存优先 + 后台刷新（避免影响数据接口）
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE_NAME);

@@ -1,12 +1,12 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   FolderTree,
   Users,
-  Wallet,
   LogOut,
   Menu,
   BarChart3,
@@ -80,6 +80,17 @@ export function DashboardNav() {
     useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
 
+  const isIOS =
+    typeof navigator !== "undefined" &&
+    /iPad|iPhone|iPod/.test(navigator.userAgent) &&
+    // @ts-expect-error iOS Safari only
+    !window.MSStream;
+  // @ts-expect-error iOS Safari only
+  const isIOSStandalone = typeof navigator !== "undefined" && !!navigator.standalone;
+  const isStandalone =
+    typeof window !== "undefined" &&
+    (window.matchMedia?.("(display-mode: standalone)")?.matches ?? false);
+
   useEffect(() => {
     const onBeforeInstallPrompt = (e: Event) => {
       // 允许我们用自定义按钮触发安装
@@ -102,6 +113,16 @@ export function DashboardNav() {
   }, []);
 
   const handleInstall = async () => {
+    if (isIOS) {
+      if (isIOSStandalone || isStandalone) {
+        toast.success("已在主屏幕模式运行");
+        return;
+      }
+
+      toast.info("iPhone 请用 Safari 打开后：分享 → 添加到主屏幕");
+      return;
+    }
+
     if (!("serviceWorker" in navigator)) {
       toast.info("当前浏览器不支持 PWA 安装");
       return;
@@ -179,8 +200,15 @@ export function DashboardNav() {
       >
         {/* Logo */}
         <div className="flex items-center gap-3 h-16 px-6 border-b">
-          <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-linear-to-br from-primary to-secondary shadow-md">
-            <Wallet className="h-5 w-5 text-white" />
+          <div className="flex items-center justify-center ">
+            <Image
+              src="/icons/icon-maskable.svg"
+              alt="logo"
+              width={40}
+              height={40}
+              className="size-10"
+              priority
+            />
           </div>
           <div>
             <h1 className="font-bold text-lg">

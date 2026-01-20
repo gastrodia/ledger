@@ -24,13 +24,6 @@ export const metadata: Metadata = {
   formatDetection: {
     telephone: false,
   },
-  icons: {
-    icon: [
-      { url: "/icons/icon.svg", type: "image/svg+xml" },
-      { url: "/icons/icon-maskable.svg", type: "image/svg+xml", rel: "icon" },
-    ],
-    apple: [{ url: "/icons/icon.svg", type: "image/svg+xml" }],
-  },
 };
 
 export const viewport: Viewport = {
