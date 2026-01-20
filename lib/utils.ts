@@ -10,7 +10,7 @@ export function cn(...inputs: ClassValue[]) {
 export function formatCurrency(amount: number | string): string {
   const num = typeof amount === 'string' ? parseFloat(amount) : amount;
   // 使用简单的格式化方法，避免 Intl API 问题
-  return `¥${num.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
+  return `${num.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',')}`;
 }
 
 export function formatDate(date: string | Date): string {
