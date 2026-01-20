@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -63,6 +63,10 @@ export default function StatsPage() {
   const [statsData, setStatsData] = useState<StatsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showIncome, setShowIncome] = useState(false);
+  const [aiSummary, setAiSummary] = useState("");
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const aiAbortRef = useRef<AbortController | null>(null);
 
   // 加载统计数据
   const loadStats = async () => {
@@ -87,10 +91,88 @@ export default function StatsPage() {
     }
   };
 
+  const stopAiSummary = () => {
+    aiAbortRef.current?.abort();
+    aiAbortRef.current = null;
+    setIsAiLoading(false);
+  };
+
+  const getErrorMessage = (e: unknown) => {
+    if (e instanceof Error) return e.message;
+    return "AI 总结失败";
+  };
+
+  const generateAiSummary = async () => {
+    try {
+      setAiError(null);
+      setAiSummary("");
+      setIsAiLoading(true);
+
+      // 若上一次还在跑，先终止
+      aiAbortRef.current?.abort();
+      const controller = new AbortController();
+      aiAbortRef.current = controller;
+
+      const resp = await fetch(`/api/stats/ai-summary?month=${selectedMonth}`, {
+        method: "GET",
+        signal: controller.signal,
+      });
+
+      if (!resp.ok) {
+        if (resp.status === 401) {
+          router.push("/login");
+          return;
+        }
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "AI 总结失败");
+      }
+
+      if (!resp.body) {
+        throw new Error("浏览器不支持流式响应");
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let acc = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        acc += decoder.decode(value, { stream: true });
+        setAiSummary(acc);
+      }
+    } catch (e: unknown) {
+      if (
+        (e instanceof DOMException && e.name === "AbortError") ||
+        (e instanceof Error && e.name === "AbortError")
+      ) {
+        // 用户手动停止，不当作错误
+        return;
+      }
+      console.error("AI 总结失败:", e);
+      setAiError(getErrorMessage(e));
+    } finally {
+      aiAbortRef.current = null;
+      setIsAiLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedMonth]);
+
+  // 切换月份时，清空上一次 AI 总结并中断流
+  useEffect(() => {
+    stopAiSummary();
+    setAiSummary("");
+    setAiError(null);
+  }, [selectedMonth]);
+
+  // 组件卸载时，确保终止请求
+  useEffect(() => {
+    return () => stopAiSummary();
+  }, []);
 
   // 计算百分比
   const calculatePercentage = (amount: number, total: number): number => {
@@ -113,7 +195,7 @@ export default function StatsPage() {
               查看您的收支统计，了解资金流向
             </p>
           </div>
-          <div className="w-full sm:w-auto">
+          <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2 sm:items-center">
             <Input
               id="month-picker"
               type="month"
@@ -196,6 +278,44 @@ export default function StatsPage() {
                 </CardContent>
               </Card>
             </div>
+
+            {/* AI Summary */}
+            <Card>
+              <CardHeader className="border-b">
+                <div className="flex items-center justify-between gap-4">
+                  <CardTitle>AI总结</CardTitle>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      onClick={generateAiSummary}
+                      disabled={isLoading || !statsData || isAiLoading}
+                    >
+                      AI总结
+                    </Button>
+                    {isAiLoading ? (
+                      <Button type="button" variant="outline" onClick={stopAiSummary}>
+                        停止
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="pt-6">
+                {aiError ? (
+                  <div className="text-sm text-red-600 whitespace-pre-wrap">
+                    {aiError}
+                  </div>
+                ) : isAiLoading && !aiSummary ? (
+                  <div className="text-sm text-muted-foreground">AI 正在生成总结...</div>
+                ) : aiSummary ? (
+                  <div className="text-sm whitespace-pre-wrap leading-6">{aiSummary}</div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    点击右上角【AI总结】，生成当前月份的收支总结。
+                  </div>
+                )}
+              </CardContent>
+            </Card>
 
             {/* 四个独立的统计卡片 */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
