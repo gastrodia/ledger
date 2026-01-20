@@ -144,6 +144,7 @@ export default function DashboardPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [filterType, setFilterType] = useState<TransactionType | "all">("all");
   const [filterCategoryId, setFilterCategoryId] = useState<string>("__all__");
+  const [filterMemberId, setFilterMemberId] = useState<string>("__all__");
   const [isMobileSummaryOpen, setIsMobileSummaryOpen] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [previewAttachment, setPreviewAttachment] = useState<{
@@ -183,6 +184,7 @@ export default function DashboardPage() {
       const params = new URLSearchParams();
       if (filterType !== "all") params.append("type", filterType);
       if (filterCategoryId && filterCategoryId !== "__all__") params.append("categoryId", filterCategoryId);
+      if (filterMemberId && filterMemberId !== "__all__") params.append("memberId", filterMemberId);
       if (startDate) params.append("startDate", startDate);
       if (endDate) params.append("endDate", endDate);
 
@@ -237,10 +239,33 @@ export default function DashboardPage() {
     loadCategories();
     loadMembers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterType, filterCategoryId, startDate, endDate]);
+  }, [filterType, filterCategoryId, filterMemberId, startDate, endDate]);
 
   // 显示的交易记录就是从服务器获取的数据
   const filteredTransactions = transactions;
+
+  const incomeCategories = categories.filter((cat) => cat.type === "income");
+  const expenseCategories = categories.filter((cat) => cat.type === "expense");
+
+  const filterTypeCategoryValue = (() => {
+    if (filterType === "all") return "__all__";
+    if (!filterCategoryId || filterCategoryId === "__all__") return `${filterType}::__all__`;
+    return `${filterType}::${filterCategoryId}`;
+  })();
+
+  // 当类型变化/分类列表变化时，确保已选分类仍匹配当前类型
+  useEffect(() => {
+    // 未选择具体类型时，不允许选具体分类
+    if (filterType === "all") {
+      if (filterCategoryId !== "__all__") setFilterCategoryId("__all__");
+      return;
+    }
+    if (!filterCategoryId || filterCategoryId === "__all__") return;
+    const selected = categories.find((c) => c.id === filterCategoryId);
+    if (!selected || selected.type !== filterType) {
+      setFilterCategoryId("__all__");
+    }
+  }, [filterType, filterCategoryId, categories]);
 
   // 删除交易记录
   const handleDelete = async () => {
@@ -385,29 +410,58 @@ export default function DashboardPage() {
                 className={`${isMobileFiltersOpen ? "grid" : "hidden"} grid-cols-1 sm:grid-cols-2 md:grid md:grid-cols-4 gap-3`}
               >
                 <div className="space-y-1">
-                  <Label htmlFor="filter-type" className="text-xs text-muted-foreground">类型</Label>
-                  <Select value={filterType} onValueChange={(value) => setFilterType(value as TransactionType | "all")}>
-                    <SelectTrigger id="filter-type">
-                      <SelectValue placeholder="全部类型" />
+                  <Label htmlFor="filter-type-category" className="text-xs text-muted-foreground">收支分类</Label>
+                  <Select
+                    value={filterTypeCategoryValue}
+                    onValueChange={(value) => {
+                      if (value === "__all__") {
+                        setFilterType("all");
+                        setFilterCategoryId("__all__");
+                        return;
+                      }
+                      const [type, category] = value.split("::") as [
+                        TransactionType,
+                        string | undefined,
+                      ];
+                      setFilterType(type);
+                      setFilterCategoryId(category && category !== "__all__" ? category : "__all__");
+                    }}
+                  >
+                    <SelectTrigger id="filter-type-category">
+                      <SelectValue placeholder="全部收支" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="all">全部类型</SelectItem>
-                      <SelectItem value="income">收入</SelectItem>
-                      <SelectItem value="expense">支出</SelectItem>
+                      <SelectItem value="__all__">全部收支</SelectItem>
+                      <SelectItem value="income::__all__">全部收入</SelectItem>
+                      {incomeCategories.map((cat) => (
+                        <SelectItem key={cat.id} value={`income::${cat.id}`}>
+                          {cat.icon} {cat.name}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="expense::__all__">全部支出</SelectItem>
+                      {expenseCategories.map((cat) => (
+                        <SelectItem key={cat.id} value={`expense::${cat.id}`}>
+                          {cat.icon} {cat.name}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="filter-category" className="text-xs text-muted-foreground">分类</Label>
-                  <Select value={filterCategoryId} onValueChange={setFilterCategoryId}>
-                    <SelectTrigger id="filter-category">
-                      <SelectValue placeholder="全部分类" />
+                  <Label htmlFor="filter-member" className="text-xs text-muted-foreground">人员</Label>
+                  <Select
+                    value={filterMemberId}
+                    onValueChange={setFilterMemberId}
+                    disabled={members.length === 0}
+                  >
+                    <SelectTrigger id="filter-member">
+                      <SelectValue placeholder={members.length === 0 ? "暂无成员" : "全部人员"} />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="__all__">全部分类</SelectItem>
-                      {categories.map((cat) => (
-                        <SelectItem key={cat.id} value={cat.id}>
-                          {cat.icon} {cat.name}
+                      <SelectItem value="__all__">全部人员</SelectItem>
+                      {members.map((m) => (
+                        <SelectItem key={m.id} value={m.id}>
+                          {m.avatar} {m.name}
                         </SelectItem>
                       ))}
                     </SelectContent>

@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
  * 查询参数：
  * - type: 交易类型 'income' 或 'expense'，默认返回全部
  * - categoryId: 分类ID，默认返回所有分类
+ * - memberId: 成员ID，默认返回所有成员
  * - startDate: 开始日期，格式：YYYY-MM-DD
  * - endDate: 结束日期，格式：YYYY-MM-DD
  */
@@ -27,13 +28,14 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const type = searchParams.get('type'); // 'income' | 'expense' | null
     const categoryId = searchParams.get('categoryId');
+    const memberId = searchParams.get('memberId');
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
 
     // 构建查询条件
     let transactions;
     
-    if (!type && !categoryId && !startDate && !endDate) {
+    if (!type && !categoryId && !memberId && !startDate && !endDate) {
       // 无筛选条件
       transactions = await sql`
         SELECT 
@@ -75,6 +77,12 @@ export async function GET(request: NextRequest) {
       if (categoryId) {
         query += ` AND t.category_id = $${paramIndex}`;
         params.push(categoryId);
+        paramIndex++;
+      }
+
+      if (memberId) {
+        query += ` AND t.member_id = $${paramIndex}`;
+        params.push(memberId);
         paramIndex++;
       }
 
@@ -131,7 +139,7 @@ export async function GET(request: NextRequest) {
     // 计算统计摘要
     let summaryResult;
     
-    if (!type && !categoryId && !startDate && !endDate) {
+    if (!type && !categoryId && !memberId && !startDate && !endDate) {
       summaryResult = await sql`
         SELECT 
           SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as total_income,
@@ -160,6 +168,12 @@ export async function GET(request: NextRequest) {
       if (categoryId) {
         summaryQuery += ` AND category_id = $${paramIndex}`;
         params.push(categoryId);
+        paramIndex++;
+      }
+
+      if (memberId) {
+        summaryQuery += ` AND member_id = $${paramIndex}`;
+        params.push(memberId);
         paramIndex++;
       }
 
