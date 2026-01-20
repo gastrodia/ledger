@@ -42,6 +42,7 @@ export default function AppleIcon() {
             height: 124,
             borderRadius: 24,
             backgroundColor: "rgba(255,255,255,0.92)",
+            display: "flex",
             position: "relative",
             boxShadow: "0 10px 22px rgba(0,0,0,0.18)",
           }}
