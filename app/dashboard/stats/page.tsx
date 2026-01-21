@@ -340,7 +340,7 @@ export default function StatsPage() {
                   </div>
                 ) : (
                   <div className="text-sm text-muted-foreground">
-                    点击右上角【AI总结】，生成当前月份的收支总结（流式输出）。
+                    点击右上角【AI总结】，生成当前月份的收支总结。
                   </div>
                 )}
               </CardContent>
