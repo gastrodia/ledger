@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
 function formatYuan(amount: number) {
   const n = Number.isFinite(amount) ? amount : 0;
@@ -79,10 +79,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "未登录" }, { status: 401 });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
-        { error: "服务端未配置 GEMINI_API_KEY" },
+        { error: "服务端未配置 GROQ_API_KEY" },
         { status: 500 }
       );
     }
@@ -228,16 +228,22 @@ export async function GET(request: NextRequest) {
     if (request.signal.aborted) abortUpstream();
     request.signal.addEventListener("abort", abortUpstream);
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel(
-      { model: "gemini-2.0-flash" },
-      { apiVersion: "v1beta" }
-    );
+    const groq = new Groq({ apiKey });
 
-    const result = await model.generateContentStream(
+    const result = await groq.chat.completions.create(
       {
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 800 },
+        model: "llama-3.1-8b-instant",
+        temperature: 0.2,
+        max_tokens: 1024,
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是一个记账助手，请用简体中文输出。请用 Markdown（标题/列表/加粗）组织内容，以便前端渲染成正常页面；不要输出代码块；不要编造数据。",
+          },
+          { role: "user", content: prompt },
+        ],
       },
       { signal: upstreamController.signal }
     );
@@ -247,18 +253,18 @@ export async function GET(request: NextRequest) {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         try {
-          for await (const chunk of result.stream) {
-            let text = "";
-            try {
-              text = chunk.text();
-            } catch {
-              // prompt/candidate 被安全策略拦截等情况下，text() 可能抛错
-              text = "";
-            }
-            if (text) controller.enqueue(encoder.encode(text));
+          for await (const chunk of result) {
+            const delta = chunk.choices?.[0]?.delta?.content ?? "";
+            if (delta) controller.enqueue(encoder.encode(delta));
           }
-        } catch {
-          // 客户端取消/网络中断等，直接结束即可
+        } catch (e: unknown) {
+          // 客户端取消/网络中断等，直接结束即可；非取消则把原因写回去
+          if (!upstreamController.signal.aborted && !request.signal.aborted) {
+            const msg = e instanceof Error ? e.message : String(e);
+            controller.enqueue(
+              encoder.encode(`\n\n（AI 生成中断：${msg}）\n`)
+            );
+          }
         } finally {
           controller.close();
           request.signal.removeEventListener("abort", abortUpstream);

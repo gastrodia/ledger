@@ -5,6 +5,9 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -308,10 +311,36 @@ export default function StatsPage() {
                 ) : isAiLoading && !aiSummary ? (
                   <div className="text-sm text-muted-foreground">AI 正在生成总结...</div>
                 ) : aiSummary ? (
-                  <div className="text-sm whitespace-pre-wrap leading-6">{aiSummary}</div>
+                  <div className="text-sm leading-6">
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeSanitize]}
+                      components={{
+                        h1: (props) => (
+                          <h1 className="text-lg font-semibold mb-3" {...props} />
+                        ),
+                        h2: (props) => (
+                          <h2 className="text-base font-semibold mt-4 mb-2" {...props} />
+                        ),
+                        h3: (props) => (
+                          <h3 className="text-sm font-semibold mt-3 mb-2" {...props} />
+                        ),
+                        p: (props) => <p className="my-2 whitespace-pre-wrap" {...props} />,
+                        ul: (props) => <ul className="list-disc pl-5 my-2 space-y-1" {...props} />,
+                        ol: (props) => <ol className="list-decimal pl-5 my-2 space-y-1" {...props} />,
+                        li: (props) => <li className="whitespace-pre-wrap" {...props} />,
+                        strong: (props) => <strong className="font-semibold" {...props} />,
+                        a: (props) => (
+                          <a className="underline underline-offset-4" target="_blank" rel="noreferrer" {...props} />
+                        ),
+                      }}
+                    >
+                      {aiSummary}
+                    </ReactMarkdown>
+                  </div>
                 ) : (
                   <div className="text-sm text-muted-foreground">
-                    点击右上角【AI总结】，生成当前月份的收支总结。
+                    点击右上角【AI总结】，生成当前月份的收支总结（流式输出）。
                   </div>
                 )}
               </CardContent>
