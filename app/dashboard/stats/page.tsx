@@ -5,6 +5,13 @@ import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
@@ -62,7 +69,20 @@ export default function StatsPage() {
     return `${year}-${month}`;
   };
 
+  // 获取当前年份 (YYYY)
+  const getCurrentYear = () => {
+    return String(new Date().getFullYear());
+  };
+
+  const yearOptions = (() => {
+    const current = new Date().getFullYear();
+    // 默认提供近 20 年（含今年）
+    return Array.from({ length: 20 }, (_, i) => String(current - i));
+  })();
+
+  const [viewMode, setViewMode] = useState<"month" | "year">("month");
   const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentMonth());
+  const [selectedYear, setSelectedYear] = useState<string>(getCurrentYear());
   const [statsData, setStatsData] = useState<StatsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showIncome, setShowIncome] = useState(false);
@@ -71,11 +91,29 @@ export default function StatsPage() {
   const [isAiLoading, setIsAiLoading] = useState(false);
   const aiAbortRef = useRef<AbortController | null>(null);
 
+  const isValidYear = (y: string) => /^\d{4}$/.test(y);
+  const isValidMonth = (m: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(m);
+
   // 加载统计数据
   const loadStats = async () => {
     try {
+      if (viewMode === "year" && !isValidYear(selectedYear)) {
+        setStatsData(null);
+        setIsLoading(false);
+        return;
+      }
+      if (viewMode === "month" && !isValidMonth(selectedMonth)) {
+        setStatsData(null);
+        setIsLoading(false);
+        return;
+      }
+
       setIsLoading(true);
-      const response = await fetch(`/api/stats?month=${selectedMonth}`);
+      const query =
+        viewMode === "year"
+          ? `year=${encodeURIComponent(selectedYear)}`
+          : `month=${encodeURIComponent(selectedMonth)}`;
+      const response = await fetch(`/api/stats?${query}`);
       
       if (!response.ok) {
         if (response.status === 401) {
@@ -107,6 +145,19 @@ export default function StatsPage() {
 
   const generateAiSummary = async () => {
     try {
+      if (viewMode === "year" && !isValidYear(selectedYear)) {
+        setAiError("年份格式错误，应为 YYYY");
+        setAiSummary("");
+        setIsAiLoading(false);
+        return;
+      }
+      if (viewMode === "month" && !isValidMonth(selectedMonth)) {
+        setAiError("月份格式错误，应为 YYYY-MM");
+        setAiSummary("");
+        setIsAiLoading(false);
+        return;
+      }
+
       setAiError(null);
       setAiSummary("");
       setIsAiLoading(true);
@@ -116,7 +167,12 @@ export default function StatsPage() {
       const controller = new AbortController();
       aiAbortRef.current = controller;
 
-      const resp = await fetch(`/api/stats/ai-summary?month=${selectedMonth}`, {
+      const query =
+        viewMode === "year"
+          ? `year=${encodeURIComponent(selectedYear)}`
+          : `month=${encodeURIComponent(selectedMonth)}`;
+
+      const resp = await fetch(`/api/stats/ai-summary?${query}`, {
         method: "GET",
         signal: controller.signal,
       });
@@ -163,14 +219,14 @@ export default function StatsPage() {
   useEffect(() => {
     loadStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedMonth]);
+  }, [viewMode, selectedMonth, selectedYear]);
 
   // 切换月份时，清空上一次 AI 总结并中断流
   useEffect(() => {
     stopAiSummary();
     setAiSummary("");
     setAiError(null);
-  }, [selectedMonth]);
+  }, [viewMode, selectedMonth, selectedYear]);
 
   // 组件卸载时，确保终止请求
   useEffect(() => {
@@ -199,13 +255,45 @@ export default function StatsPage() {
             </p>
           </div>
           <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2 sm:items-center">
-            <Input
-              id="month-picker"
-              type="month"
-              value={selectedMonth}
-              onChange={(e) => setSelectedMonth(e.target.value)}
-              className="w-full sm:w-[200px]"
-            />
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant={viewMode === "month" ? "default" : "outline"}
+                onClick={() => setViewMode("month")}
+              >
+                按月
+              </Button>
+              <Button
+                type="button"
+                variant={viewMode === "year" ? "default" : "outline"}
+                onClick={() => setViewMode("year")}
+              >
+                按年
+              </Button>
+            </div>
+
+            {viewMode === "month" ? (
+              <Input
+                id="month-picker"
+                type="month"
+                value={selectedMonth}
+                onChange={(e) => setSelectedMonth(e.target.value)}
+                className="w-full sm:w-[200px]"
+              />
+            ) : (
+              <Select value={selectedYear} onValueChange={setSelectedYear}>
+                <SelectTrigger className="w-full sm:w-[200px]" id="year-picker">
+                  <SelectValue placeholder="选择年份" />
+                </SelectTrigger>
+                <SelectContent>
+                  {yearOptions.map((y) => (
+                    <SelectItem key={y} value={y}>
+                      {y} 年
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
         </div>
 
@@ -340,7 +428,7 @@ export default function StatsPage() {
                   </div>
                 ) : (
                   <div className="text-sm text-muted-foreground">
-                    点击右上角【AI总结】，生成当前月份的收支总结。
+                    点击右上角【AI总结】，生成当前{viewMode === "month" ? "月份" : "年份"}的收支总结。
                   </div>
                 )}
               </CardContent>

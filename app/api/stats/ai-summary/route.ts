@@ -3,6 +3,33 @@ import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import Groq from "groq-sdk";
 
+function isValidMonth(month: string) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
+}
+
+function isValidYear(year: string) {
+  return /^\d{4}$/.test(year);
+}
+
+function getMonthRangeExclusive(month: string) {
+  const [y, m] = month.split("-");
+  const year = Number(y);
+  const monthNum = Number(m); // 1-12
+  const start = `${y}-${m}-01`;
+  const next = new Date(year, monthNum, 1);
+  const nextY = next.getFullYear();
+  const nextM = String(next.getMonth() + 1).padStart(2, "0");
+  const endExclusive = `${nextY}-${nextM}-01`;
+  return { start, endExclusive };
+}
+
+function getYearRangeExclusive(yearStr: string) {
+  const year = Number(yearStr);
+  const start = `${yearStr}-01-01`;
+  const endExclusive = `${year + 1}-01-01`;
+  return { start, endExclusive };
+}
+
 function formatYuan(amount: number) {
   const n = Number.isFinite(amount) ? amount : 0;
   return `¥${n.toFixed(2)}`;
@@ -14,7 +41,7 @@ function safeNumber(v: unknown): number {
 }
 
 function buildPrompt(params: {
-  month: string;
+  period: string;
   totalIncome: number;
   totalExpense: number;
   balance: number;
@@ -24,7 +51,7 @@ function buildPrompt(params: {
   topIncomeMembers: Array<{ name: string; total: number; count: number }>;
 }) {
   const {
-    month,
+    period,
     totalIncome,
     totalExpense,
     balance,
@@ -45,14 +72,14 @@ function buildPrompt(params: {
       : "（无）";
 
   return [
-    "你是一个记账助手，请用简体中文对指定月份的收支做“可读、可执行”的总结。",
+    "你是一个记账助手，请用简体中文对指定期间的收支做“可读、可执行”的总结。",
     "",
     "要求：",
     "- 输出为纯文本，尽量使用小标题 + 要点列表。",
     "- 不要编造不存在的数据；只基于我提供的统计数据。",
     "- 给出 2-4 条可执行建议（控制支出、提升结余、异常波动提醒等）。",
     "",
-    `月份：${month}`,
+    `期间：${period}`,
     `总收入：${formatYuan(totalIncome)}`,
     `总支出：${formatYuan(totalExpense)}`,
     `结余：${formatYuan(balance)}`,
@@ -89,18 +116,40 @@ export async function GET(request: NextRequest) {
 
     const searchParams = request.nextUrl.searchParams;
     const month = searchParams.get("month"); // YYYY-MM
-    if (!month) {
-      return NextResponse.json({ error: "缺少月份参数" }, { status: 400 });
+    const year = searchParams.get("year"); // YYYY
+    if ((month && year) || (!month && !year)) {
+      return NextResponse.json(
+        { error: "参数错误：month 与 year 需二选一" },
+        { status: 400 }
+      );
     }
 
-    const [year, monthNum] = month.split("-");
-    if (!year || !monthNum) {
-      return NextResponse.json({ error: "月份格式错误，应为 YYYY-MM" }, { status: 400 });
+    let startDate: string;
+    let endExclusive: string;
+    let periodLabel: string;
+    if (month) {
+      if (!isValidMonth(month)) {
+        return NextResponse.json(
+          { error: "月份格式错误，应为 YYYY-MM" },
+          { status: 400 }
+        );
+      }
+      const r = getMonthRangeExclusive(month);
+      startDate = r.start;
+      endExclusive = r.endExclusive;
+      periodLabel = month;
+    } else {
+      if (!isValidYear(year as string)) {
+        return NextResponse.json(
+          { error: "年份格式错误，应为 YYYY" },
+          { status: 400 }
+        );
+      }
+      const r = getYearRangeExclusive(year as string);
+      startDate = r.start;
+      endExclusive = r.endExclusive;
+      periodLabel = `${year} 年`;
     }
-
-    const startDate = `${year}-${monthNum}-01`;
-    const endDate = new Date(parseInt(year, 10), parseInt(monthNum, 10), 0).getDate();
-    const endDateStr = `${year}-${monthNum}-${endDate.toString().padStart(2, "0")}`;
 
     // 取 Top 数据（减少 prompt 体积）
     const [categoryIncomeStats, categoryExpenseStats, memberIncomeStats, memberExpenseStats, summaryResult] =
@@ -115,7 +164,7 @@ export async function GET(request: NextRequest) {
           WHERE t.user_id = ${session.userId}
             AND t.type = 'income'
             AND t.transaction_date >= ${startDate}
-            AND t.transaction_date <= ${endDateStr}
+            AND t.transaction_date < ${endExclusive}
           GROUP BY COALESCE(c.name, '未分类')
           ORDER BY total DESC
           LIMIT 5
@@ -130,7 +179,7 @@ export async function GET(request: NextRequest) {
           WHERE t.user_id = ${session.userId}
             AND t.type = 'expense'
             AND t.transaction_date >= ${startDate}
-            AND t.transaction_date <= ${endDateStr}
+            AND t.transaction_date < ${endExclusive}
           GROUP BY COALESCE(c.name, '未分类')
           ORDER BY total DESC
           LIMIT 5
@@ -145,7 +194,7 @@ export async function GET(request: NextRequest) {
           WHERE t.user_id = ${session.userId}
             AND t.type = 'income'
             AND t.transaction_date >= ${startDate}
-            AND t.transaction_date <= ${endDateStr}
+            AND t.transaction_date < ${endExclusive}
           GROUP BY COALESCE(m.name, '未分配')
           ORDER BY total DESC
           LIMIT 5
@@ -160,7 +209,7 @@ export async function GET(request: NextRequest) {
           WHERE t.user_id = ${session.userId}
             AND t.type = 'expense'
             AND t.transaction_date >= ${startDate}
-            AND t.transaction_date <= ${endDateStr}
+            AND t.transaction_date < ${endExclusive}
           GROUP BY COALESCE(m.name, '未分配')
           ORDER BY total DESC
           LIMIT 5
@@ -172,7 +221,7 @@ export async function GET(request: NextRequest) {
           FROM transactions
           WHERE user_id = ${session.userId}
             AND transaction_date >= ${startDate}
-            AND transaction_date <= ${endDateStr}
+            AND transaction_date < ${endExclusive}
         `,
       ]);
 
@@ -185,7 +234,7 @@ export async function GET(request: NextRequest) {
     const balance = totalIncome - totalExpense;
 
     const prompt = buildPrompt({
-      month,
+      period: periodLabel,
       totalIncome,
       totalExpense,
       balance,
