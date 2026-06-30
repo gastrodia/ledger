@@ -165,6 +165,42 @@ export async function GET(request: NextRequest) {
     `;
 
     const summary = summaryResult[0] || { totalIncome: 0, totalExpense: 0 };
+    let monthlyStats: Array<{ month: number; income: number; expense: number }> = [];
+
+    if (year) {
+      const monthlyResult = await sql`
+        SELECT
+          EXTRACT(MONTH FROM transaction_date)::int as month,
+          COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as income,
+          COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as expense
+        FROM transactions
+        WHERE user_id = ${session.userId}
+          AND transaction_date >= ${startDate}
+          AND transaction_date < ${endExclusive}
+        GROUP BY month
+        ORDER BY month ASC
+      `;
+
+      const monthlyMap = new Map(
+        monthlyResult.map((row) => [
+          Number(row.month),
+          {
+            income: Number(row.income) || 0,
+            expense: Number(row.expense) || 0,
+          },
+        ])
+      );
+
+      monthlyStats = Array.from({ length: 12 }, (_, index) => {
+        const monthNumber = index + 1;
+        const monthData = monthlyMap.get(monthNumber);
+        return {
+          month: monthNumber,
+          income: monthData?.income || 0,
+          expense: monthData?.expense || 0,
+        };
+      });
+    }
 
     return NextResponse.json({
       data: {
@@ -181,6 +217,7 @@ export async function GET(request: NextRequest) {
           totalExpense: Number(summary.totalExpense) || 0,
           balance: (Number(summary.totalIncome) || 0) - (Number(summary.totalExpense) || 0),
         },
+        monthlyStats,
       },
     });
   } catch (error) {

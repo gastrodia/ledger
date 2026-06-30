@@ -56,6 +56,114 @@ interface StatsData {
     totalExpense: number;
     balance: number;
   };
+  monthlyStats?: MonthlyStat[];
+}
+
+interface MonthlyStat {
+  month: number;
+  income: number;
+  expense: number;
+}
+
+function YearlyBarChart({
+  monthlyStats,
+  showIncome,
+}: {
+  monthlyStats: MonthlyStat[];
+  showIncome: boolean;
+}) {
+  const visibleValues = monthlyStats.flatMap((stat) =>
+    showIncome ? [stat.expense, stat.income] : [stat.expense]
+  );
+  const maxAmount = Math.max(...visibleValues, 0);
+  const axisMax = maxAmount > 0 ? maxAmount : 1;
+  const halfAmount = axisMax / 2;
+
+  return (
+    <Card>
+      <CardHeader className="border-b">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <CardTitle>年度收支趋势</CardTitle>
+          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
+              支出
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-2.5 w-2.5 rounded-sm bg-green-500" />
+              {showIncome ? "收入" : "收入已隐藏"}
+            </span>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="pt-6">
+        {maxAmount === 0 ? (
+          <div className="text-center py-8 text-muted-foreground text-sm">
+            暂无年度收支记录
+          </div>
+        ) : (
+          <div className="overflow-x-auto pb-2">
+            <div className="min-w-[680px]">
+              <div className="grid grid-cols-[64px_1fr] gap-3">
+                <div className="relative h-56 text-xs text-muted-foreground">
+                  <span className="absolute right-0 top-0">
+                    {formatCurrency(axisMax)}
+                  </span>
+                  <span className="absolute right-0 top-1/2 -translate-y-1/2">
+                    {formatCurrency(halfAmount)}
+                  </span>
+                  <span className="absolute right-0 bottom-0">
+                    {formatCurrency(0)}
+                  </span>
+                </div>
+                <div className="relative h-56 border-l border-b border-border">
+                  <div className="absolute inset-x-0 top-0 border-t border-dashed border-muted" />
+                  <div className="absolute inset-x-0 top-1/2 border-t border-dashed border-muted" />
+                  <div className="absolute inset-0 grid grid-cols-12 items-end gap-3 px-3">
+                    {monthlyStats.map((stat) => {
+                      const expenseHeight = `${Math.max((stat.expense / axisMax) * 100, stat.expense > 0 ? 2 : 0)}%`;
+                      const incomeHeight = `${Math.max((stat.income / axisMax) * 100, stat.income > 0 ? 2 : 0)}%`;
+                      const title = showIncome
+                        ? `${stat.month}月：支出 ${formatCurrency(stat.expense)}，收入 ${formatCurrency(stat.income)}`
+                        : `${stat.month}月：支出 ${formatCurrency(stat.expense)}，收入已隐藏`;
+
+                      return (
+                        <div
+                          key={stat.month}
+                          className="flex h-full items-end justify-center gap-1"
+                          title={title}
+                          aria-label={title}
+                        >
+                          <div
+                            className="w-3 rounded-t-sm bg-red-500 transition-all"
+                            style={{ height: expenseHeight }}
+                          />
+                          {showIncome ? (
+                            <div
+                              className="w-3 rounded-t-sm bg-green-500 transition-all"
+                              style={{ height: incomeHeight }}
+                            />
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-[64px_1fr] gap-3 pt-2">
+                <div />
+                <div className="grid grid-cols-12 gap-3 px-3 text-center text-xs text-muted-foreground">
+                  {monthlyStats.map((stat) => (
+                    <span key={stat.month}>{stat.month}月</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function StatsPage() {
@@ -369,6 +477,13 @@ export default function StatsPage() {
                 </CardContent>
               </Card>
             </div>
+
+            {viewMode === "year" ? (
+              <YearlyBarChart
+                monthlyStats={statsData.monthlyStats || []}
+                showIncome={showIncome}
+              />
+            ) : null}
 
             {/* AI Summary */}
             <Card>
