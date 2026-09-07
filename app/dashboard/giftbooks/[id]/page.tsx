@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
+import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
+import { useFormDraft } from "@/hooks/use-form-draft";
+import { DraftNotice } from "@/components/ui/draft-notice";
+
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
@@ -25,7 +30,7 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/use-confirm";
 import type { GiftBook, GiftBookSummary } from "@/types";
-import { upload } from "@vercel/blob/client";
+import { upload } from "@/lib/upload";
 
 type GiftBookDetail = GiftBook & { summary?: GiftBookSummary };
 
@@ -72,7 +77,24 @@ function toDateTimeLocal(iso: string) {
   return `${year}-${month}-${day}T${hh}:${mm}`;
 }
 
+type FormCloseGuard = (onClose: () => void) => Promise<boolean>;
+type RegisterCloseGuard = (guard: FormCloseGuard) => () => void;
+
+function useFormCloseBridge() {
+  const guardRef = useRef<FormCloseGuard | null>(null);
+  const register = useCallback((guard: FormCloseGuard) => {
+    guardRef.current = guard;
+    return () => { if (guardRef.current === guard) guardRef.current = null; };
+  }, []);
+  const close = useCallback((onClose: () => void) => {
+    if (guardRef.current) void guardRef.current(onClose);
+    else onClose();
+  }, []);
+  return { register, close };
+}
+
 export default function GiftBookDetailPage() {
+  const formClose = useFormCloseBridge();
   const router = useRouter();
   const { confirm } = useConfirm();
 
@@ -82,6 +104,7 @@ export default function GiftBookDetailPage() {
   const [giftbook, setGiftbook] = useState<GiftBookDetail | null>(null);
   const [records, setRecords] = useState<GiftBookRecordGroupListItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<{
     url: string;
     name?: string | null;
@@ -110,6 +133,12 @@ export default function GiftBookDetailPage() {
     if (hasItems) p.append("hasItems", "true");
     return p.toString();
   }, [q, hasCash, hasItems]);
+
+  const hasFilters = !!(q.trim() || hasCash || hasItems);
+  const clearFilters = () => {
+    setIsLoading(true);
+    setQ(""); setHasCash(false); setHasItems(false);
+  };
 
   const loadGiftBook = async () => {
     if (!giftbookId) return null;
@@ -142,6 +171,7 @@ export default function GiftBookDetailPage() {
   const refreshAll = async () => {
     try {
       setIsLoading(true);
+      setLoadError(null);
       if (!giftbookId) {
         setGiftbook(null);
         setRecords([]);
@@ -150,18 +180,33 @@ export default function GiftBookDetailPage() {
       const [gb, recs] = await Promise.all([loadGiftBook(), loadRecords()]);
       if (gb) setGiftbook(gb);
       setRecords(recs);
+      setLoadError(null);
     } catch (e) {
       console.error("加载礼簿详情失败:", e);
-      toast.error(e instanceof Error ? e.message : "加载失败，请重试");
+      setLoadError(e instanceof Error ? e.message : "加载失败，请重试");
     } finally {
       setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    refreshAll();
+    let active = true;
+    Promise.all([loadGiftBook(), loadRecords()])
+      .then(([gb, recs]) => {
+        if (!active) return;
+        setGiftbook(gb);
+        setRecords(recs);
+        setLoadError(null);
+      })
+      .catch((error) => {
+        if (active) setLoadError(error instanceof Error ? error.message : "加载失败，请重试");
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
+    return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryString]);
+  }, [q, hasCash, hasItems, giftbookId]);
 
   const openAdd = () => {
     setModalMode("add");
@@ -229,7 +274,7 @@ export default function GiftBookDetailPage() {
   const handleDeleteGroup = async (g: GiftBookRecordGroupListItem) => {
     const ok = await confirm({
       title: "删除记录",
-      description: "确定要删除这条礼簿记录吗？该次收礼的礼金与礼品会一起删除，且无法撤销。",
+      description: "将永久删除这次收礼的礼金、礼品明细及附件。已关联收支会保留，仅解除关联。此操作无法撤销。",
       confirmText: "删除",
       cancelText: "取消",
     });
@@ -250,9 +295,20 @@ export default function GiftBookDetailPage() {
   };
 
   const handleDeleteGiftBook = async () => {
+    let recordCount = giftbook?.summary?.recordCount;
+    if (!Number.isSafeInteger(recordCount) || recordCount! < 0) {
+      try {
+        const details = await loadGiftBook();
+        recordCount = details?.summary?.recordCount;
+        if (!Number.isSafeInteger(recordCount) || recordCount! < 0) throw new Error("无法核实礼簿记录数量，请稍后重试");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "无法核实删除范围");
+        return;
+      }
+    }
     const ok = await confirm({
       title: "删除礼簿",
-      description: "确定要删除这个礼簿吗？礼簿下的记录会一起删除，且无法撤销。",
+      description: `将永久删除本礼簿、${recordCount} 条礼金/礼品明细及相关附件。已关联收支会保留，仅解除关联。此操作无法撤销。`,
       confirmText: "删除",
       cancelText: "取消",
     });
@@ -274,6 +330,7 @@ export default function GiftBookDetailPage() {
 
   return (
     <DashboardLayout>
+      <TransactionLinksProvider sourceType="gift_group" sourceIds={records.map((record) => record.id)}>
       <div className="space-y-6">
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
@@ -351,7 +408,7 @@ export default function GiftBookDetailPage() {
           <Card>
             <CardContent className="pt-6">
               <div className="space-y-1">
-                <p className="text-sm font-medium text-muted-foreground">记录数</p>
+                <p className="text-sm font-medium text-muted-foreground">礼金/礼品明细数</p>
                 <p className="text-2xl font-bold text-primary">
                   {giftbook?.summary?.recordCount ?? 0}
                 </p>
@@ -360,11 +417,12 @@ export default function GiftBookDetailPage() {
           </Card>
         </div>
 
+        <p className="text-xs text-muted-foreground">以上为本礼簿全部记录汇总，不随下方筛选变化；礼簿不自动进入收支统计。</p>
         {/* Filters + Records */}
         <Card>
           <CardHeader className="border-b">
             <div className="flex flex-col gap-4">
-              <CardTitle>礼簿记录</CardTitle>
+              <div className="flex items-center justify-between gap-3"><CardTitle>礼簿记录</CardTitle>{hasFilters && <Button variant="ghost" size="sm" onClick={clearFilters}>清除筛选</Button>}</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label htmlFor="q" className="text-xs text-muted-foreground">
@@ -373,7 +431,7 @@ export default function GiftBookDetailPage() {
                   <Input
                     id="q"
                     value={q}
-                    onChange={(e) => setQ(e.target.value)}
+                    onChange={(e) => { setIsLoading(true); setQ(e.target.value); }}
                     placeholder="按姓名/备注搜索"
                   />
                 </div>
@@ -381,11 +439,11 @@ export default function GiftBookDetailPage() {
                   <Label className="text-xs text-muted-foreground">包含</Label>
                   <div className="flex flex-wrap items-center gap-4 pt-2">
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Checkbox checked={hasCash} onCheckedChange={(v) => setHasCash(!!v)} />
+                      <Checkbox checked={hasCash} onCheckedChange={(v) => { setIsLoading(true); setHasCash(!!v); }} />
                       礼金
                     </label>
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Checkbox checked={hasItems} onCheckedChange={(v) => setHasItems(!!v)} />
+                      <Checkbox checked={hasItems} onCheckedChange={(v) => { setIsLoading(true); setHasItems(!!v); }} />
                       礼品
                     </label>
                   </div>
@@ -396,14 +454,19 @@ export default function GiftBookDetailPage() {
           <CardContent className="p-0">
             {isLoading ? (
               <div className="text-center py-12 text-muted-foreground">加载中...</div>
+            ) : loadError ? (
+              <div role="alert" className="space-y-3 px-4 py-10 text-center">
+                <p className="text-sm text-destructive">{loadError}</p>
+                <Button variant="outline" onClick={refreshAll}>重新加载</Button>
+              </div>
             ) : records.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
                 <div className="text-5xl mb-4">🎁</div>
-                <p className="text-lg font-medium mb-2">暂无记录</p>
-                <p className="text-sm mb-4">开始在这个礼簿里添加第一条记录</p>
-                <Button variant="outline" onClick={openAdd}>
+                <p className="text-lg font-medium mb-2">{hasFilters ? "没有符合筛选条件的礼簿记录" : "还没有礼簿记录"}</p>
+                <p className="text-sm mb-4">{hasFilters ? "试试其他关键词，或清除筛选查看全部记录" : "开始在这个礼簿里添加第一条记录"}</p>
+                <Button variant="outline" onClick={hasFilters ? clearFilters : openAdd}>
                   <Plus className="h-4 w-4" />
-                  添加第一条记录
+                  {hasFilters ? "清除筛选" : "添加第一条记录"}
                 </Button>
               </div>
             ) : (
@@ -465,6 +528,7 @@ export default function GiftBookDetailPage() {
                                 </button>
                               ) : null}
                             </div>
+                            <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.counterparty_name}的收礼记录`} /></div>
                           </td>
                           <td className="p-4 text-right">
                             {g.cash_amount ? formatCurrency(g.cash_amount) : "-"}
@@ -524,6 +588,7 @@ export default function GiftBookDetailPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{g.counterparty_name}</div>
+                          <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.counterparty_name}的收礼记录`} /></div>
                           <div className="text-sm text-muted-foreground mt-1">
                             {formatDate(g.gift_date)}
                           </div>
@@ -603,11 +668,13 @@ export default function GiftBookDetailPage() {
         <Dialog
           open={isModalOpen}
           onOpenChange={(open) => {
-            setIsModalOpen(open);
-            if (!open) setEditingGroup(null);
+            if (open) setIsModalOpen(true);
+            else formClose.close(() => { setIsModalOpen(false); setEditingGroup(null); });
           }}
         >
           <GiftBookRecordModal
+            enabled={isModalOpen}
+            registerCloseGuard={formClose.register}
             key={
               isModalOpen ? `${modalMode}-${editingGroup?.id || "new"}` : "closed"
             }
@@ -738,17 +805,22 @@ export default function GiftBookDetailPage() {
           </DialogContent>
         </Dialog>
       </div>
+      </TransactionLinksProvider>
     </DashboardLayout>
   );
 }
 
 function GiftBookRecordModal({
+  registerCloseGuard,
+  enabled,
   giftbookId,
   mode,
   loading,
   group,
   onClose,
 }: {
+  registerCloseGuard: RegisterCloseGuard;
+  enabled: boolean;
   giftbookId: string;
   mode: "add" | "edit";
   loading: boolean;
@@ -796,17 +868,13 @@ function GiftBookRecordModal({
 
   const [form, setForm] = useState(initial);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // 附件：单附件（三态）
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
-
-  useEffect(() => {
-    setForm(initial);
-    setAttachment(null);
-    setRemoveExistingAttachment(false);
-  }, [initial]);
 
   const addItemRow = () => {
     setForm((prev) => ({
@@ -858,10 +926,32 @@ function GiftBookRecordModal({
 
   const hasExistingAttachment = !!group?.attachment_key;
 
+  const [initialSnapshot] = useState(() => JSON.stringify(form));
+  const draft = useFormDraft({
+    scope: `giftbook-records:${giftbookId}:${mode === "edit" ? group?.id : "new"}`,
+    value: form,
+    dirty: JSON.stringify(form) !== initialSnapshot,
+    enabled: enabled && canEditFields && !loading,
+    onRestore: (restored) => {
+      setForm(restored);
+      setSubmitError(null);
+      setAttachment(null);
+      setRemoveExistingAttachment(false);
+    },
+  });
+
+  const { requestClose } = useFormLeaveGuard({
+    draft,
+    isBusy: isSubmitting || isUploading,
+    hasPendingFiles: !!attachment,
+  });
+  useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canEditFields) return;
     setIsSubmitting(true);
+    setSubmitError(null);
 
     try {
       validate();
@@ -881,6 +971,7 @@ function GiftBookRecordModal({
         if (!isAllowed) throw new Error("仅支持上传图片或 PDF");
         if (attachment.size > maxBytes) throw new Error("附件过大（最大 10MB）");
 
+        setUploadProgress(0);
         setIsUploading(true);
         const safeName = attachment.name.replace(/[^\w.\-() ]+/g, "_");
         const pathname = `giftbooks/${giftbookId}/${Date.now()}_${safeName}`;
@@ -888,7 +979,9 @@ function GiftBookRecordModal({
           access: "public",
           handleUploadUrl: "/api/blob/upload",
           contentType: attachment.type || undefined,
+          onUploadProgress: ({ percentage }) => setUploadProgress(percentage),
         });
+        setIsUploading(false);
         attachment_key = blob.url;
         attachment_name = attachment.name;
         attachment_type = blob.contentType || attachment.type || undefined;
@@ -938,8 +1031,10 @@ function GiftBookRecordModal({
       }
 
       toast.success(mode === "add" ? "记录已添加" : "记录已更新");
+      draft.clear();
       onClose(true);
     } catch (e2) {
+      setSubmitError(e2 instanceof Error ? e2.message : "保存失败，请重试");
       console.error(mode === "add" ? "创建礼簿记录失败:" : "更新礼簿记录失败:", e2);
       toast.error(e2 instanceof Error ? e2.message : "操作失败，请重试");
     } finally {
@@ -968,6 +1063,15 @@ function GiftBookRecordModal({
       ) : (
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
           <DialogBody className="space-y-5 py-4">
+          <DraftNotice draft={draft} />
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
+          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
+          {isUploading && (
+            <div className="space-y-1" role="status" aria-live="polite">
+              <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>
+              <progress aria-label="附件上传进度" max={100} value={uploadProgress} className="w-full" />
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="counterparty">对方姓名 *</Label>
             <Input
@@ -1253,7 +1357,7 @@ function GiftBookRecordModal({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onClose(false)}
+              onClick={() => requestClose(() => onClose(false))}
               disabled={isSubmitting || isUploading}
             >
               取消

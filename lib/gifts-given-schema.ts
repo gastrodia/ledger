@@ -39,43 +39,47 @@ export async function ensureGiftsGivenSchema() {
   await sql`CREATE INDEX IF NOT EXISTS idx_given_gifts_user_id ON given_gifts(user_id)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_given_gifts_gift_date ON given_gifts(gift_date)`;
 
-  // Backfill from legacy `given_gift_items` table (if exists) into `given_gifts.items`.
-  // Then try to drop the legacy table (if permissions allow).
-  try {
-    const legacy = await sql`SELECT to_regclass('public.given_gift_items') as name`;
-    const legacyName = (legacy[0] as any)?.name as string | null | undefined;
-    if (legacyName) {
-      // Fill items from legacy detail rows. Safe for cash-only gifts (subquery returns null -> []).
-      await sql`
-        UPDATE given_gifts g
-        SET items = COALESCE(
-          (
-            SELECT jsonb_agg(
-              jsonb_build_object(
-                'item_name', i.item_name,
-                'quantity', i.quantity,
-                'unit', i.unit,
-                'estimated_value', i.estimated_value
-              )
-              ORDER BY i.created_at ASC
+  // Keep the migration and its durable marker in one transaction. A failed
+  // migration is rolled back and retried; a completed one never overwrites edits.
+  // The legacy table is retained so dependencies/ownership cannot trigger replay.
+  await sql.transaction([
+    sql`SELECT pg_advisory_xact_lock(1818584946, 1)`,
+    sql`
+      CREATE TABLE IF NOT EXISTS ledger_schema_migrations (
+        name TEXT PRIMARY KEY,
+        completed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `,
+    sql`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM ledger_schema_migrations WHERE name = 'given_gifts_items_v1'
+        ) THEN
+          IF to_regclass('public.given_gift_items') IS NOT NULL THEN
+            UPDATE given_gifts g
+            SET items = COALESCE(
+              (
+                SELECT jsonb_agg(
+                  jsonb_build_object(
+                    'item_name', i.item_name,
+                    'quantity', i.quantity,
+                    'unit', i.unit,
+                    'estimated_value', i.estimated_value
+                  ) ORDER BY i.created_at ASC
+                )
+                FROM given_gift_items i
+                WHERE i.gift_id = g.id AND i.user_id = g.user_id
+              ),
+              '[]'::jsonb
             )
-            FROM given_gift_items i
-            WHERE i.gift_id = g.id AND i.user_id = g.user_id
-          ),
-          '[]'::jsonb
-        )
-      `;
+            WHERE g.items = '[]'::jsonb;
+          END IF;
 
-      // Attempt to drop legacy table to keep "single table" expectation.
-      // If DB role lacks privileges, we just leave it unused.
-      try {
-        await sql`DROP TABLE IF EXISTS given_gift_items`;
-      } catch {
-        // ignore
-      }
-    }
-  } catch {
-    // ignore
-  }
+          INSERT INTO ledger_schema_migrations (name) VALUES ('given_gifts_items_v1');
+        END IF;
+      END;
+      $$
+    `,
+  ]);
 }
-

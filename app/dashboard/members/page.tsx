@@ -33,35 +33,46 @@ export default function MembersPage() {
   const [members, setMembers] = useState<Member[]>([]);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // 加载成员列表
-  const loadMembers = async () => {
-    try {
-      setIsLoading(true);
-      const response = await fetch("/api/members");
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/login");
-          return;
-        }
-        throw new Error("获取家庭成员失败");
-      }
-
-      const result = await response.json();
-      setMembers(result.data || []);
-    } catch (error) {
-      console.error("加载家庭成员失败:", error);
-    } finally {
-      setIsLoading(false);
-    }
+  const [reload, setReload] = useState(0);
+  const loadMembers = () => {
+    setLoadError(null);
+    setIsLoading(true);
+    setReload((value) => value + 1);
   };
 
-  // 初始加载
   useEffect(() => {
-    loadMembers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const response = await fetch("/api/members", { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          if (response.status === 401) {
+            router.push("/login");
+            return;
+          }
+          throw new Error("获取家庭成员失败");
+        }
+
+        const result = await response.json();
+        if (controller.signal.aborted) return;
+        setMembers(result.data || []);
+        setLoadError(null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("加载家庭成员失败:", error);
+        setLoadError("家庭成员加载失败，请检查网络后重试");
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [router, reload]);
 
   const handleEdit = (member: Member) => {
     setEditingMember(member);
@@ -137,6 +148,13 @@ export default function MembersPage() {
               <p className="text-muted-foreground mt-4">加载中...</p>
             </CardContent>
           </Card>
+        ) : loadError ? (
+          <Card>
+            <CardContent className="py-12 text-center space-y-4" role="alert">
+              <p className="font-medium">{loadError}</p>
+              <Button variant="outline" onClick={loadMembers}>重新加载</Button>
+            </CardContent>
+          </Card>
         ) : (
           <>
             {/* Members Grid */}
@@ -172,6 +190,7 @@ export default function MembersPage() {
 
       {/* Add/Edit Modal */}
       <MemberModal
+        key={`${isAddModalOpen}:${editingMember?.id || "new"}`}
         isOpen={isAddModalOpen}
         onClose={handleCloseModal}
         member={editingMember}
@@ -236,25 +255,10 @@ function MemberModal({
   onSave: () => void;
 }) {
   const [formData, setFormData] = useState({
-    name: "",
-    avatar: "",
+    name: member?.name || "",
+    avatar: member?.avatar || "",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // 当 member 变化时更新表单数据
-  useEffect(() => {
-    if (member) {
-      setFormData({
-        name: member.name,
-        avatar: member.avatar || "",
-      });
-    } else {
-      setFormData({
-        name: "",
-        avatar: "",
-      });
-    }
-  }, [member, isOpen]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

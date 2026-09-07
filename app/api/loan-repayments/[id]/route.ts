@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { del } from "@vercel/blob";
+import { validateAttachment, deleteOwnedAttachment } from "@/lib/attachments";
 import { ensureLoansSchema } from "@/lib/loans-schema";
 
 type LoanSubjectType = "money" | "item";
@@ -73,6 +73,9 @@ export async function PATCH(
       nextRepaidAmount = null;
     }
 
+    const attachmentError = await validateAttachment(attachment_key, session.userId, oldAttachmentKey);
+    if (attachmentError) return attachmentError;
+
     const result = await sql`
       UPDATE loan_repayments
       SET
@@ -90,7 +93,7 @@ export async function PATCH(
 
     if (attachment_key !== undefined && oldAttachmentKey && attachment_key !== oldAttachmentKey) {
       try {
-        await del(oldAttachmentKey);
+        await deleteOwnedAttachment(oldAttachmentKey, session.userId);
       } catch (error) {
         console.error("更新归还记录时删除旧附件失败:", error);
       }
@@ -149,7 +152,7 @@ export async function DELETE(
       (existing[0] as Record<string, unknown>)?.attachment_key as string | null | undefined;
     if (attachmentKey) {
       try {
-        await del(attachmentKey);
+        await deleteOwnedAttachment(attachmentKey, session.userId);
       } catch (error) {
         console.error("删除归还附件失败:", error);
         return NextResponse.json({ error: "删除附件失败，请稍后重试" }, { status: 500 });

@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
     const { username, password } = body;
 
     // 验证必填字段
-    if (!username || !password) {
+    if (typeof username !== "string" || typeof password !== "string" || !username || !password) {
       return NextResponse.json(
         { error: '请填写用户名和密码' },
         { status: 400 }
@@ -21,7 +21,7 @@ export async function POST(request: NextRequest) {
       SELECT id, email, username, password, created_at, updated_at
       FROM users
       WHERE username = ${username} OR email = ${username}
-      LIMIT 1
+      LIMIT 2
     `;
 
     if (users.length === 0) {
@@ -31,16 +31,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const user = users[0];
-
-    // 验证密码
-    const isValid = await verifyPassword(password, user.password as string);
-    if (!isValid) {
+    // Legacy accounts may have a username equal to another account's email.
+    // Check every candidate, but never select an arbitrary account on ambiguity.
+    const matches = [];
+    for (const candidate of users) {
+      if (await verifyPassword(password, candidate.password as string)) matches.push(candidate);
+    }
+    if (matches.length !== 1) {
       return NextResponse.json(
-        { error: '用户名或密码错误' },
+        { error: matches.length > 1 ? '登录标识有歧义，请使用另一个用户名或邮箱' : '用户名或密码错误' },
         { status: 401 }
       );
     }
+    const user = matches[0];
 
     // 设置会话
     await setSessionCookie({

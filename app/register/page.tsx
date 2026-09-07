@@ -28,6 +28,7 @@ export default function RegisterPage() {
     } else if (formData.username.length < 3) {
       newErrors.username = "用户名至少3个字符";
     }
+    if (formData.username.includes("@")) newErrors.username = "用户名不能包含 @";
     if (!formData.email) {
       newErrors.email = "请输入邮箱";
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {

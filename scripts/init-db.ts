@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { neon } from "@neondatabase/serverless";
+import { splitSqlStatements } from "../lib/sql-statements";
 
 function stripSqlComments(input: string) {
   return input
@@ -12,14 +13,6 @@ function stripSqlComments(input: string) {
     .join("\n");
 }
 
-function splitStatements(sqlText: string) {
-  // 简单分号切分（够用：本项目 SQL 无函数/触发器等复杂语法）
-  return sqlText
-    .split(";")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
 async function main() {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL environment variable is not set");
@@ -28,7 +21,7 @@ async function main() {
   const sql = neon(process.env.DATABASE_URL);
   const raw = await readFile(new URL("./init-db.sql", import.meta.url), "utf8");
   const cleaned = stripSqlComments(raw);
-  const statements = splitStatements(cleaned);
+  const statements = splitSqlStatements(cleaned);
 
   console.log(`Found ${statements.length} SQL statements. Running...`);
 

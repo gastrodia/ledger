@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
+import { validateAttachment } from "@/lib/attachments";
 import { ensureGiftBooksSchema } from "@/lib/giftbooks-schema";
 import { v4 as uuidv4 } from "uuid";
 
@@ -185,6 +186,13 @@ export async function PATCH(
       }
     }
 
+    const attachmentError = await validateAttachment(
+      body.attachment_key,
+      session.userId,
+      existingRows.find((row) => !!row.attachment_key)?.attachment_key
+    );
+    if (attachmentError) return attachmentError;
+
     // 附件三态：undefined=不变；null=移除；string=更新
     const attachmentKey =
       body.attachment_key !== undefined ? (typeof body.attachment_key === "string" ? body.attachment_key : null) : undefined;
@@ -199,12 +207,14 @@ export async function PATCH(
     const existingItems = existingRows.filter((r) => r.gift_type === "item");
     const existingItemById = new Map(existingItems.map((r) => [r.id, r] as const));
 
+    const queries: ReturnType<typeof sql>[] = [];
+
     // 先处理现金
     let cashRowId: string | null = null;
     if (hasCash) {
       if (existingCash) {
         cashRowId = existingCash.id;
-        await sql`
+        queries.push(sql`
           UPDATE gift_records
           SET
             group_id = ${groupId},
@@ -221,10 +231,10 @@ export async function PATCH(
             notes = ${notes || null},
             updated_at = NOW()
           WHERE id = ${existingCash.id} AND user_id = ${session.userId}
-        `;
+        `);
       } else {
         cashRowId = uuidv4();
-        await sql`
+        queries.push(sql`
           INSERT INTO gift_records (
             id, user_id, giftbook_id, group_id,
             direction, gift_type, counterparty_name,
@@ -250,10 +260,10 @@ export async function PATCH(
             NOW(),
             NOW()
           )
-        `;
+        `);
       }
     } else if (existingCash) {
-      await sql`DELETE FROM gift_records WHERE id = ${existingCash.id} AND user_id = ${session.userId}`;
+      queries.push(sql`DELETE FROM gift_records WHERE id = ${existingCash.id} AND user_id = ${session.userId}`);
     }
 
     // 处理礼品（多行）
@@ -265,7 +275,7 @@ export async function PATCH(
         if (existing) {
           keepItemIds.add(existing.id);
           ensuredItemIds.push(existing.id);
-          await sql`
+          queries.push(sql`
             UPDATE gift_records
             SET
               group_id = ${groupId},
@@ -282,12 +292,12 @@ export async function PATCH(
               notes = ${notes || null},
               updated_at = NOW()
             WHERE id = ${existing.id} AND user_id = ${session.userId}
-          `;
+          `);
         } else {
           const newId = uuidv4();
           keepItemIds.add(newId);
           ensuredItemIds.push(newId);
-          await sql`
+          queries.push(sql`
             INSERT INTO gift_records (
               id, user_id, giftbook_id, group_id,
               direction, gift_type, counterparty_name,
@@ -316,7 +326,7 @@ export async function PATCH(
               NOW(),
               NOW()
             )
-          `;
+          `);
         }
       }
     }
@@ -324,40 +334,45 @@ export async function PATCH(
     // 删除不再需要的礼品行
     for (const r of existingItems) {
       if (!keepItemIds.has(r.id)) {
-        await sql`DELETE FROM gift_records WHERE id = ${r.id} AND user_id = ${session.userId}`;
+        queries.push(sql`DELETE FROM gift_records WHERE id = ${r.id} AND user_id = ${session.userId}`);
       }
     }
 
     // 附件：统一挂在“第一条”记录（优先礼金；否则第一条礼品）
-    if (attachmentsExplicit) {
-      const targetId = cashRowId || ensuredItemIds[0] || null;
-      if (!targetId) {
-        return NextResponse.json({ error: "更新失败：缺少可挂附件的记录行" }, { status: 400 });
-      }
-
-      await sql`
-        UPDATE gift_records
-        SET attachment_key = NULL, attachment_name = NULL, attachment_type = NULL
-        WHERE user_id = ${session.userId} AND group_id = ${groupId}
-      `;
-
-      const k = attachmentKey === undefined ? null : attachmentKey;
-      const n = attachmentName === undefined ? null : attachmentName;
-      const t = attachmentType === undefined ? null : attachmentType;
-
-      if (k || n || t) {
-        await sql`
-          UPDATE gift_records
-          SET
-            attachment_key = ${k},
-            attachment_name = ${n},
-            attachment_type = ${t}
-          WHERE id = ${targetId} AND user_id = ${session.userId}
-        `;
-      }
+    const targetId = cashRowId || ensuredItemIds[0] || null;
+    if (!targetId) {
+      return NextResponse.json({ error: "更新失败：缺少可挂附件的记录行" }, { status: 400 });
     }
 
-    const rows = await loadGroupRows(session.userId, groupId);
+    queries.push(sql`
+      UPDATE gift_records
+      SET attachment_key = NULL, attachment_name = NULL, attachment_type = NULL
+      WHERE user_id = ${session.userId} AND group_id = ${groupId}
+    `);
+
+    const previousAttachment = existingRows.find((row) => !!row.attachment_key);
+    const k = attachmentsExplicit ? attachmentKey ?? null : previousAttachment?.attachment_key ?? null;
+    const n = attachmentsExplicit ? attachmentName ?? null : previousAttachment?.attachment_name ?? null;
+    const t = attachmentsExplicit ? attachmentType ?? null : previousAttachment?.attachment_type ?? null;
+
+    if (k || n || t) {
+      queries.push(sql`
+        UPDATE gift_records
+        SET
+          attachment_key = ${k},
+          attachment_name = ${n},
+          attachment_type = ${t}
+        WHERE id = ${targetId} AND user_id = ${session.userId}
+      `);
+    }
+
+    queries.push(sql`
+      SELECT * FROM gift_records
+      WHERE user_id = ${session.userId} AND direction = 'received' AND group_id = ${groupId}
+      ORDER BY CASE WHEN gift_type = 'cash' THEN 0 ELSE 1 END, created_at ASC
+    `);
+    const results = await sql.transaction(queries);
+    const rows = results[results.length - 1] as GiftRecordRow[];
     return NextResponse.json({ message: "礼簿记录更新成功", data: buildGroup(rows) });
   } catch (e) {
     console.error("更新礼簿记录组错误:", e);

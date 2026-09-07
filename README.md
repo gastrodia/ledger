@@ -49,8 +49,8 @@ bun install
 # 必填：Postgres 连接串（Neon / 自建 Postgres 均可）
 DATABASE_URL="postgres://USER:PASSWORD@HOST:PORT/DB?sslmode=require"
 
-# 建议配置：用于签发/校验登录态 JWT
-# 不配置时会使用默认值（仅适合本地开发，生产务必设置）
+# 必填：用于签发/校验登录态 JWT，缺失时服务拒绝启动
+# 使用足够长的随机值，例如 openssl rand -base64 32
 JWT_SECRET="replace-me-with-a-long-random-secret"
 
 # 可选：启用统计页“AI总结”（Groq）
@@ -154,6 +154,8 @@ API 概览（节选）
 - **大小限制**：最大 10MB
 - **上传路径限制**：仅允许以下前缀：
   - `transactions/`、`notes/`、`giftbooks/`、`loans/`、`loan-repayments/`、`gifts-given/`
+  - 新上传使用 `模块/用户ID/随机上传ID/文件名`，服务器验证用户归属和实际 Blob；禁止覆盖已有文件。
+  - 历史附件可继续查看和保留，但无法验证上传归属的旧文件不会被自动物理删除。
 - **注意**：本地/非 Vercel 环境通常需要手动配置 `BLOB_READ_WRITE_TOKEN`，否则 `/api/blob/upload` 会返回 500。
 
 AI 总结说明
@@ -240,3 +242,14 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 - **SSL**：Neon 连接通常需要 `sslmode=require`（很多 Neon 提供的连接串已自带）
 - **连接数/并发**：在 Vercel 上并发较高时，优先使用 pooled 连接串（`DATABASE_URL`）以降低直连连接数压力
 - **Preview 环境**：如果你启用了 Neon Previews/分支功能，注意 Vercel 的 Preview 环境也要注入对应的 `DATABASE_URL`（集成通常会自动处理）
+
+手动关联收支
+---
+
+- 送礼、收礼组、借还单、归还记录均可手动关联一笔已有收支，支持更换和解除。每笔收支最多关联一个来源，重复提交同一关联可安全重试。
+- 关联只保存对应关系，不创建交易、不同步金额，也不改变任何台账或统计口径。删除来源只清除关系；删除收支只清除关系，其他台账的记录仍保留。
+- 收礼按整个 `group_id`（历史记录按 `COALESCE(group_id,id)`）关联，不依附礼金行。编辑时删除礼金、替换礼品行不会丢失组关联；整组或礼簿删除才解除。
+- `GET /api/transaction-links?sourceType=given_gift&sourceId=...` 返回 `{data: transaction|null}`；批量用 `sourceIds=id1,id2`（最多 100 个），返回 `{data:[{sourceId,transaction}]}`，只含当前账户仍存在的已关联来源。
+- `PUT /api/transaction-links` 接收 `{sourceType,sourceId,transactionId}`；`DELETE` 接收 `{sourceType,sourceId}`。`sourceType` 支持 `given_gift`、`gift_group`、`loan`、`repayment`。
+- 返回的 `transaction` 含 `id`、`type`、数值 `amount`、`description`、`transaction_date`。已被其他来源占用返回 409 / `TRANSACTION_ALREADY_LINKED`；并发变更返回 409 / `LINK_CONFLICT`，应刷新后重试。
+- 新数据库执行 `scripts/init-db.sql`。已有数据库可由管理员在各模块基础表已存在后执行 `scripts/transaction-links.sql`，其中包含关联表、外键和延迟组清理触发器；请完整执行。应用首次使用会尝试初始化，缺少权限明确返回 503 / `LINK_SCHEMA_UNAVAILABLE`，不会以成功或未关联状态掩盖配置失败。已初始化后的读写不再需要 DDL 权限。

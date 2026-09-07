@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
+import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
+import { useFormDraft } from "@/hooks/use-form-draft";
+import { DraftNotice } from "@/components/ui/draft-notice";
+
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,7 +32,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/use-confirm";
-import { upload } from "@vercel/blob/client";
+import { upload } from "@/lib/upload";
 import {
   Plus,
   Paperclip,
@@ -57,12 +62,32 @@ function statusLabel(s: LoanStatus) {
   return "结清";
 }
 
+type FormCloseGuard = (onClose: () => void) => Promise<boolean>;
+type RegisterCloseGuard = (guard: FormCloseGuard) => () => void;
+
+function useFormCloseBridge() {
+  const guardRef = useRef<FormCloseGuard | null>(null);
+  const register = useCallback((guard: FormCloseGuard) => {
+    guardRef.current = guard;
+    return () => { if (guardRef.current === guard) guardRef.current = null; };
+  }, []);
+  const close = useCallback((onClose: () => void) => {
+    if (guardRef.current) void guardRef.current(onClose);
+    else onClose();
+  }, []);
+  return { register, close };
+}
+
 export default function LoansPage() {
+  const loanClose = useFormCloseBridge();
+  const repaymentClose = useFormCloseBridge();
   const router = useRouter();
   const { confirm } = useConfirm();
 
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loans, setLoans] = useState<LoanWithComputed[]>([]);
+  const [statusFilter, setStatusFilter] = useState<"open" | "all" | "settled">("open");
 
   const [previewAttachment, setPreviewAttachment] = useState<{
     url: string;
@@ -93,31 +118,33 @@ export default function LoansPage() {
   );
   const [repayments, setRepayments] = useState<LoanRepayment[]>([]);
   const [repaymentsLoading, setRepaymentsLoading] = useState(false);
+  const [repaymentsError, setRepaymentsError] = useState<string | null>(null);
 
-  const loadLoans = async () => {
-    try {
-      setIsLoading(true);
-      const res = await fetch("/api/loans");
-      if (!res.ok) {
-        if (res.status === 401) {
-          router.push("/login");
-          return;
+  const loadLoans = () => {
+    return fetch("/api/loans")
+      .then(async (res) => {
+        if (!res.ok) {
+          if (res.status === 401) {
+            router.push("/login");
+            return;
+          }
+          throw new Error("获取欠款/借款失败");
         }
-        throw new Error("获取欠款/借款失败");
-      }
-      const result = await res.json();
-      setLoans(result.data || []);
-    } catch (e) {
-      console.error("加载欠款/借款失败:", e);
-      toast.error(e instanceof Error ? e.message : "加载失败，请重试");
-    } finally {
-      setIsLoading(false);
-    }
+        const result = await res.json();
+        setLoans(result.data || []);
+        setLoadError(null);
+      })
+      .catch((e: unknown) => {
+        console.error("加载欠款/借款失败:", e);
+        setLoadError(e instanceof Error ? e.message : "加载失败，请重试");
+      })
+      .finally(() => setIsLoading(false));
   };
 
   const loadRepayments = async (loanId: string) => {
     try {
       setRepaymentsLoading(true);
+      setRepaymentsError(null);
       const res = await fetch(`/api/loans/${loanId}/repayments`);
       if (!res.ok) {
         if (res.status === 401) {
@@ -131,7 +158,7 @@ export default function LoansPage() {
       setRepayments(result.data || []);
     } catch (e) {
       console.error("加载归还列表失败:", e);
-      toast.error(e instanceof Error ? e.message : "加载失败，请重试");
+      setRepaymentsError(e instanceof Error ? e.message : "加载失败，请重试");
     } finally {
       setRepaymentsLoading(false);
     }
@@ -142,9 +169,16 @@ export default function LoansPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const statusCounts = {
+    all: loans.length,
+    open: loans.filter((loan) => loan.status !== "settled").length,
+    settled: loans.filter((loan) => loan.status === "settled").length,
+  };
   const { owedLoans, lentLoans, stats } = useMemo(() => {
-    const owed = loans.filter((l) => l.direction === "owed");
-    const lent = loans.filter((l) => l.direction === "lent");
+    const visible = loans.filter((loan) => statusFilter === "all" ||
+      (statusFilter === "settled" ? loan.status === "settled" : loan.status !== "settled"));
+    const owed = visible.filter((l) => l.direction === "owed");
+    const lent = visible.filter((l) => l.direction === "lent");
 
     const calc = (arr: LoanWithComputed[]) => {
       const moneyLoans = arr.filter((l) => l.subject_type === "money");
@@ -164,7 +198,7 @@ export default function LoansPage() {
         lent: calc(lent),
       },
     };
-  }, [loans]);
+  }, [loans, statusFilter]);
 
   const openAddLoan = (direction: LoanDirection) => {
     setLoanModalMode("add");
@@ -183,7 +217,7 @@ export default function LoansPage() {
   const handleDeleteLoan = async (loan: LoanWithComputed) => {
     const ok = await confirm({
       title: "删除记录",
-      description: "确定要删除这条借还记录吗？它的归还记录与附件也会一起删除，且无法撤销。",
+      description: `将永久删除这条借还单、${loan.repayment_count} 条归还记录及相关附件。已关联收支会保留，仅解除关联。此操作无法撤销。`,
       confirmText: "删除",
       cancelText: "取消",
     });
@@ -226,7 +260,7 @@ export default function LoansPage() {
   const handleDeleteRepayment = async (repayment: LoanRepayment) => {
     const ok = await confirm({
       title: "删除归还记录",
-      description: "确定要删除这条归还记录吗？附件也会一起删除，且无法撤销。",
+      description: "将永久删除这条归还记录及附件，借还单的已还与未还数会重新计算。已关联收支会保留，仅解除关联。此操作无法撤销。",
       confirmText: "删除",
       cancelText: "取消",
     });
@@ -251,7 +285,7 @@ export default function LoansPage() {
     }
   };
 
-  const LoanContainer = ({
+  const renderLoanContainer = ({
     title,
     direction,
     items,
@@ -273,18 +307,19 @@ export default function LoansPage() {
               </CardTitle>
               <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
                 <span>
-                  应还合计（金额）：{" "}
+                  应还合计：{" "}
                   <span className="font-semibold text-foreground">
                     {formatCurrency(s.due)}
                   </span>
                 </span>
                 <span>
-                  未还合计（金额）：{" "}
+                  未还合计：{" "}
                   <span className="font-semibold text-foreground">
                     {formatCurrency(s.remaining)}
                   </span>
                 </span>
               </div>
+              <p className="mt-1 text-xs text-muted-foreground">当前显示范围汇总，仅计金额；物品不折算。</p>
             </div>
 
             <Button onClick={() => openAddLoan(direction)}>
@@ -297,9 +332,17 @@ export default function LoansPage() {
         <CardContent className="p-0">
           {isLoading ? (
             <div className="text-center py-12 text-muted-foreground">加载中...</div>
-          ) : items.length === 0 ? (
+          ) : loadError ? (
+              <div role="alert" className="space-y-3 px-4 py-10 text-center">
+                <p className="text-sm text-destructive">{loadError}</p>
+                <Button variant="outline" onClick={() => { setIsLoading(true); setLoadError(null); void loadLoans(); }}>重新加载</Button>
+              </div>
+            ) : items.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
-              暂无记录，点击右上角“新增”开始记录
+              <p>{statusFilter === "settled" ? "暂无已结清记录" : statusFilter === "open" ? "暂无未结清记录" : "暂无记录"}</p>
+              {loans.some((loan) => loan.direction === direction) && statusFilter !== "all" ? (
+                <Button variant="outline" className="mt-3" onClick={() => setStatusFilter("all")}>查看全部记录</Button>
+              ) : <p className="mt-2 text-sm">可点击右上角“新增”开始记录。</p>}
             </div>
           ) : (
             <>
@@ -364,7 +407,7 @@ export default function LoansPage() {
                             isSettled ? "text-muted-foreground line-through" : "",
                           ].join(" ")}
                         >
-                          <td className="p-4 font-medium">{l.counterparty_name}</td>
+                          <td className="p-4 font-medium"><div>{l.counterparty_name}</div><div className="mt-1"><TransactionLinkButton sourceId={l.id} label={`${l.counterparty_name}的借还记录`} /></div></td>
                           <td className="p-4">
                             <div className="flex items-center gap-2">
                               <span className="truncate max-w-[260px]">{due}</span>
@@ -473,6 +516,7 @@ export default function LoansPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{l.counterparty_name}</div>
+                          <div className="mt-1"><TransactionLinkButton sourceId={l.id} label={`${l.counterparty_name}的借还记录`} /></div>
                           <div className="text-sm text-muted-foreground mt-1 truncate">
                             {subject}
                           </div>
@@ -544,37 +588,42 @@ export default function LoansPage() {
 
   return (
     <DashboardLayout>
+      <TransactionLinksProvider sourceType="loan" sourceIds={loans.map((record) => record.id)}>
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">欠款 / 借款</h1>
+            <h1 className="text-3xl font-bold tracking-tight">借还</h1>
             <p className="text-muted-foreground mt-1">
-              记录我欠别人 / 别人欠我（支持部分归还、附件、编辑与删除）
+              区分我欠别人、别人欠我，记录每次归还。借还台账不自动进入收支统计。
             </p>
           </div>
         </div>
 
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-2" aria-label="借还状态筛选">
+            {([['open', '未结清'], ['all', '全部'], ['settled', '已结清']] as const).map(([value, label]) => (
+              <Button key={value} variant={statusFilter === value ? "default" : "outline"}
+                aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>
+                {label}（{statusCounts[value]}）
+              </Button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">默认显示未结清；已结清记录保留在“全部”和“已结清”中。</p>
+        </div>
         <div className="grid grid-cols-1 gap-6">
-          <LoanContainer
-            title="欠款（我欠别人）"
-            direction="owed"
-            items={owedLoans}
-          />
-          <LoanContainer
-            title="借款（别人欠我）"
-            direction="lent"
-            items={lentLoans}
-          />
+          {renderLoanContainer({ title: "我欠别人", direction: "owed", items: owedLoans })}
+          {renderLoanContainer({ title: "别人欠我", direction: "lent", items: lentLoans })}
         </div>
 
         {/* 借还单弹框 */}
-        <Dialog open={isLoanModalOpen} onOpenChange={setIsLoanModalOpen}>
+        <Dialog open={isLoanModalOpen} onOpenChange={(open) => { if (open) setIsLoanModalOpen(true); else loanClose.close(() => setIsLoanModalOpen(false)); }}>
           <DialogTrigger asChild>
             {/* 占位：外部按钮触发，这里不渲染 */}
             <span />
           </DialogTrigger>
           {isLoanModalOpen ? (
             <LoanModal
+              registerCloseGuard={loanClose.register}
               key={[
                 loanModalMode,
                 editingLoan?.id || "new",
@@ -592,17 +641,18 @@ export default function LoansPage() {
         </Dialog>
 
         {/* 归还弹框 */}
-        <Dialog open={isRepaymentModalOpen} onOpenChange={setIsRepaymentModalOpen}>
+        <Dialog open={isRepaymentModalOpen} onOpenChange={(open) => { if (open) setIsRepaymentModalOpen(true); else repaymentClose.close(() => setIsRepaymentModalOpen(false)); }}>
           <DialogTrigger asChild>
             <span />
           </DialogTrigger>
           {isRepaymentModalOpen && repaymentLoan ? (
             <RepaymentModal
+              registerCloseGuard={repaymentClose.register}
               key={[repaymentModalMode, editingRepayment?.id || "new", repaymentLoan.id].join(
                 ":"
               )}
               mode={repaymentModalMode}
-              loan={repaymentLoan}
+              loan={loans.find((loan) => loan.id === repaymentLoan.id) || repaymentLoan}
               repayment={editingRepayment || undefined}
               onClose={async (refresh) => {
                 setIsRepaymentModalOpen(false);
@@ -643,6 +693,7 @@ export default function LoansPage() {
               </DialogHeader>
 
               <DialogBody className="space-y-4">
+                <TransactionLinksProvider sourceType="repayment" sourceIds={repayments.map((record) => record.id)}>
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm text-muted-foreground">
                     共 {repaymentsLoan.repayment_count} 次
@@ -661,6 +712,11 @@ export default function LoansPage() {
                 <div className="border rounded-md overflow-hidden">
                   {repaymentsLoading ? (
                     <div className="text-center py-10 text-muted-foreground">加载中...</div>
+                   ) : repaymentsError ? (
+                    <div role="alert" className="space-y-3 px-4 py-10 text-center">
+                      <p className="text-sm text-destructive">{repaymentsError}</p>
+                      <Button variant="outline" onClick={() => loadRepayments(repaymentsLoan.id)}>重新加载</Button>
+                    </div>
                   ) : repayments.length === 0 ? (
                     <div className="text-center py-10 text-muted-foreground">
                       暂无归还记录
@@ -680,6 +736,7 @@ export default function LoansPage() {
                               <div className="font-medium">
                                 {formatDate(r.repaid_at)} · {value}
                               </div>
+                              <div className="mt-1"><TransactionLinkButton sourceId={r.id} label={`${repaymentsLoan.counterparty_name}的归还记录`} /></div>
                               {r.notes ? (
                                 <div className="text-sm text-muted-foreground mt-1 break-words">
                                   {r.notes}
@@ -730,6 +787,7 @@ export default function LoansPage() {
                     </div>
                   )}
                 </div>
+                              </TransactionLinksProvider>
               </DialogBody>
 
               <DialogFooter>
@@ -781,16 +839,19 @@ export default function LoansPage() {
           </DialogContent>
         </Dialog>
       </div>
+      </TransactionLinksProvider>
     </DashboardLayout>
   );
 }
 
 function LoanModal({
+  registerCloseGuard,
   mode,
   defaultDirection,
   loan,
   onClose,
 }: {
+  registerCloseGuard: RegisterCloseGuard;
   mode: "add" | "edit";
   defaultDirection: LoanDirection;
   loan?: LoanWithComputed;
@@ -843,45 +904,40 @@ function LoanModal({
 
   const [formData, setFormData] = useState(initial);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
-  useEffect(() => {
-    if (mode === "edit" && loan) {
-      setFormData({
-        direction: loan.direction,
-        subject_type: loan.subject_type,
-        counterparty_name: loan.counterparty_name,
-        occurred_at: formatDateForInput(loan.occurred_at),
-        amount: loan.amount != null ? String(loan.amount) : "",
-        item_name: loan.item_name || "",
-        item_quantity: loan.item_quantity != null ? String(loan.item_quantity) : "",
-        item_unit: loan.item_unit || "",
-        notes: loan.notes || "",
-      });
-    }
-    if (mode === "add") {
-      setFormData({
-        direction: defaultDirection,
-        subject_type: "money" as LoanSubjectType,
-        counterparty_name: "",
-        occurred_at: getTodayDate(),
-        amount: "",
-        item_name: "",
-        item_quantity: "",
-        item_unit: "",
-        notes: "",
-      });
-    }
-    setAttachment(null);
-    setRemoveExistingAttachment(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, loan?.id, defaultDirection]);
+  // The parent keys this form by mode and record, so each opening starts fresh.
+
+
+  const [initialSnapshot] = useState(() => JSON.stringify(formData));
+  const draft = useFormDraft({
+    scope: `loans:${mode === "edit" ? loan?.id : `new:${defaultDirection}`}`,
+    value: formData,
+    dirty: JSON.stringify(formData) !== initialSnapshot,
+    enabled: true,
+    onRestore: (restored) => {
+      setFormData(restored);
+      setSubmitError(null);
+      setAttachment(null);
+      setRemoveExistingAttachment(false);
+    },
+  });
+
+  const { requestClose } = useFormLeaveGuard({
+    draft,
+    isBusy: isSubmitting || isUploading,
+    hasPendingFiles: !!attachment,
+  });
+  useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setSubmitError(null);
 
     try {
       let attachment_key: string | null | undefined;
@@ -899,6 +955,7 @@ function LoanModal({
         if (!isAllowed) throw new Error("仅支持上传图片或 PDF");
         if (attachment.size > maxBytes) throw new Error("附件过大（最大 10MB）");
 
+        setUploadProgress(0);
         setIsUploading(true);
         const safeName = attachment.name.replace(/[^\w.\-() ]+/g, "_");
         const pathname = `loans/${Date.now()}_${safeName}`;
@@ -906,7 +963,9 @@ function LoanModal({
           access: "public",
           handleUploadUrl: "/api/blob/upload",
           contentType: attachment.type || undefined,
+          onUploadProgress: ({ percentage }) => setUploadProgress(percentage),
         });
+        setIsUploading(false);
         attachment_key = blob.url;
         attachment_name = attachment.name;
         attachment_type = blob.contentType || attachment.type || undefined;
@@ -924,7 +983,7 @@ function LoanModal({
         subject_type: formData.subject_type,
         counterparty_name: formData.counterparty_name,
         occurred_at: formData.occurred_at,
-        notes: formData.notes || undefined,
+        notes: formData.notes || null,
         attachment_key,
         attachment_name,
         attachment_type,
@@ -949,8 +1008,10 @@ function LoanModal({
       }
 
       toast.success(mode === "add" ? "已新增" : "已更新");
+      draft.clear();
       onClose(true);
     } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("保存借还单失败:", e);
       toast.error(e instanceof Error ? e.message : "操作失败，请重试");
     } finally {
@@ -972,6 +1033,15 @@ function LoanModal({
 
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
+          <DraftNotice draft={draft} />
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
+          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
+          {isUploading && (
+            <div className="space-y-1" role="status" aria-live="polite">
+              <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>
+              <progress aria-label="附件上传进度" max={100} value={uploadProgress} className="w-full" />
+            </div>
+          )}
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
             <Label htmlFor={`${idPrefix}direction`}>类型 *</Label>
@@ -985,8 +1055,8 @@ function LoanModal({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="owed">欠款（我欠别人）</SelectItem>
-                <SelectItem value="lent">借款（别人欠我）</SelectItem>
+                <SelectItem value="owed">我欠别人</SelectItem>
+                <SelectItem value="lent">别人欠我</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -1158,7 +1228,7 @@ function LoanModal({
         </DialogBody>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onClose(false)}>
+          <Button type="button" variant="outline" onClick={() => requestClose(() => onClose(false))}>
             取消
           </Button>
           <Button type="submit" disabled={isSubmitting || isUploading}>
@@ -1171,12 +1241,14 @@ function LoanModal({
 }
 
 function RepaymentModal({
+  registerCloseGuard,
   mode,
   loan,
   repayment,
   onClose,
   onPreviewAttachment,
 }: {
+  registerCloseGuard: RegisterCloseGuard;
   mode: "add" | "edit";
   loan: LoanWithComputed;
   repayment?: LoanRepayment;
@@ -1221,38 +1293,66 @@ function RepaymentModal({
 
   const [formData, setFormData] = useState(initial);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
-  useEffect(() => {
-    if (mode === "edit" && repayment) {
-      setFormData({
-        repaid_at: formatDateForInput(repayment.repaid_at),
-        repaid_value:
-          loan.subject_type === "money"
-            ? String(repayment.repaid_amount ?? "")
-            : String(repayment.repaid_quantity ?? ""),
-        notes: repayment.notes || "",
-      });
-    }
-    if (mode === "add") {
-      setFormData({
-        repaid_at: getTodayDate(),
-        repaid_value: "",
-        notes: "",
-      });
-    }
-    setAttachment(null);
-    setRemoveExistingAttachment(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, repayment?.id, loan.id]);
+  const precision = loan.subject_type === "money" ? 2 : 3;
+  const scale = 10 ** precision;
+  const dueUnits = Math.round((loan.subject_type === "money" ? loan.amount || 0 : loan.item_quantity || 0) * scale);
+  const totalUnits = Math.round((loan.subject_type === "money" ? loan.repaid_amount_total : loan.repaid_quantity_total) * scale);
+  const previousUnits = mode === "edit" && repayment
+    ? Math.round((loan.subject_type === "money" ? repayment.repaid_amount || 0 : repayment.repaid_quantity || 0) * scale)
+    : 0;
+  const otherUnits = Math.max(totalUnits - previousUnits, 0);
+  const availableUnits = Math.max(dueUnits - otherUnits, 0);
+  const rawValue = formData.repaid_value.trim();
+  const validFormat = new RegExp(`^(?:\\d+(?:\\.\\d{0,${precision}})?|\\.\\d{1,${precision}})$`).test(rawValue);
+  const enteredUnits = validFormat ? Math.round(Number(rawValue) * scale) : null;
+  const valueError = rawValue && (!validFormat || enteredUnits === null || !Number.isSafeInteger(enteredUnits))
+    ? `请输入最多 ${precision} 位小数的${loan.subject_type === "money" ? "金额" : "数量"}`
+    : enteredUnits !== null && enteredUnits <= 0 ? "归还值必须大于 0"
+    : enteredUnits !== null && enteredUnits > availableUnits ? "本次归还超出可归还余额，请核对后调整" : null;
+  const remainingAfterUnits = availableUnits - (enteredUnits || 0);
+  const displayValue = (units: number) => loan.subject_type === "money"
+    ? `${formatCurrency(units / scale)} 元`
+    : `${formatQty(units / scale)}${loan.item_unit || ""}`;
+
+  // The parent keys this form by mode and record, so each opening starts fresh.
+
+
+  const [initialSnapshot] = useState(() => JSON.stringify(formData));
+  const draft = useFormDraft({
+    scope: `loan-repayments:${loan.id}:${mode === "edit" ? repayment?.id : "new"}`,
+    value: formData,
+    dirty: JSON.stringify(formData) !== initialSnapshot,
+    enabled: true,
+    onRestore: (restored) => {
+      setFormData(restored);
+      setSubmitError(null);
+      setAttachment(null);
+      setRemoveExistingAttachment(false);
+    },
+  });
+
+  const { requestClose } = useFormLeaveGuard({
+    draft,
+    isBusy: isSubmitting || isUploading,
+    hasPendingFiles: !!attachment,
+  });
+  useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setSubmitError(null);
 
     try {
+      if (!rawValue || enteredUnits === null || valueError) {
+        throw new Error(valueError || "请填写本次归还金额或数量");
+      }
       let attachment_key: string | null | undefined;
       let attachment_name: string | null | undefined;
       let attachment_type: string | null | undefined;
@@ -1268,6 +1368,7 @@ function RepaymentModal({
         if (!isAllowed) throw new Error("仅支持上传图片或 PDF");
         if (attachment.size > maxBytes) throw new Error("附件过大（最大 10MB）");
 
+        setUploadProgress(0);
         setIsUploading(true);
         const safeName = attachment.name.replace(/[^\w.\-() ]+/g, "_");
         const pathname = `loan-repayments/${Date.now()}_${safeName}`;
@@ -1275,7 +1376,9 @@ function RepaymentModal({
           access: "public",
           handleUploadUrl: "/api/blob/upload",
           contentType: attachment.type || undefined,
+          onUploadProgress: ({ percentage }) => setUploadProgress(percentage),
         });
+        setIsUploading(false);
         attachment_key = blob.url;
         attachment_name = attachment.name;
         attachment_type = blob.contentType || attachment.type || undefined;
@@ -1293,7 +1396,7 @@ function RepaymentModal({
 
       const payload: Record<string, unknown> = {
         repaid_at: formData.repaid_at,
-        notes: formData.notes || undefined,
+        notes: formData.notes || null,
         attachment_key,
         attachment_name,
         attachment_type,
@@ -1316,8 +1419,10 @@ function RepaymentModal({
       }
 
       toast.success(mode === "add" ? "已记录归还" : "已更新归还");
+      draft.clear();
       onClose(true);
     } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("保存归还记录失败:", e);
       toast.error(e instanceof Error ? e.message : "操作失败，请重试");
     } finally {
@@ -1346,6 +1451,15 @@ function RepaymentModal({
 
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
+          <DraftNotice draft={draft} />
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
+          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
+          {isUploading && (
+            <div className="space-y-1" role="status" aria-live="polite">
+              <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>
+              <progress aria-label="附件上传进度" max={100} value={uploadProgress} className="w-full" />
+            </div>
+          )}
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
             <Label htmlFor={`${idPrefix}repaid_at`}>归还日期 *</Label>
@@ -1366,11 +1480,29 @@ function RepaymentModal({
               type="number"
               step={loan.subject_type === "money" ? "0.01" : "0.001"}
               min={loan.subject_type === "money" ? "0.01" : "0.001"}
+              max={availableUnits / scale}
+              aria-invalid={!!valueError}
+              aria-describedby={`${idPrefix}balance`}
               value={formData.repaid_value}
               onChange={(e) => setFormData({ ...formData, repaid_value: e.target.value })}
               required
             />
           </div>
+        </div>
+
+        <div id={`${idPrefix}balance`} className="space-y-2 rounded-md border p-3 text-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>{mode === "edit" ? "扣除其他归还后，本条最多可记" : "当前可归还"}：{displayValue(availableUnits)}</span>
+            <Button type="button" variant="outline" size="sm" disabled={availableUnits <= 0 || isSubmitting || isUploading}
+              onClick={() => setFormData({ ...formData, repaid_value: String(availableUnits / scale) })}>
+              填入剩余{loan.subject_type === "money" ? "金额" : "数量"}
+            </Button>
+          </div>
+          {valueError ? <p role="alert" className="text-destructive">{valueError}</p> : (
+            <p role="status">本次归还后剩余：{displayValue(remainingAfterUnits)}</p>
+          )}
+          {mode === "edit" && <p className="text-xs text-muted-foreground">计算时已扣除这条记录的原归还值，避免重复计入。</p>}
+          {availableUnits === 0 && <p className="text-xs text-muted-foreground">当前无可归还余额，请先核对已有归还记录。</p>}
         </div>
 
         <div className="space-y-2">
@@ -1430,10 +1562,10 @@ function RepaymentModal({
         </DialogBody>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onClose(false)}>
+          <Button type="button" variant="outline" onClick={() => requestClose(() => onClose(false))}>
             取消
           </Button>
-          <Button type="submit" disabled={isSubmitting || isUploading}>
+          <Button type="submit" disabled={isSubmitting || isUploading || !!valueError || availableUnits <= 0}>
             {isUploading ? "上传中..." : isSubmitting ? "保存中..." : "保存"}
           </Button>
         </DialogFooter>

@@ -20,13 +20,13 @@ export async function GET(
     `;
 
     if (rows.length === 0) {
-      return NextResponse.json({ error: '留言不存在' }, { status: 404 });
+      return NextResponse.json({ error: '笔记不存在' }, { status: 404 });
     }
 
     return NextResponse.json({ data: rows[0] });
   } catch (error) {
-    console.error('获取留言错误:', error);
-    return NextResponse.json({ error: '获取留言失败' }, { status: 500 });
+    console.error('获取笔记错误:', error);
+    return NextResponse.json({ error: '获取笔记失败' }, { status: 500 });
   }
 }
 
@@ -47,7 +47,7 @@ export async function PATCH(
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
     if (existing.length === 0) {
-      return NextResponse.json({ error: '留言不存在' }, { status: 404 });
+      return NextResponse.json({ error: '笔记不存在' }, { status: 404 });
     }
 
     const body = await request.json();
@@ -84,10 +84,10 @@ export async function PATCH(
       RETURNING *
     `;
 
-    return NextResponse.json({ message: '留言更新成功', data: result[0] });
+    return NextResponse.json({ message: '笔记更新成功', data: result[0] });
   } catch (error) {
-    console.error('更新留言错误:', error);
-    return NextResponse.json({ error: '更新留言失败' }, { status: 500 });
+    console.error('更新笔记错误:', error);
+    return NextResponse.json({ error: '更新笔记失败' }, { status: 500 });
   }
 }
 
@@ -108,7 +108,7 @@ export async function DELETE(
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
     if (existing.length === 0) {
-      return NextResponse.json({ error: '留言不存在' }, { status: 404 });
+      return NextResponse.json({ error: '笔记不存在' }, { status: 404 });
     }
 
     await sql`
@@ -116,10 +116,10 @@ export async function DELETE(
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
 
-    return NextResponse.json({ message: '留言删除成功' });
+    return NextResponse.json({ message: '笔记删除成功' });
   } catch (error) {
-    console.error('删除留言错误:', error);
-    return NextResponse.json({ error: '删除留言失败' }, { status: 500 });
+    console.error('删除笔记错误:', error);
+    return NextResponse.json({ error: '删除笔记失败' }, { status: 500 });
   }
 }
 

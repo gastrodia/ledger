@@ -2,9 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { jwtVerify } from 'jose';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'your-secret-key-change-this-in-production'
-);
+import { sessionSecret } from '@/lib/session-secret';
 
 // 需要认证的路由
 const protectedRoutes = ['/dashboard'];
@@ -22,9 +20,9 @@ export async function middleware(request: NextRequest) {
   let isAuthenticated = false;
   if (token) {
     try {
-      await jwtVerify(token, JWT_SECRET);
+      await jwtVerify(token, sessionSecret);
       isAuthenticated = true;
-    } catch (error) {
+    } catch {
       // Token无效或过期
       isAuthenticated = false;
     }

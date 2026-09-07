@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { del } from "@vercel/blob";
+import { validateAttachment, deleteOwnedAttachment } from "@/lib/attachments";
 import { ensureGiftsGivenSchema } from "@/lib/gifts-given-schema";
 
 type GivenGiftRow = {
@@ -32,7 +32,7 @@ function normalizeItems(items: unknown): Array<{
   unit: string;
   estimated_value: number;
 }> {
-  let arr: any[] = [];
+  let arr: unknown[] = [];
   if (Array.isArray(items)) {
     arr = items;
   } else if (typeof items === "string") {
@@ -48,6 +48,7 @@ function normalizeItems(items: unknown): Array<{
   }
 
   return arr
+    .filter((it): it is Record<string, unknown> => it !== null && typeof it === "object")
     .map((it) => ({
       item_name: typeof it?.item_name === "string" ? it.item_name : "",
       quantity: toNumberOrNull(it?.quantity) ?? 0,
@@ -232,6 +233,9 @@ export async function PATCH(
     const itemsJson =
       parsedItems !== undefined ? JSON.stringify(parsedItems) : JSON.stringify(existingItems);
 
+    const attachmentError = await validateAttachment(attachment_key, session.userId, oldAttachmentKey);
+    if (attachmentError) return attachmentError;
+
     const updated = await sql`
       UPDATE given_gifts
       SET
@@ -252,7 +256,7 @@ export async function PATCH(
     // 尽力删除旧附件（仅当 attachment_key 显式变化）
     if (attachment_key !== undefined && oldAttachmentKey && attachment_key !== oldAttachmentKey) {
       try {
-        await del(oldAttachmentKey);
+        await deleteOwnedAttachment(oldAttachmentKey, session.userId);
       } catch (e) {
         console.error("更新送礼时删除旧附件失败:", e);
       }
@@ -298,10 +302,10 @@ export async function DELETE(
       return NextResponse.json({ error: "送礼记录不存在" }, { status: 404 });
     }
 
-    const attachmentKey = (rows[0] as any)?.attachment_key as string | null | undefined;
+    const attachmentKey = (rows[0] as { attachment_key?: string | null })?.attachment_key as string | null | undefined;
     if (attachmentKey) {
       try {
-        await del(attachmentKey);
+        await deleteOwnedAttachment(attachmentKey, session.userId);
       } catch (e) {
         console.error("删除送礼附件失败:", e);
         return NextResponse.json({ error: "删除附件失败，请稍后重试" }, { status: 500 });

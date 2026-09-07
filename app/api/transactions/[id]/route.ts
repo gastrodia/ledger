@@ -1,7 +1,7 @@
+import { validateAttachment, deleteOwnedAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
-import { del } from '@vercel/blob';
 
 /**
  * PATCH /api/transactions/[id]
@@ -113,8 +113,13 @@ export async function PATCH(
       }
     }
 
+    const attachmentError = await validateAttachment(attachment_key, session.userId, oldAttachmentKey);
+    if (attachmentError) return attachmentError;
+
     // 更新交易记录
-    const result = await sql`
+    const [, result] = await sql.transaction([
+      sql`SELECT id FROM categories WHERE id = ${newCategoryId || null} AND user_id = ${session.userId} FOR SHARE`,
+      sql`
       UPDATE transactions
       SET
         type = ${type !== undefined ? type : existingTransaction.type},
@@ -128,13 +133,20 @@ export async function PATCH(
         attachment_type = ${attachment_type !== undefined ? attachment_type : existingTransaction.attachment_type},
         updated_at = NOW()
       WHERE id = ${id} AND user_id = ${session.userId}
+        AND (${newCategoryId || null}::varchar IS NULL OR EXISTS (
+          SELECT 1 FROM categories WHERE id = ${newCategoryId || null}
+            AND user_id = ${session.userId} AND type = ${newType}
+        ))
       RETURNING *
-    `;
+    `], { isolationLevel: "Serializable" });
+    if (result.length === 0) {
+      return NextResponse.json({ error: "分类或交易已变更，请刷新后重试" }, { status: 409 });
+    }
 
     // 如果附件发生变化（替换/移除），尽力删除旧 blob，避免产生孤儿文件
     if (attachment_key !== undefined && oldAttachmentKey && attachment_key !== oldAttachmentKey) {
       try {
-        await del(oldAttachmentKey);
+        await deleteOwnedAttachment(oldAttachmentKey, session.userId);
       } catch (error) {
         console.error('更新交易时删除旧附件失败:', error);
       }
@@ -148,6 +160,9 @@ export async function PATCH(
       },
     });
   } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === '40001') {
+      return NextResponse.json({ error: '分类或交易已变更，请刷新后重试' }, { status: 409 });
+    }
     console.error('更新交易记录错误:', error);
     return NextResponse.json(
       { error: '更新交易记录失败' },
@@ -193,7 +208,7 @@ export async function DELETE(
     const attachmentKey = existingTransactions[0]?.attachment_key as string | null | undefined;
     if (attachmentKey) {
       try {
-        await del(attachmentKey);
+        await deleteOwnedAttachment(attachmentKey, session.userId);
       } catch (error) {
         console.error('删除交易附件失败:', error);
         return NextResponse.json(

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
+import { validateAttachment } from "@/lib/attachments";
 import { v4 as uuidv4 } from "uuid";
 import { ensureGiftBooksSchema } from "@/lib/giftbooks-schema";
 
@@ -229,6 +230,8 @@ export async function POST(
     const attachment_key = body?.attachment_key as unknown;
     const attachment_name = body?.attachment_name as unknown;
     const attachment_type = body?.attachment_type as unknown;
+    const attachmentError = await validateAttachment(attachment_key, session.userId);
+    if (attachmentError) return attachmentError;
 
     if (typeof counterparty_name !== "string" || counterparty_name.trim().length === 0) {
       return NextResponse.json({ error: "对方姓名为必填项" }, { status: 400 });
@@ -398,7 +401,7 @@ export async function POST(
       }
     }
 
-    const created: GiftRecordRow[] = [];
+    const queries: ReturnType<typeof sql>[] = [];
     const groupId = uuidv4();
     const attachKey = typeof attachment_key === "string" && attachment_key ? attachment_key : null;
     const attachName = typeof attachment_name === "string" && attachment_name ? attachment_name : null;
@@ -416,7 +419,7 @@ export async function POST(
     if (normalizedHasCash) {
       const id = uuidv4();
       const att = placeAttachment();
-      const rows = await sql`
+      queries.push(sql`
         INSERT INTO gift_records (
           id, user_id, giftbook_id,
           group_id,
@@ -448,8 +451,7 @@ export async function POST(
           NOW()
         )
         RETURNING *
-      `;
-      created.push(rows[0] as GiftRecordRow);
+      `);
     }
 
     if (normalizedItems.length > 0) {
@@ -457,7 +459,7 @@ export async function POST(
         const it = normalizedItems[i];
         const id = uuidv4();
         const att = placeAttachment();
-        const rows = await sql`
+        queries.push(sql`
           INSERT INTO gift_records (
             id, user_id, giftbook_id,
             group_id,
@@ -489,10 +491,12 @@ export async function POST(
             NOW()
           )
           RETURNING *
-        `;
-        created.push(rows[0] as GiftRecordRow);
+        `);
       }
     }
+
+    const results = await sql.transaction(queries);
+    const created = results.flat() as GiftRecordRow[];
 
     return NextResponse.json(
       {

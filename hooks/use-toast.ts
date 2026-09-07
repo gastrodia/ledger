@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import type { ToastProps } from "@/components/ui/toast";
 
 type ToastInput = Omit<ToastProps, "id"> & { id?: string };
@@ -20,12 +20,16 @@ export function useToast() {
   const [toasts, setToasts] = useState<ToastProps[]>(memoryState);
 
   // 订阅全局状态
-  useState(() => {
+  useEffect(() => {
     listeners.add(setToasts);
     return () => {
       listeners.delete(setToasts);
     };
-  });
+  }, []);
+
+  const dismiss = useCallback((id: string) => {
+    dispatch(memoryState.filter((t) => t.id !== id));
+  }, []);
 
   const toast = useCallback((props: ToastInput) => {
     const id = props.id || `toast-${toastCount++}`;
@@ -47,11 +51,7 @@ export function useToast() {
     }
 
     return id;
-  }, []);
-
-  const dismiss = useCallback((id: string) => {
-    dispatch(memoryState.filter((t) => t.id !== id));
-  }, []);
+  }, [dismiss]);
 
   return {
     toasts,

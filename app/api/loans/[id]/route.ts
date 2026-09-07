@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { del } from "@vercel/blob";
+import { validateAttachment, deleteOwnedAttachment } from "@/lib/attachments";
 import { ensureLoansSchema } from "@/lib/loans-schema";
 
 type LoanDirection = "owed" | "lent";
@@ -108,7 +108,17 @@ export async function PATCH(
       nextAmount = null;
     }
 
-    const result = await sql`
+    const attachmentError = await validateAttachment(attachment_key, session.userId, oldAttachmentKey);
+    if (attachmentError) return attachmentError;
+
+    // Both loan edits and new repayments touch this row in a serializable
+    // transaction. Waiting writers must retry instead of using a stale snapshot.
+    const [, result] = await sql.transaction([
+      sql`
+        UPDATE loans SET updated_at = updated_at
+        WHERE id = ${id} AND user_id = ${session.userId}
+      `,
+      sql`
       UPDATE loans
       SET
         direction = ${direction !== undefined ? (direction as LoanDirection) : (loan.direction as LoanDirection)},
@@ -125,8 +135,24 @@ export async function PATCH(
         attachment_type = ${attachment_type !== undefined ? attachment_type : (loan.attachment_type as string | null)},
         updated_at = NOW()
       WHERE id = ${id} AND user_id = ${session.userId}
+        AND subject_type = ${loan.subject_type as string}
+        AND (
+          subject_type = ${nextSubjectType}
+          OR NOT EXISTS (
+            SELECT 1 FROM loan_repayments
+            WHERE loan_id = ${id}
+          )
+        )
       RETURNING *
-    `;
+      `,
+    ], { isolationLevel: "Serializable" });
+
+    if (result.length === 0) {
+      return NextResponse.json(
+        { error: "借还记录已发生变化，请刷新后重试" },
+        { status: 409 }
+      );
+    }
 
     if (
       attachment_key !== undefined &&
@@ -134,7 +160,7 @@ export async function PATCH(
       attachment_key !== oldAttachmentKey
     ) {
       try {
-        await del(oldAttachmentKey);
+        await deleteOwnedAttachment(oldAttachmentKey, session.userId);
       } catch (error) {
         console.error("更新借还单时删除旧附件失败:", error);
       }
@@ -163,6 +189,9 @@ export async function PATCH(
       },
     });
   } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "40001") {
+      return NextResponse.json({ error: "借还记录已发生变化，请刷新后重试" }, { status: 409 });
+    }
     console.error("更新借还单错误:", error);
     return NextResponse.json({ error: "更新失败" }, { status: 500 });
   }
@@ -207,7 +236,7 @@ export async function DELETE(
 
     for (const key of keysToDelete) {
       try {
-        await del(key);
+        await deleteOwnedAttachment(key, session.userId);
       } catch (error) {
         console.error("删除借还单附件失败:", error);
         return NextResponse.json({ error: "删除附件失败，请稍后重试" }, { status: 500 });

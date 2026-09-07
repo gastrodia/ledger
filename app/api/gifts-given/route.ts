@@ -1,3 +1,4 @@
+import { validateAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
@@ -268,6 +269,9 @@ export async function POST(request: NextRequest) {
         });
       }
     }
+
+    const attachmentError = await validateAttachment(attachment_key, session.userId);
+    if (attachmentError) return attachmentError;
 
     const giftId = uuidv4();
     const inserted = await sql`

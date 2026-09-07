@@ -12,8 +12,8 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
     <div className="min-h-screen bg-background">
       <DashboardNav />
       <main className="lg:ml-64 transition-all duration-300">
-        <div className="pt-16 lg:pt-0">
-          <div className="min-h-[calc(100vh-4rem)] p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
+        <div className="pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0">
+          <div className="min-h-[calc(100dvh-4rem)] lg:min-h-screen p-4 md:p-6 lg:p-8 max-w-[1600px] mx-auto">
             {children}
           </div>
         </div>

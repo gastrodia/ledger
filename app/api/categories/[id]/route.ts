@@ -48,6 +48,17 @@ export async function PATCH(
       );
     }
 
+    // Changing a used category would invalidate its existing transactions.
+    if (newType !== existingCategory.type) {
+      const used = await sql`
+        SELECT id FROM transactions
+        WHERE category_id = ${id} AND user_id = ${session.userId} LIMIT 1
+      `;
+      if (used.length > 0) {
+        return NextResponse.json({ error: '已有交易使用该分类，不能修改收支类型' }, { status: 409 });
+      }
+    }
+
     // 如果更新了名称，验证名称
     const newName = name !== undefined ? name : existingCategory.name;
     if (name !== undefined && (name.trim().length === 0 || name.length > 128)) {
@@ -58,21 +69,33 @@ export async function PATCH(
     }
 
     // 更新分类
-    const result = await sql`
+    const [, result] = await sql.transaction([
+      sql`SELECT id FROM categories WHERE id = ${id} AND user_id = ${session.userId} FOR UPDATE`,
+      sql`
       UPDATE categories
       SET
         name = ${newName.trim ? newName.trim() : newName},
         type = ${newType},
         icon = ${icon !== undefined ? icon : existingCategory.icon}
       WHERE id = ${id} AND user_id = ${session.userId}
+        AND (type = ${newType} OR NOT EXISTS (
+          SELECT 1 FROM transactions WHERE category_id = ${id} AND user_id = ${session.userId}
+        ))
       RETURNING *
-    `;
+    `], { isolationLevel: "Serializable" });
+
+    if (result.length === 0) {
+      return NextResponse.json({ error: '分类已被使用或修改，请刷新后重试' }, { status: 409 });
+    }
 
     return NextResponse.json({
       message: '分类更新成功',
       data: result[0],
     });
   } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === '40001') {
+      return NextResponse.json({ error: '分类已被使用或修改，请刷新后重试' }, { status: 409 });
+    }
     console.error('更新分类错误:', error);
     return NextResponse.json(
       { error: '更新分类失败' },

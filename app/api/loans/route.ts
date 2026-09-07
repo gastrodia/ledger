@@ -1,3 +1,4 @@
+import { validateAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
@@ -166,6 +167,9 @@ export async function POST(request: NextRequest) {
       }
       qtyNum = q;
     }
+
+    const attachmentError = await validateAttachment(attachment_key, session.userId);
+    if (attachmentError) return attachmentError;
 
     const id = uuidv4();
 

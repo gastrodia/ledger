@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     const { email, username, password } = body;
 
     // 验证必填字段
-    if (!email || !username || !password) {
+    if (typeof email !== "string" || typeof username !== "string" || typeof password !== "string" || !email || !username || !password) {
       return NextResponse.json(
         { error: '请填写所有必填字段' },
         { status: 400 }
@@ -34,6 +34,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (username.includes('@')) {
+      return NextResponse.json({ error: '用户名不能包含 @，请使用邮箱字段填写邮箱' }, { status: 400 });
+    }
+
     // 验证密码长度
     if (password.length < 6) {
       return NextResponse.json(
@@ -44,7 +48,7 @@ export async function POST(request: NextRequest) {
 
     // 检查邮箱是否已存在
     const existingEmail = await sql`
-      SELECT id FROM users WHERE email = ${email}
+      SELECT id FROM users WHERE email = ${email} OR username = ${email}
     `;
     if (existingEmail.length > 0) {
       return NextResponse.json(

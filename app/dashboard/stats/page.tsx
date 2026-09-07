@@ -24,9 +24,11 @@ import {
 } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { describeAmountChange, getStatsPeriod, localCalendarDate, statsDetailHref, type StatsPeriod } from "@/lib/stats-period";
 
 interface CategoryStat {
-  id: string;
+  id: string | null;
   name: string;
   icon?: string;
   color?: string;
@@ -35,7 +37,7 @@ interface CategoryStat {
 }
 
 interface MemberStat {
-  id: string;
+  id: string | null;
   name: string;
   avatar?: string;
   total: number;
@@ -57,6 +59,9 @@ interface StatsData {
     balance: number;
   };
   monthlyStats?: MonthlyStat[];
+  period?: StatsPeriod;
+  comparison?: { totalIncome: number; totalExpense: number };
+  dailyExpense?: number | null;
 }
 
 interface MonthlyStat {
@@ -188,11 +193,14 @@ export default function StatsPage() {
     return Array.from({ length: 20 }, (_, i) => String(current - i));
   })();
 
+  const [asOfDate] = useState(() => localCalendarDate());
   const [viewMode, setViewMode] = useState<"month" | "year">("month");
   const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentMonth());
   const [selectedYear, setSelectedYear] = useState<string>(getCurrentYear());
   const [statsData, setStatsData] = useState<StatsData | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
   const [showIncome, setShowIncome] = useState(false);
   const [aiSummary, setAiSummary] = useState("");
   const [aiError, setAiError] = useState<string | null>(null);
@@ -202,43 +210,40 @@ export default function StatsPage() {
   const isValidYear = (y: string) => /^\d{4}$/.test(y);
   const isValidMonth = (m: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(m);
 
-  // 加载统计数据
-  const loadStats = async () => {
-    try {
-      if (viewMode === "year" && !isValidYear(selectedYear)) {
-        setStatsData(null);
-        setIsLoading(false);
-        return;
-      }
-      if (viewMode === "month" && !isValidMonth(selectedMonth)) {
-        setStatsData(null);
-        setIsLoading(false);
-        return;
-      }
+  const query = viewMode === "year"
+    ? `year=${encodeURIComponent(selectedYear)}&asOf=${asOfDate}`
+    : `month=${encodeURIComponent(selectedMonth)}&asOf=${asOfDate}`;
+  const validPeriod = viewMode === "year" ? isValidYear(selectedYear) : isValidMonth(selectedMonth);
+  const isLoading = validPeriod && loadedQuery !== query;
 
-      setIsLoading(true);
-      const query =
-        viewMode === "year"
-          ? `year=${encodeURIComponent(selectedYear)}`
-          : `month=${encodeURIComponent(selectedMonth)}`;
-      const response = await fetch(`/api/stats?${query}`);
-      
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/login");
-          return;
+  useEffect(() => {
+    if (!validPeriod) return;
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/stats?${query}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          if (response.status === 401) { router.push("/login"); return; }
+          throw new Error("获取统计数据失败");
         }
-        throw new Error("获取统计数据失败");
+        const result = await response.json();
+        if (!controller.signal.aborted) {
+          setStatsData(result.data);
+          setLoadError(null);
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("加载统计数据失败:", error);
+          setLoadError("统计数据加载失败，请检查网络后重试");
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoadedQuery(query);
       }
-
-      const result = await response.json();
-      setStatsData(result.data);
-    } catch (error) {
-      console.error("加载统计数据失败:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    };
+    void load();
+    return () => controller.abort();
+  }, [query, router, validPeriod, reload]);
 
   const stopAiSummary = () => {
     aiAbortRef.current?.abort();
@@ -252,6 +257,10 @@ export default function StatsPage() {
   };
 
   const generateAiSummary = async () => {
+    aiAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    const isCurrent = () => aiAbortRef.current === controller && !controller.signal.aborted;
     try {
       if (viewMode === "year" && !isValidYear(selectedYear)) {
         setAiError("年份格式错误，应为 YYYY");
@@ -270,11 +279,6 @@ export default function StatsPage() {
       setAiSummary("");
       setIsAiLoading(true);
 
-      // 若上一次还在跑，先终止
-      aiAbortRef.current?.abort();
-      const controller = new AbortController();
-      aiAbortRef.current = controller;
-
       const query =
         viewMode === "year"
           ? `year=${encodeURIComponent(selectedYear)}`
@@ -285,6 +289,7 @@ export default function StatsPage() {
         signal: controller.signal,
       });
 
+      if (!isCurrent()) return;
       if (!resp.ok) {
         if (resp.status === 401) {
           router.push("/login");
@@ -304,11 +309,13 @@ export default function StatsPage() {
 
       while (true) {
         const { value, done } = await reader.read();
+        if (!isCurrent()) return;
         if (done) break;
         acc += decoder.decode(value, { stream: true });
         setAiSummary(acc);
       }
     } catch (e: unknown) {
+      if (!isCurrent()) return;
       if (
         (e instanceof DOMException && e.name === "AbortError") ||
         (e instanceof Error && e.name === "AbortError")
@@ -319,27 +326,28 @@ export default function StatsPage() {
       console.error("AI 总结失败:", e);
       setAiError(getErrorMessage(e));
     } finally {
-      aiAbortRef.current = null;
-      setIsAiLoading(false);
+      if (aiAbortRef.current === controller) {
+        aiAbortRef.current = null;
+        setIsAiLoading(false);
+      }
     }
   };
 
-  useEffect(() => {
-    loadStats();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode, selectedMonth, selectedYear]);
-
-  // 切换月份时，清空上一次 AI 总结并中断流
-  useEffect(() => {
+  const resetPeriod = () => {
+    setLoadError(null);
     stopAiSummary();
     setAiSummary("");
     setAiError(null);
-  }, [viewMode, selectedMonth, selectedYear]);
+    setStatsData(null);
+    setLoadedQuery(null);
+  };
 
-  // 组件卸载时，确保终止请求
   useEffect(() => {
-    return () => stopAiSummary();
-  }, []);
+    return () => {
+      aiAbortRef.current?.abort();
+      aiAbortRef.current = null;
+    };
+  }, [query]);
 
   // 计算百分比
   const calculatePercentage = (amount: number, total: number): number => {
@@ -348,6 +356,9 @@ export default function StatsPage() {
   };
 
   const formatIncome = (value: number) => (showIncome ? formatCurrency(value) : "****");
+  const activePeriod = statsData?.period ?? getStatsPeriod(viewMode, viewMode === "month" ? selectedMonth : selectedYear, asOfDate);
+  const detailHref = (type: "income" | "expense", dimension: "categoryId" | "memberId", id: string | null) =>
+    activePeriod ? statsDetailHref(activePeriod, type, dimension, id) : "/dashboard";
 
   return (
     <DashboardLayout>
@@ -359,7 +370,7 @@ export default function StatsPage() {
               统计分析
             </h1>
             <p className="text-muted-foreground mt-1">
-              查看您的收支统计，了解资金流向
+              统计仅包含收支记录；礼簿、送礼和借还台账保持独立，不会自动计入。
             </p>
           </div>
           <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2 sm:items-center">
@@ -367,14 +378,14 @@ export default function StatsPage() {
               <Button
                 type="button"
                 variant={viewMode === "month" ? "default" : "outline"}
-                onClick={() => setViewMode("month")}
+                onClick={() => { if (viewMode !== "month") { resetPeriod(); setViewMode("month"); } }}
               >
                 按月
               </Button>
               <Button
                 type="button"
                 variant={viewMode === "year" ? "default" : "outline"}
-                onClick={() => setViewMode("year")}
+                onClick={() => { if (viewMode !== "year") { resetPeriod(); setViewMode("year"); } }}
               >
                 按年
               </Button>
@@ -385,11 +396,11 @@ export default function StatsPage() {
                 id="month-picker"
                 type="month"
                 value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
+                onChange={(e) => { if (selectedMonth !== e.target.value) { resetPeriod(); setSelectedMonth(e.target.value); } }}
                 className="w-full sm:w-[200px]"
               />
             ) : (
-              <Select value={selectedYear} onValueChange={setSelectedYear}>
+              <Select value={selectedYear} onValueChange={(value) => { if (selectedYear !== value) { resetPeriod(); setSelectedYear(value); } }}>
                 <SelectTrigger className="w-full sm:w-[200px]" id="year-picker">
                   <SelectValue placeholder="选择年份" />
                 </SelectTrigger>
@@ -409,9 +420,20 @@ export default function StatsPage() {
           <div className="text-center py-12 text-muted-foreground">
             <p>加载中...</p>
           </div>
+        ) : loadError ? (
+          <Card>
+            <CardContent className="py-12 text-center space-y-4" role="alert">
+              <p className="font-medium">{loadError}</p>
+              <Button variant="outline" onClick={() => {
+                setLoadError(null);
+                setLoadedQuery(null);
+                setReload((value) => value + 1);
+              }}>重新加载</Button>
+            </CardContent>
+          </Card>
         ) : !statsData ? (
           <div className="text-center py-12 text-muted-foreground">
-            <p>暂无数据</p>
+            <p>{validPeriod ? "所选期间暂无收支记录" : "请选择有效的月份或年份"}</p>
           </div>
         ) : (
           <>
@@ -477,6 +499,40 @@ export default function StatsPage() {
                 </CardContent>
               </Card>
             </div>
+
+            {activePeriod && statsData.comparison ? (
+              <Card>
+                <CardHeader className="border-b space-y-2">
+                  <CardTitle>上期对比与日均支出</CardTitle>
+                  <p className="text-sm text-muted-foreground">
+                    本期 {activePeriod.startDate} 至 {activePeriod.endDate}，上期 {activePeriod.previousStartDate} 至 {activePeriod.previousEndDate}。
+                    按两个完整日历期间内已记录的金额比较，包含未来日期记录。
+                    {activePeriod.state === "current" ? "本期尚未结束，此处不是同期进度对比。" : activePeriod.state === "future" ? "本期尚未开始，暂不计算变化或日均。" : ""}
+                  </p>
+                </CardHeader>
+                <CardContent className="pt-6 grid grid-cols-1 sm:grid-cols-3 gap-5">
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">收入对比</p>
+                    <p className="font-semibold">{!showIncome ? "****" : activePeriod.state === "future" ? "暂无对比" : describeAmountChange(statsData.summary.totalIncome, statsData.comparison.totalIncome)}</p>
+                    <p className="text-sm text-muted-foreground">上期 {formatIncome(statsData.comparison.totalIncome)}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">支出对比</p>
+                    <p className="font-semibold">{activePeriod.state === "future" ? "暂无对比" : describeAmountChange(statsData.summary.totalExpense, statsData.comparison.totalExpense)}</p>
+                    <p className="text-sm text-muted-foreground">上期 {formatCurrency(statsData.comparison.totalExpense)}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm text-muted-foreground">日均支出</p>
+                    <p className="font-semibold">{statsData.dailyExpense == null ? "暂无" : formatCurrency(statsData.dailyExpense)}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {activePeriod.state === "future" ? "所选期间尚未开始" : activePeriod.state === "current"
+                        ? `截至 ${activePeriod.asOfDate}，按已过 ${activePeriod.elapsedDays} 天计算；不含未来日期支出`
+                        : `按完整期间 ${activePeriod.totalDays} 天计算`}
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : null}
 
             {viewMode === "year" ? (
               <YearlyBarChart
@@ -549,6 +605,7 @@ export default function StatsPage() {
               </CardContent>
             </Card>
 
+            <p className="text-sm text-muted-foreground">点击分类或成员，可查看所选期间的对应收支明细。</p>
             {/* 四个独立的统计卡片 */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* 按分类统计 - 支出 */}
@@ -574,7 +631,9 @@ export default function StatsPage() {
                           statsData.summary.totalExpense
                         );
                         return (
-                          <div key={stat.id} className="space-y-2">
+                          <Link key={stat.id || "none"} href={detailHref("expense", "categoryId", stat.id)}
+                            aria-label={`查看${stat.name || "未分类"}的支出明细`}
+                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 <span className="text-xl">{stat.icon || "📂"}</span>
@@ -600,7 +659,7 @@ export default function StatsPage() {
                                 style={{ width: `${percentage}%` }}
                               />
                             </div>
-                          </div>
+                          </Link>
                         );
                       })}
                     </div>
@@ -631,7 +690,9 @@ export default function StatsPage() {
                           statsData.summary.totalIncome
                         );
                         return (
-                          <div key={stat.id} className="space-y-2">
+                          <Link key={stat.id || "none"} href={detailHref("income", "categoryId", stat.id)}
+                            aria-label={`查看${stat.name || "未分类"}的收入明细`}
+                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 <span className="text-xl">{stat.icon || "📂"}</span>
@@ -657,7 +718,7 @@ export default function StatsPage() {
                                 style={{ width: `${percentage}%` }}
                               />
                             </div>
-                          </div>
+                          </Link>
                         );
                       })}
                     </div>
@@ -688,7 +749,9 @@ export default function StatsPage() {
                           statsData.summary.totalExpense
                         );
                         return (
-                          <div key={stat.id} className="space-y-2">
+                          <Link key={stat.id || "none"} href={detailHref("expense", "memberId", stat.id)}
+                            aria-label={`查看${stat.name || "未分配"}的支出明细`}
+                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 <span className="text-xl">{stat.avatar || "👤"}</span>
@@ -714,7 +777,7 @@ export default function StatsPage() {
                                 style={{ width: `${percentage}%` }}
                               />
                             </div>
-                          </div>
+                          </Link>
                         );
                       })}
                     </div>
@@ -745,7 +808,9 @@ export default function StatsPage() {
                           statsData.summary.totalIncome
                         );
                         return (
-                          <div key={stat.id} className="space-y-2">
+                          <Link key={stat.id || "none"} href={detailHref("income", "memberId", stat.id)}
+                            aria-label={`查看${stat.name || "未分配"}的收入明细`}
+                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2 min-w-0 flex-1">
                                 <span className="text-xl">{stat.avatar || "👤"}</span>
@@ -771,7 +836,7 @@ export default function StatsPage() {
                                 style={{ width: `${percentage}%` }}
                               />
                             </div>
-                          </div>
+                          </Link>
                         );
                       })}
                     </div>

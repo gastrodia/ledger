@@ -1,3 +1,4 @@
+import { validateAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
@@ -123,6 +124,9 @@ export async function PATCH(
         estimatedNum = parsedEstimated;
       }
     }
+
+    const attachmentError = await validateAttachment(attachment_key, session.userId, existing.attachment_key);
+    if (attachmentError) return attachmentError;
 
     const result = await sql`
       UPDATE gift_records

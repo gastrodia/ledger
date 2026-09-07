@@ -1,6 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
+import { useFormDraft } from "@/hooks/use-form-draft";
+import { DraftNotice } from "@/components/ui/draft-notice";
+
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
@@ -27,12 +31,31 @@ import type { GiftBook, GiftBookSummary } from "@/types";
 
 type GiftBookListItem = GiftBook & { summary?: GiftBookSummary };
 
+type FormCloseGuard = (onClose: () => void) => Promise<boolean>;
+type RegisterCloseGuard = (guard: FormCloseGuard) => () => void;
+
+function useFormCloseBridge() {
+  const guardRef = useRef<FormCloseGuard | null>(null);
+  const register = useCallback((guard: FormCloseGuard) => {
+    guardRef.current = guard;
+    return () => { if (guardRef.current === guard) guardRef.current = null; };
+  }, []);
+  const close = useCallback((onClose: () => void) => {
+    if (guardRef.current) void guardRef.current(onClose);
+    else onClose();
+  }, []);
+  return { register, close };
+}
+
 export default function GiftBooksPage() {
+  const createClose = useFormCloseBridge();
+  const editClose = useFormCloseBridge();
   const router = useRouter();
   const { confirm } = useConfirm();
 
   const [giftbooks, setGiftbooks] = useState<GiftBookListItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingGiftBook, setEditingGiftBook] = useState<GiftBookListItem | null>(null);
@@ -40,6 +63,7 @@ export default function GiftBooksPage() {
   const loadGiftBooks = async () => {
     try {
       setIsLoading(true);
+      setLoadError(null);
       const res = await fetch("/api/giftbooks");
       if (!res.ok) {
         if (res.status === 401) {
@@ -50,23 +74,53 @@ export default function GiftBooksPage() {
       }
       const result = await res.json();
       setGiftbooks(result.data || []);
+      setLoadError(null);
     } catch (e) {
       console.error("加载礼簿失败:", e);
-      toast.error("加载礼簿失败，请重试");
+      setLoadError("加载礼簿失败，请检查网络后重试。");
     } finally {
       setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    loadGiftBooks();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    let active = true;
+    fetch("/api/giftbooks")
+      .then(async (res) => {
+        if (res.status === 401) {
+          if (active) router.push("/login");
+          return;
+        }
+        if (!res.ok) throw new Error("获取礼簿失败");
+        const result = await res.json();
+        if (active) { setGiftbooks(result.data || []); setLoadError(null); }
+      })
+      .catch(() => {
+        if (active) setLoadError("加载礼簿失败，请检查网络后重试。");
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
+    return () => { active = false; };
+  }, [router]);
 
   const handleDelete = async (id: string) => {
+    let recordCount = giftbooks.find((book) => book.id === id)?.summary?.recordCount;
+    if (!Number.isSafeInteger(recordCount) || recordCount! < 0) {
+      try {
+        const details = await fetch(`/api/giftbooks/${id}`);
+        if (!details.ok) throw new Error("无法核实礼簿记录数量，请稍后重试");
+        const result = await details.json();
+        recordCount = result.data?.summary?.recordCount;
+        if (!Number.isSafeInteger(recordCount) || recordCount! < 0) throw new Error("无法核实礼簿记录数量，请稍后重试");
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "无法核实删除范围");
+        return;
+      }
+    }
     const ok = await confirm({
       title: "删除礼簿",
-      description: "确定要删除这个礼簿吗？礼簿下的记录也会一起删除，且无法撤销。",
+      description: `将永久删除本礼簿、${recordCount} 条礼金/礼品明细及相关附件。已关联收支会保留，仅解除关联。此操作无法撤销。`,
       confirmText: "删除",
       cancelText: "取消",
     });
@@ -92,10 +146,10 @@ export default function GiftBooksPage() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">礼簿</h1>
-            <p className="text-muted-foreground mt-1">管理人情往来记录，按礼簿查看礼金与礼品汇总</p>
+            <p className="text-muted-foreground mt-1">管理人情往来记录；每本汇总涵盖全部礼金与礼品明细，不自动进入收支统计。</p>
           </div>
 
-          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+          <Dialog open={isCreateOpen} onOpenChange={(open) => { if (open) setIsCreateOpen(true); else createClose.close(() => setIsCreateOpen(false)); }}>
             <DialogTrigger asChild>
               <Button className="w-full sm:w-auto">
                 <Plus className="h-4 w-4" />
@@ -103,6 +157,8 @@ export default function GiftBooksPage() {
               </Button>
             </DialogTrigger>
             <CreateGiftBookModal
+              enabled={isCreateOpen}
+              registerCloseGuard={createClose.register}
               key={isCreateOpen ? "open" : "closed"}
               onClose={(refresh) => {
                 setIsCreateOpen(false);
@@ -119,6 +175,11 @@ export default function GiftBooksPage() {
           <CardContent className="p-0">
             {isLoading ? (
               <div className="text-center py-12 text-muted-foreground">加载中...</div>
+            ) : loadError ? (
+              <div role="alert" className="space-y-3 px-4 py-10 text-center">
+                <p className="text-sm text-destructive">{loadError}</p>
+                <Button variant="outline" onClick={loadGiftBooks}>重新加载</Button>
+              </div>
             ) : giftbooks.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
                 <div className="text-5xl mb-4">📒</div>
@@ -141,7 +202,7 @@ export default function GiftBooksPage() {
                         <th className="text-left p-4 font-semibold text-sm text-muted-foreground">类型</th>
                         <th className="text-right p-4 font-semibold text-sm text-muted-foreground">礼金合计</th>
                         <th className="text-right p-4 font-semibold text-sm text-muted-foreground">礼品估值</th>
-                        <th className="text-right p-4 font-semibold text-sm text-muted-foreground">记录数</th>
+                        <th className="text-right p-4 font-semibold text-sm text-muted-foreground">礼金/礼品明细数</th>
                         <th className="text-right p-4 font-semibold text-sm text-muted-foreground w-28">操作</th>
                       </tr>
                     </thead>
@@ -258,7 +319,7 @@ export default function GiftBooksPage() {
                                     {gb.event_type}
                                   </Badge>
                                 ) : null}
-                                <span className="text-xs text-muted-foreground">记录 {gb.summary?.recordCount ?? 0}</span>
+                                <span className="text-xs text-muted-foreground">明细 {gb.summary?.recordCount ?? 0} 条</span>
                               </div>
                             </div>
 
@@ -333,10 +394,11 @@ export default function GiftBooksPage() {
         <Dialog
           open={!!editingGiftBook}
           onOpenChange={(open) => {
-            if (!open) setEditingGiftBook(null);
+            if (!open) editClose.close(() => setEditingGiftBook(null));
           }}
         >
           <EditGiftBookModal
+            registerCloseGuard={editClose.register}
             giftbook={editingGiftBook}
             onClose={(refresh) => {
               setEditingGiftBook(null);
@@ -349,7 +411,7 @@ export default function GiftBooksPage() {
   );
 }
 
-function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void }) {
+function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose: (refresh?: boolean) => void; enabled: boolean; registerCloseGuard: RegisterCloseGuard }) {
   const getTodayDate = () => {
     const now = new Date();
     const year = now.getFullYear();
@@ -359,6 +421,7 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
   };
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     name: "",
     event_type: "",
@@ -367,9 +430,28 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
     description: "",
   });
 
+  const [initialSnapshot] = useState(() => JSON.stringify(formData));
+  const draft = useFormDraft({
+    scope: "giftbooks:new",
+    value: formData,
+    dirty: JSON.stringify(formData) !== initialSnapshot,
+    enabled: enabled,
+    onRestore: (restored) => {
+      setFormData(restored);
+      setSubmitError(null);
+    },
+  });
+
+  const { requestClose } = useFormLeaveGuard({
+    draft,
+    isBusy: isSubmitting,
+  });
+  useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setSubmitError(null);
     try {
       const res = await fetch("/api/giftbooks", {
         method: "POST",
@@ -387,8 +469,10 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
         throw new Error(err.error || "创建失败");
       }
       toast.success("礼簿创建成功");
+      draft.clear();
       onClose(true);
     } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("创建礼簿失败:", e);
       toast.error(e instanceof Error ? e.message : "创建失败，请重试");
     } finally {
@@ -404,6 +488,8 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
+          <DraftNotice draft={draft} />
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
           <div className="space-y-2">
             <Label htmlFor="gb-name">礼簿名 *</Label>
             <Input
@@ -459,7 +545,7 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
         </DialogBody>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onClose(false)} disabled={isSubmitting}>
+          <Button type="button" variant="outline" onClick={() => requestClose(() => onClose(false))} disabled={isSubmitting}>
             取消
           </Button>
           <Button type="submit" disabled={isSubmitting}>
@@ -472,9 +558,11 @@ function CreateGiftBookModal({ onClose }: { onClose: (refresh?: boolean) => void
 }
 
 function EditGiftBookModal({
+  registerCloseGuard,
   giftbook,
   onClose,
 }: {
+  registerCloseGuard: RegisterCloseGuard;
   giftbook: GiftBookListItem;
   onClose: (refresh?: boolean) => void;
 }) {
@@ -492,6 +580,7 @@ function EditGiftBookModal({
   };
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     name: giftbook.name || "",
     event_type: giftbook.event_type || "",
@@ -500,19 +589,38 @@ function EditGiftBookModal({
     description: giftbook.description || "",
   });
 
+  const [initialSnapshot] = useState(() => JSON.stringify(formData));
+  const draft = useFormDraft({
+    scope: `giftbooks:${giftbook.id}:edit`,
+    value: formData,
+    dirty: JSON.stringify(formData) !== initialSnapshot,
+    enabled: true,
+    onRestore: (restored) => {
+      setFormData(restored);
+      setSubmitError(null);
+    },
+  });
+
+  const { requestClose } = useFormLeaveGuard({
+    draft,
+    isBusy: isSubmitting,
+  });
+  useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSubmitting(true);
+    setSubmitError(null);
     try {
       const res = await fetch(`/api/giftbooks/${giftbook.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: formData.name,
-          event_type: formData.event_type || undefined,
-          event_date: formData.event_date || undefined,
-          location: formData.location || undefined,
-          description: formData.description || undefined,
+          event_type: formData.event_type || null,
+          event_date: formData.event_date || null,
+          location: formData.location || null,
+          description: formData.description || null,
         }),
       });
       if (!res.ok) {
@@ -520,8 +628,10 @@ function EditGiftBookModal({
         throw new Error(err.error || "更新失败");
       }
       toast.success("礼簿已更新");
+      draft.clear();
       onClose(true);
     } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("更新礼簿失败:", e);
       toast.error(e instanceof Error ? e.message : "更新失败，请重试");
     } finally {
@@ -537,6 +647,8 @@ function EditGiftBookModal({
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
+          <DraftNotice draft={draft} />
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
           <div className="space-y-2">
             <Label htmlFor="gb-edit-name">礼簿名 *</Label>
             <Input
@@ -591,7 +703,7 @@ function EditGiftBookModal({
         </DialogBody>
 
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => onClose(false)} disabled={isSubmitting}>
+          <Button type="button" variant="outline" onClick={() => requestClose(() => onClose(false))} disabled={isSubmitting}>
             取消
           </Button>
           <Button type="submit" disabled={isSubmitting}>

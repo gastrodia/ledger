@@ -1,3 +1,4 @@
+import { validateAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
@@ -129,9 +130,19 @@ export async function POST(
       qtyNum = q;
     }
 
+    const attachmentError = await validateAttachment(attachment_key, session.userId);
+    if (attachmentError) return attachmentError;
+
     const id = uuidv4();
 
-    const result = await sql`
+    // Serialize with subject-type changes on the same loan. The condition is
+    // checked again inside the transaction, after acquiring the shared row lock.
+    const [, result] = await sql.transaction([
+      sql`
+        UPDATE loans SET updated_at = updated_at
+        WHERE id = ${loanId} AND user_id = ${session.userId}
+      `,
+      sql`
       INSERT INTO loan_repayments (
         id, user_id, loan_id,
         repaid_amount, repaid_quantity,
@@ -139,7 +150,7 @@ export async function POST(
         attachment_key, attachment_name, attachment_type,
         created_at, updated_at
       )
-      VALUES (
+      SELECT
         ${id},
         ${session.userId},
         ${loanId},
@@ -152,9 +163,19 @@ export async function POST(
         ${attachment_type || null},
         NOW(),
         NOW()
-      )
+      FROM loans l
+      WHERE l.id = ${loanId} AND l.user_id = ${session.userId}
+        AND l.subject_type = ${subjectType}
       RETURNING *
-    `;
+      `,
+    ], { isolationLevel: "Serializable" });
+
+    if (result.length === 0) {
+      return NextResponse.json(
+        { error: "借还记录已发生变化，请刷新后重试" },
+        { status: 409 }
+      );
+    }
 
     const row = result[0] as Record<string, unknown>;
     return NextResponse.json(
@@ -178,6 +199,9 @@ export async function POST(
       { status: 201 }
     );
   } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "40001") {
+      return NextResponse.json({ error: "借还记录已发生变化，请刷新后重试" }, { status: 409 });
+    }
     console.error("新增归还记录失败:", error);
     return NextResponse.json({ error: "新增归还记录失败" }, { status: 500 });
   }

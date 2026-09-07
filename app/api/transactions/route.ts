@@ -1,3 +1,4 @@
+import { validateAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
@@ -12,6 +13,7 @@ import { v4 as uuidv4 } from 'uuid';
  * - memberId: 成员ID，默认返回所有成员
  * - startDate: 开始日期，格式：YYYY-MM-DD
  * - endDate: 结束日期，格式：YYYY-MM-DD
+ * - q: 备注关键词（忽略大小写，按字面匹配）
  */
 export async function GET(request: NextRequest) {
   try {
@@ -32,76 +34,56 @@ export async function GET(request: NextRequest) {
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
 
-    // 构建查询条件
-    let transactions;
-    
-    if (!type && !categoryId && !memberId && !startDate && !endDate) {
-      // 无筛选条件
-      transactions = await sql`
-        SELECT 
-          t.id, t.user_id, t.category_id, t.member_id, t.type, t.amount, 
-          t.description, t.attachment_key, t.attachment_name, t.attachment_type,
-          t.transaction_date, t.created_at, t.updated_at,
-          c.name as category_name, c.icon as category_icon, c.color as category_color, c.type as category_type,
-          m.name as member_name, m.avatar as member_avatar
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN members m ON t.member_id = m.id
-        WHERE t.user_id = ${session.userId}
-        ORDER BY t.transaction_date DESC, t.created_at DESC
-      `;
-    } else {
-      // 有筛选条件，构建动态查询
-      let query = `
-        SELECT 
-          t.id, t.user_id, t.category_id, t.member_id, t.type, t.amount, 
-          t.description, t.attachment_key, t.attachment_name, t.attachment_type,
-          t.transaction_date, t.created_at, t.updated_at,
-          c.name as category_name, c.icon as category_icon, c.color as category_color, c.type as category_type,
-          m.name as member_name, m.avatar as member_avatar
-        FROM transactions t
-        LEFT JOIN categories c ON t.category_id = c.id
-        LEFT JOIN members m ON t.member_id = m.id
-        WHERE t.user_id = $1
-      `;
-      
-      const params: unknown[] = [session.userId];
-      let paramIndex = 2;
-
-      if (type && (type === 'income' || type === 'expense')) {
-        query += ` AND t.type = $${paramIndex}`;
-        params.push(type);
-        paramIndex++;
-      }
-
-      if (categoryId) {
-        query += ` AND t.category_id = $${paramIndex}`;
-        params.push(categoryId);
-        paramIndex++;
-      }
-
-      if (memberId) {
-        query += ` AND t.member_id = $${paramIndex}`;
-        params.push(memberId);
-        paramIndex++;
-      }
-
-      if (startDate) {
-        query += ` AND t.transaction_date >= $${paramIndex}`;
-        params.push(startDate);
-        paramIndex++;
-      }
-
-      if (endDate) {
-        query += ` AND t.transaction_date <= $${paramIndex}`;
-        params.push(`${endDate} 23:59:59`);
-        paramIndex++;
-      }
-
-      query += ' ORDER BY t.transaction_date DESC, t.created_at DESC';
-      
-      transactions = await sql.query(query, params);
+    const q = searchParams.get('q')?.trim() || '';
+    const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
+      && !Number.isNaN(Date.parse(value))
+      && new Date(value).toISOString().slice(0, 10) === value;
+    if ((startDate && !validDate(startDate)) || (endDate && !validDate(endDate))) {
+      return NextResponse.json({ error: '日期格式无效，请使用 YYYY-MM-DD' }, { status: 400 });
     }
+    if (startDate && endDate && startDate > endDate) {
+      return NextResponse.json({ error: '开始日期不能晚于结束日期' }, { status: 400 });
+    }
+
+    // 列表与摘要共用同一组条件，备注搜索按字面子串匹配。
+    const params: unknown[] = [session.userId];
+    const conditions = ['t.user_id = $1'];
+    const addCondition = (expression: string, value: unknown) => {
+      params.push(value);
+      conditions.push(expression.replace('?', `$${params.length}`));
+    };
+    if (type === 'income' || type === 'expense') addCondition('t.type = ?', type);
+    if (categoryId === 'none') conditions.push('t.category_id IS NULL');
+    else if (categoryId) addCondition('t.category_id = ?', categoryId);
+    if (memberId === 'none') conditions.push('t.member_id IS NULL');
+    else if (memberId) addCondition('t.member_id = ?', memberId);
+    if (startDate) addCondition('t.transaction_date >= ?::date', startDate);
+    if (endDate) addCondition("t.transaction_date < (?::date + INTERVAL '1 day')", endDate);
+    if (q) addCondition("STRPOS(LOWER(COALESCE(t.description, '')), LOWER(?::text)) > 0", q);
+    const where = conditions.join(' AND ');
+    const [transactions, summaryResult] = await Promise.all([
+      sql.query(`
+        SELECT
+          t.id, t.user_id, t.category_id, t.member_id, t.type, t.amount,
+          t.description, t.attachment_key, t.attachment_name, t.attachment_type,
+          t.transaction_date, t.created_at, t.updated_at,
+          c.name as category_name, c.icon as category_icon, c.color as category_color, c.type as category_type,
+          m.name as member_name, m.avatar as member_avatar
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        LEFT JOIN members m ON t.member_id = m.id
+        WHERE ${where}
+        ORDER BY t.transaction_date DESC, t.created_at DESC
+      `, params),
+      sql.query(`
+        SELECT
+          SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END) as total_income,
+          SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END) as total_expense,
+          EXISTS (SELECT 1 FROM transactions own WHERE own.user_id = $1) as has_any_transactions
+        FROM transactions t
+        WHERE ${where}
+      `, params),
+    ]);
 
     // 转换数据格式，将关联的 category 和 member 组织为嵌套对象
     const formattedTransactions = transactions.map((t: Record<string, unknown>) => ({
@@ -136,62 +118,6 @@ export async function GET(request: NextRequest) {
       } : undefined,
     }));
 
-    // 计算统计摘要
-    let summaryResult;
-    
-    if (!type && !categoryId && !memberId && !startDate && !endDate) {
-      summaryResult = await sql`
-        SELECT 
-          SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as total_income,
-          SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expense
-        FROM transactions
-        WHERE user_id = ${session.userId}
-      `;
-    } else {
-      let summaryQuery = `
-        SELECT 
-          SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as total_income,
-          SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expense
-        FROM transactions
-        WHERE user_id = $1
-      `;
-      
-      const params: unknown[] = [session.userId];
-      let paramIndex = 2;
-
-      if (type && (type === 'income' || type === 'expense')) {
-        summaryQuery += ` AND type = $${paramIndex}`;
-        params.push(type);
-        paramIndex++;
-      }
-
-      if (categoryId) {
-        summaryQuery += ` AND category_id = $${paramIndex}`;
-        params.push(categoryId);
-        paramIndex++;
-      }
-
-      if (memberId) {
-        summaryQuery += ` AND member_id = $${paramIndex}`;
-        params.push(memberId);
-        paramIndex++;
-      }
-
-      if (startDate) {
-        summaryQuery += ` AND transaction_date >= $${paramIndex}`;
-        params.push(startDate);
-        paramIndex++;
-      }
-
-      if (endDate) {
-        summaryQuery += ` AND transaction_date <= $${paramIndex}`;
-        params.push(`${endDate} 23:59:59`);
-        paramIndex++;
-      }
-
-      summaryResult = await sql.query(summaryQuery, params);
-    }
-
     const totalIncome = parseFloat(summaryResult[0]?.total_income || '0');
     const totalExpense = parseFloat(summaryResult[0]?.total_expense || '0');
     const balance = totalIncome - totalExpense;
@@ -199,6 +125,7 @@ export async function GET(request: NextRequest) {
     // 返回数据和统计
     return NextResponse.json({
       data: formattedTransactions,
+      hasAnyTransactions: summaryResult[0]?.has_any_transactions === true,
       summary: {
         totalIncome,
         totalExpense,
@@ -315,17 +242,22 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const attachmentError = await validateAttachment(attachment_key, session.userId);
+    if (attachmentError) return attachmentError;
+
     // 生成 UUID
     const id = uuidv4();
 
     // 插入交易记录
-    const result = await sql`
+    const [, result] = await sql.transaction([
+      sql`SELECT id FROM categories WHERE id = ${category_id || null} AND user_id = ${session.userId} FOR SHARE`,
+      sql`
       INSERT INTO transactions (
         id, user_id, category_id, member_id, type, amount, 
         description, attachment_key, attachment_name, attachment_type,
         transaction_date, created_at, updated_at
       )
-      VALUES (
+      SELECT
         ${id},
         ${session.userId},
         ${category_id || null},
@@ -339,9 +271,15 @@ export async function POST(request: NextRequest) {
         ${transaction_date},
         NOW(),
         NOW()
+      WHERE ${category_id || null}::varchar IS NULL OR EXISTS (
+        SELECT 1 FROM categories WHERE id = ${category_id || null}
+          AND user_id = ${session.userId} AND type = ${type}
       )
       RETURNING *
-    `;
+    `], { isolationLevel: "Serializable" });
+    if (result.length === 0) {
+      return NextResponse.json({ error: "分类已变更，请刷新后重试" }, { status: 409 });
+    }
 
     return NextResponse.json({
       message: '交易记录创建成功',
@@ -351,6 +289,9 @@ export async function POST(request: NextRequest) {
       },
     }, { status: 201 });
   } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === '40001') {
+      return NextResponse.json({ error: '分类或交易已变更，请刷新后重试' }, { status: 409 });
+    }
     console.error('创建交易记录错误:', error);
     return NextResponse.json(
       { error: '创建交易记录失败' },

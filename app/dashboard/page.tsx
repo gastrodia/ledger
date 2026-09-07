@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -52,17 +52,39 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import type { Transaction, TransactionType, Summary, Category, Member } from "@/types";
 import { toast } from "@/hooks/use-toast";
-import { upload } from "@vercel/blob/client";
+import { upload } from "@/lib/upload";
+import { useFormDraft } from "@/hooks/use-form-draft";
+import { DraftNotice } from "@/components/ui/draft-notice";
+import { useTransactionNavigation, useTransactionScrollRestore } from "@/hooks/use-transaction-navigation";
+import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
+import { groupTransactionsByDay } from "@/lib/transaction-days";
+import { TransactionCategoryPicker } from "@/components/transactions/category-picker";
+
+type DatePreset = "today" | "month" | "lastMonth" | "all";
+function getTransactionDateRange(preset: DatePreset, now = new Date()) {
+  const format = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  if (preset === "all") return { start: "", end: "" };
+  if (preset === "today") return { start: format(now), end: format(now) };
+  if (preset === "lastMonth") return {
+    start: format(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+    end: format(new Date(now.getFullYear(), now.getMonth(), 0)),
+  };
+  return {
+    start: format(new Date(now.getFullYear(), now.getMonth(), 1)),
+    end: format(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
+  };
+}
 
 function SummaryCards({
   summary,
   showIncome,
   onToggleIncomeVisibility,
 }: {
-  summary: Summary;
+  summary: Summary | null;
   showIncome: boolean;
   onToggleIncomeVisibility: () => void;
 }) {
+  if (!summary) return <p className="p-4 text-sm text-muted-foreground" role="status">当前筛选暂无可用汇总</p>;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
       <Card>
@@ -127,7 +149,27 @@ function SummaryCards({
 }
 
 export default function DashboardPage() {
+  return <Suspense fallback={<DashboardLayout><p className="p-8 text-muted-foreground">正在加载交易记录…</p></DashboardLayout>}>
+    <DashboardContent />
+  </Suspense>;
+}
+
+function DashboardContent() {
   const router = useRouter();
+  const navigation = useTransactionNavigation({
+    startDate: getTransactionDateRange("month").start, endDate: getTransactionDateRange("month").end,
+    type: "all", categoryId: "__all__", memberId: "__all__", q: "",
+  });
+  const { startDate, endDate, type: filterType, categoryId: filterCategoryId, memberId: filterMemberId, q: searchText } = navigation.filters;
+  const setStartDate = (value: string) => navigation.setFilters((current) => ({ ...current, startDate: value }));
+  const setEndDate = (value: string) => navigation.setFilters((current) => ({ ...current, endDate: value }));
+  const setFilterType = (value: TransactionType | "all") => navigation.setFilters((current) => ({ ...current, type: value }));
+  const setFilterCategoryId = (value: string) => navigation.setFilters((current) => ({ ...current, categoryId: value }));
+  const setFilterMemberId = (value: string) => navigation.setFilters((current) => ({ ...current, memberId: value }));
+  const setSearchText = (value: string) => navigation.setFilters((current) => ({ ...current, q: value }));
+  const addCloseRef = useRef<(() => Promise<boolean>) | null>(null);
+  const editCloseRef = useRef<(() => Promise<boolean>) | null>(null);
+  const [categoriesReload, setCategoriesReload] = useState(0);
   const [summary, setSummary] = useState<Summary>({
     totalIncome: 0,
     totalExpense: 0,
@@ -141,10 +183,10 @@ export default function DashboardPage() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [filterType, setFilterType] = useState<TransactionType | "all">("all");
-  const [filterCategoryId, setFilterCategoryId] = useState<string>("__all__");
-  const [filterMemberId, setFilterMemberId] = useState<string>("__all__");
+  const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  const [hasAnyTransactions, setHasAnyTransactions] = useState<boolean | null>(null);
+  const [loadError, setLoadError] = useState<{ key: string; message: string } | null>(null);
   const [isMobileSummaryOpen, setIsMobileSummaryOpen] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [previewAttachment, setPreviewAttachment] = useState<{
@@ -153,119 +195,126 @@ export default function DashboardPage() {
     type?: string;
   } | null>(null);
   
-  // 获取当月第一天
-  const getFirstDayOfMonth = () => {
-    const now = new Date();
-    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
-    // 使用本地时区格式化日期，避免 UTC 转换问题
-    const year = firstDay.getFullYear();
-    const month = String(firstDay.getMonth() + 1).padStart(2, '0');
-    const day = String(firstDay.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+  const dateRangeError = startDate && endDate && startDate > endDate
+    ? "开始日期不能晚于结束日期，请调整日期范围。" : null;
+  const clearFilters = () => {
+    setSearchText("");
+    setFilterType("all");
+    setFilterCategoryId("__all__");
+    setFilterMemberId("__all__");
+    setStartDate("");
+    setEndDate("");
   };
-  
-  // 获取今天
-  const getToday = () => {
-    const now = new Date();
-    // 使用本地时区格式化日期，避免 UTC 转换问题
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-  
-  const [startDate, setStartDate] = useState<string>(getFirstDayOfMonth());
-  const [endDate, setEndDate] = useState<string>(getToday());
-
-  // 加载交易记录
-  const loadTransactions = async () => {
-    try {
-      setIsLoading(true);
-      const params = new URLSearchParams();
-      if (filterType !== "all") params.append("type", filterType);
-      if (filterCategoryId && filterCategoryId !== "__all__") params.append("categoryId", filterCategoryId);
-      if (filterMemberId && filterMemberId !== "__all__") params.append("memberId", filterMemberId);
-      if (startDate) params.append("startDate", startDate);
-      if (endDate) params.append("endDate", endDate);
-
-      const response = await fetch(`/api/transactions?${params.toString()}`);
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/login");
-          return;
-        }
-        throw new Error("获取交易记录失败");
-      }
-
-      const result = await response.json();
-      setTransactions(result.data || []);
-      setSummary(result.summary || { totalIncome: 0, totalExpense: 0, balance: 0 });
-    } catch (error) {
-      console.error("加载交易记录失败:", error);
-    } finally {
-      setIsLoading(false);
-    }
+  const applyDatePreset = (preset: DatePreset) => {
+    const range = getTransactionDateRange(preset);
+    setStartDate(range.start);
+    setEndDate(range.end);
   };
 
-  // 加载分类
-  const loadCategories = async () => {
-    try {
-      const response = await fetch("/api/categories");
-      if (response.ok) {
-        const result = await response.json();
-        setCategories(result.data || []);
-      }
-    } catch (error) {
-      console.error("加载分类失败:", error);
-    }
-  };
+  const effectiveCategoryId = filterCategoryId || "__all__";
+  const params = new URLSearchParams();
+  if (filterType !== "all") params.set("type", filterType);
+  if (effectiveCategoryId !== "__all__") params.set("categoryId", effectiveCategoryId);
+  if (filterMemberId !== "__all__") params.set("memberId", filterMemberId);
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
+  if (searchText.trim()) params.set("q", searchText.trim());
+  const query = params.toString();
+  const requestKey = navigation.ready ? `${query}:${reload}` : "";
+  const isLoading = !dateRangeError && (!requestKey || loadedQuery !== requestKey);
+  const currentError = loadError?.key === requestKey ? loadError.message : null;
+  const visibleSummary = isLoading || dateRangeError || currentError ? null : summary;
+  const loadTransactions = () => setReload((value) => value + 1);
 
-  // 加载家庭成员
-  const loadMembers = async () => {
-    try {
-      const response = await fetch("/api/members");
-      if (response.ok) {
-        const result = await response.json();
-        setMembers(result.data || []);
-      }
-    } catch (error) {
-      console.error("加载家庭成员失败:", error);
-    }
-  };
-
-  // 初始加载
   useEffect(() => {
-    loadTransactions();
-    loadCategories();
-    loadMembers();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterType, filterCategoryId, filterMemberId, startDate, endDate]);
+    if (dateRangeError || !requestKey) return;
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/transactions?${query}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          if (response.status === 401) { router.push("/login"); return; }
+          const errorBody = await response.json().catch(() => ({}));
+          throw new Error(errorBody.error || "获取交易记录失败，请重试");
+        }
+        const result = await response.json();
+        if (controller.signal.aborted) return;
+        setLoadError(null);
+        setHasAnyTransactions(typeof result.hasAnyTransactions === "boolean" ? result.hasAnyTransactions : null);
+        setTransactions(result.data || []);
+        setSummary(result.summary || { totalIncome: 0, totalExpense: 0, balance: 0 });
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("加载交易记录失败:", error);
+          setLoadError({ key: requestKey, message: error instanceof Error ? error.message : "获取交易记录失败，请重试" });
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoadedQuery(requestKey);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [query, requestKey, router, dateRangeError]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    // 加载分类
+    const loadCategories = async () => {
+      try {
+        const response = await fetch("/api/categories", { signal: controller.signal });
+        if (response.ok) {
+          const result = await response.json();
+          if (controller.signal.aborted) return;
+          setCategories(result.data || []);
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("加载分类失败:", error);
+      }
+    };
+
+    // 加载家庭成员
+    const loadMembers = async () => {
+      try {
+        const response = await fetch("/api/members", { signal: controller.signal });
+        if (response.ok) {
+          const result = await response.json();
+          if (controller.signal.aborted) return;
+          setMembers(result.data || []);
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("加载家庭成员失败:", error);
+      }
+    };
+
+    void loadCategories();
+    void loadMembers();
+    return () => controller.abort();
+  }, [categoriesReload]);
 
   // 显示的交易记录就是从服务器获取的数据
   const filteredTransactions = transactions;
+  const dailyGroups = groupTransactionsByDay(filteredTransactions);
+  useTransactionScrollRestore(navigation.session, navigation.ready && !isLoading && !currentError && !dateRangeError);
+  const onCategoryCreated = (category: Category) => {
+    setCategories((current) => [...current.filter((item) => item.id !== category.id), category]);
+    setCategoriesReload((value) => value + 1);
+  };
 
   const incomeCategories = categories.filter((cat) => cat.type === "income");
   const expenseCategories = categories.filter((cat) => cat.type === "expense");
 
   const filterTypeCategoryValue = (() => {
-    if (filterType === "all") return "__all__";
-    if (!filterCategoryId || filterCategoryId === "__all__") return `${filterType}::__all__`;
-    return `${filterType}::${filterCategoryId}`;
-  })();
-
-  // 当类型变化/分类列表变化时，确保已选分类仍匹配当前类型
-  useEffect(() => {
-    // 未选择具体类型时，不允许选具体分类
     if (filterType === "all") {
-      if (filterCategoryId !== "__all__") setFilterCategoryId("__all__");
-      return;
+      if (effectiveCategoryId === "__all__") return "__all__";
+      const categoryType = categories.find((category) => category.id === effectiveCategoryId)?.type || "all";
+      return `${categoryType}::${effectiveCategoryId}`;
     }
-    if (!filterCategoryId || filterCategoryId === "__all__") return;
-    const selected = categories.find((c) => c.id === filterCategoryId);
-    if (!selected || selected.type !== filterType) {
-      setFilterCategoryId("__all__");
-    }
-  }, [filterType, filterCategoryId, categories]);
+    if (effectiveCategoryId === "__all__") return `${filterType}::__all__`;
+    return `${filterType}::${effectiveCategoryId}`;
+  })();
 
   // 删除交易记录
   const handleDelete = async () => {
@@ -305,7 +354,9 @@ export default function DashboardPage() {
           <Dialog 
             open={isAddModalOpen} 
             onOpenChange={(open) => {
-              setIsAddModalOpen(open);
+              if (open) setIsAddModalOpen(true);
+              else if (addCloseRef.current) void addCloseRef.current();
+              else setIsAddModalOpen(false);
             }}
           >
             <DialogTrigger asChild>
@@ -317,6 +368,10 @@ export default function DashboardPage() {
             <TransactionModal 
               key={isAddModalOpen ? 'open' : 'closed'} // 每次打开时重新挂载组件，确保表单是干净的
               mode="add"
+              isOpen={isAddModalOpen}
+              closeGuardRef={addCloseRef}
+              onCategoryCreated={onCategoryCreated}
+              onSaved={loadTransactions}
               categories={categories} 
               members={members}
               onClose={(shouldRefresh?: boolean) => {
@@ -361,7 +416,7 @@ export default function DashboardPage() {
             {isMobileSummaryOpen ? (
               <CardContent className="pt-0">
                 <SummaryCards
-                  summary={summary}
+                  summary={visibleSummary}
                   showIncome={showIncome}
                   onToggleIncomeVisibility={() => setShowIncome((v) => !v)}
                 />
@@ -373,7 +428,7 @@ export default function DashboardPage() {
         {/* 桌面端：始终显示 */}
         <div className="hidden md:block">
           <SummaryCards
-            summary={summary}
+            summary={visibleSummary}
             showIncome={showIncome}
             onToggleIncomeVisibility={() => setShowIncome((v) => !v)}
           />
@@ -405,6 +460,24 @@ export default function DashboardPage() {
                   )}
                 </Button>
               </div>
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <Label htmlFor="transaction-search" className="text-xs text-muted-foreground">搜索备注</Label>
+                  <Input id="transaction-search" type="search" placeholder="输入备注关键词，如午餐、房租"
+                    value={searchText} onChange={(event) => setSearchText(event.target.value)} />
+                </div>
+                <div className="flex flex-wrap items-center gap-2" aria-label="快捷日期">
+                  {([
+                    ["today", "今天"], ["month", "本月"], ["lastMonth", "上月"], ["all", "全部"],
+                  ] as const).map(([preset, label]) => {
+                    const range = getTransactionDateRange(preset);
+                    const active = startDate === range.start && endDate === range.end;
+                    return <Button key={preset} type="button" size="sm" variant={active ? "default" : "outline"}
+                      aria-pressed={active} onClick={() => applyDatePreset(preset)}>{label}</Button>;
+                  })}
+                  <Button type="button" size="sm" variant="ghost" onClick={clearFilters}>清除筛选</Button>
+                </div>
+              </div>
               {/* 筛选器 */}
               <div
                 className={`${isMobileFiltersOpen ? "grid" : "hidden"} grid-cols-1 sm:grid-cols-2 md:grid md:grid-cols-4 gap-3`}
@@ -420,7 +493,7 @@ export default function DashboardPage() {
                         return;
                       }
                       const [type, category] = value.split("::") as [
-                        TransactionType,
+                        TransactionType | "all",
                         string | undefined,
                       ];
                       setFilterType(type);
@@ -432,13 +505,18 @@ export default function DashboardPage() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__all__">全部收支</SelectItem>
+                      <SelectItem value="all::none">未分类（全部收支）</SelectItem>
+                      {filterTypeCategoryValue.startsWith("all::") && effectiveCategoryId !== "none" ?
+                        <SelectItem value={filterTypeCategoryValue}>指定分类</SelectItem> : null}
                       <SelectItem value="income::__all__">全部收入</SelectItem>
+                      <SelectItem value="income::none">未分类收入</SelectItem>
                       {incomeCategories.map((cat) => (
                         <SelectItem key={cat.id} value={`income::${cat.id}`}>
                           {cat.icon} {cat.name}
                         </SelectItem>
                       ))}
                       <SelectItem value="expense::__all__">全部支出</SelectItem>
+                      <SelectItem value="expense::none">未分类支出</SelectItem>
                       {expenseCategories.map((cat) => (
                         <SelectItem key={cat.id} value={`expense::${cat.id}`}>
                           {cat.icon} {cat.name}
@@ -452,13 +530,13 @@ export default function DashboardPage() {
                   <Select
                     value={filterMemberId}
                     onValueChange={setFilterMemberId}
-                    disabled={members.length === 0}
                   >
                     <SelectTrigger id="filter-member">
                       <SelectValue placeholder={members.length === 0 ? "暂无成员" : "全部人员"} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__all__">全部人员</SelectItem>
+                      <SelectItem value="none">未指定成员</SelectItem>
                       {members.map((m) => (
                         <SelectItem key={m.id} value={m.id}>
                           {m.avatar} {m.name}
@@ -489,11 +567,18 @@ export default function DashboardPage() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            {isLoading ? (
+            {dateRangeError ? (
+              <div className="p-8 text-center text-destructive" role="alert">{dateRangeError}</div>
+            ) : isLoading ? (
               <div className="text-center py-12 text-muted-foreground">
                 <p>加载中...</p>
               </div>
-            ) : filteredTransactions.length === 0 ? (
+            ) : currentError ? (
+              <div className="space-y-3 p-8 text-center" role="alert">
+                <p className="text-destructive">{currentError}</p>
+                <Button type="button" variant="outline" onClick={loadTransactions}>重新加载</Button>
+              </div>
+            ) : filteredTransactions.length === 0 && hasAnyTransactions === false ? (
               <div className="text-center py-12 text-muted-foreground">
                 <div className="text-5xl mb-4">💰</div>
                 <p className="text-lg font-medium mb-2">暂无交易记录</p>
@@ -502,6 +587,12 @@ export default function DashboardPage() {
                   <Plus className="h-4 w-4" />
                   添加第一笔记录
                 </Button>
+              </div>
+            ) : filteredTransactions.length === 0 ? (
+              <div className="space-y-3 p-8 text-center text-muted-foreground">
+                <p className="font-medium">当前筛选没有匹配的记录</p>
+                <p className="text-sm">试试其他关键词或日期范围。</p>
+                <Button type="button" variant="outline" onClick={clearFilters}>清除筛选，查看全部</Button>
               </div>
             ) : (
               <>
@@ -520,8 +611,16 @@ export default function DashboardPage() {
                         <th className="text-right p-4 font-semibold text-sm text-muted-foreground w-24">操作</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      {filteredTransactions.map((transaction) => (
+                    {dailyGroups.map((day) => <tbody key={day.date}>
+                      <tr className="bg-muted/70 border-b">
+                        <th colSpan={8} scope="rowgroup" className="p-4 text-left">
+                          <div className="flex items-center justify-between gap-3">
+                            <span>{day.date}</span>
+                            <span className="text-xs font-normal text-muted-foreground">收入 {showIncome ? formatCurrency(day.income) : "****"} · 支出 {formatCurrency(day.expense)}</span>
+                          </div>
+                        </th>
+                      </tr>
+                      {day.transactions.map((transaction) => (
                         <tr
                           key={transaction.id}
                           className="border-b last:border-0 hover:bg-accent/50 transition-colors group"
@@ -627,13 +726,19 @@ export default function DashboardPage() {
                           </td>
                         </tr>
                       ))}
-                    </tbody>
+                    </tbody>)}
                   </table>
                 </div>
 
                 {/* 移动端卡片视图 */}
-                <div className="md:hidden divide-y">
-                  {filteredTransactions.map((transaction) => (
+                <div className="md:hidden">
+                  {dailyGroups.map((day) => <section key={day.date} aria-label={`${day.date}的交易`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2 bg-muted/70 px-4 py-3">
+                      <h3 className="text-sm font-semibold">{day.date}</h3>
+                      <p className="text-xs text-muted-foreground">收入 {showIncome ? formatCurrency(day.income) : "****"} · 支出 {formatCurrency(day.expense)}</p>
+                    </div>
+                    <div className="divide-y">
+                  {day.transactions.map((transaction) => (
                     <div
                       key={transaction.id}
                       className="p-4 hover:bg-accent/30 transition-colors active:bg-accent/50"
@@ -742,6 +847,8 @@ export default function DashboardPage() {
                       </div>
                     </div>
                   ))}
+                    </div>
+                  </section>)}
                 </div>
               </>
             )}
@@ -754,16 +861,18 @@ export default function DashboardPage() {
         <Dialog 
           open={isEditModalOpen} 
           onOpenChange={(open) => {
-            setIsEditModalOpen(open);
-            // 当对话框关闭时，清除选中的交易记录
-            if (!open) {
-              setSelectedTransaction(null);
-            }
+            if (open) setIsEditModalOpen(true);
+            else if (editCloseRef.current) void editCloseRef.current();
+            else { setIsEditModalOpen(false); setSelectedTransaction(null); }
           }}
         >
           <TransactionModal
             key={selectedTransaction.id} // 使用 key 确保每次编辑不同记录时重新挂载组件
             mode="edit"
+            isOpen={isEditModalOpen}
+            closeGuardRef={editCloseRef}
+            onCategoryCreated={onCategoryCreated}
+            onSaved={loadTransactions}
             transaction={selectedTransaction}
             categories={categories}
             members={members}
@@ -785,7 +894,7 @@ export default function DashboardPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>确认删除</AlertDialogTitle>
             <AlertDialogDescription>
-              确定要删除这条交易记录吗？此操作无法撤销。
+              确定要删除这条交易记录吗？此操作无法撤销。关联的台账记录会保留，收支关联将解除。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -860,8 +969,16 @@ function TransactionModal({
   categories,
   members,
   onClose,
+  onSaved,
+  isOpen,
+  closeGuardRef,
+  onCategoryCreated,
 }: {
+  closeGuardRef: React.MutableRefObject<(() => Promise<boolean>) | null>;
+  onCategoryCreated: (category: Category) => void;
   mode: "add" | "edit";
+  isOpen: boolean;
+  onSaved: () => void;
   transaction?: Transaction;
   categories: Category[];
   members: Member[];
@@ -907,41 +1024,51 @@ function TransactionModal({
   })();
 
   const [formData, setFormData] = useState(initial);
+  const [baseline, setBaseline] = useState(() => JSON.stringify(initial));
+  const [showOptional, setShowOptional] = useState(() => !!(
+    transaction?.description || transaction?.member_id || transaction?.attachment_key
+  ));
+  const amountRef = useRef<HTMLInputElement>(null);
+  const attachmentRef = useRef<HTMLInputElement>(null);
+  const submittingRef = useRef(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [pendingCategory, setPendingCategory] = useState(false);
+  const [creatingCategory, setCreatingCategory] = useState(false);
+  const draft = useFormDraft({
+    scope: mode === "add" ? "transaction:new" : `transaction:${transaction?.id}`,
+    value: formData,
+    onRestore: (value) => {
+      setFormData(value);
+      if (value.description || value.member_id) setShowOptional(true);
+    },
+    dirty: JSON.stringify(formData) !== baseline,
+    enabled: isOpen,
+  });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
+  const { requestClose } = useFormLeaveGuard({
+    draft: { needsProtection: draft.needsProtection || pendingCategory },
+    hasPendingFiles: !!attachment || removeExistingAttachment,
+    isBusy: isSubmitting || isUploading || creatingCategory,
+  });
   useEffect(() => {
-    if (mode === "edit" && transaction) {
-      setFormData({
-        type: transaction.type,
-        amount: transaction.amount.toString(),
-        description: transaction.description || "",
-        category_id: transaction.category_id || "",
-        member_id: transaction.member_id || "",
-        transaction_date: formatDateForInput(transaction.transaction_date),
-      });
-    }
-    if (mode === "add") {
-      setFormData({
-        type: "expense" as TransactionType,
-        amount: "",
-        description: "",
-        category_id: "",
-        member_id: "",
-        transaction_date: getTodayDate(),
-      });
-    }
-    setAttachment(null);
-    setRemoveExistingAttachment(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, transaction?.id]);
-
-  const filteredCategories = categories.filter((cat) => cat.type === formData.type);
+    const guard = () => requestClose(() => onClose(false));
+    closeGuardRef.current = guard;
+    return () => { if (closeGuardRef.current === guard) closeGuardRef.current = null; };
+  }, [closeGuardRef, onClose, requestClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current || creatingCategory) return;
+    if (pendingCategory) {
+      toast.error("请先添加分类或取消新增分类，再保存交易");
+      return;
+    }
+    const keepOpen = mode === "add" && (e.nativeEvent as SubmitEvent).submitter?.getAttribute("value") === "continue";
+    submittingRef.current = true;
     setIsSubmitting(true);
 
     try {
@@ -961,12 +1088,14 @@ function TransactionModal({
         if (attachment.size > maxBytes) throw new Error("附件过大（最大 10MB）");
 
         setIsUploading(true);
+        setUploadProgress(0);
         const safeName = attachment.name.replace(/[^\w.\-() ]+/g, "_");
         const pathname = `transactions/${Date.now()}_${safeName}`;
         const blob = await upload(pathname, attachment, {
           access: "public",
           handleUploadUrl: "/api/blob/upload",
           contentType: attachment.type || undefined,
+          onUploadProgress: ({ percentage }) => setUploadProgress(Math.round(percentage)),
         });
         attachment_key = blob.url;
         attachment_name = attachment.name;
@@ -990,9 +1119,9 @@ function TransactionModal({
         body: JSON.stringify({
           type: formData.type,
           amount: parseFloat(formData.amount),
-          description: formData.description || undefined,
-          category_id: formData.category_id || undefined,
-          member_id: formData.member_id || undefined,
+          description: formData.description || null,
+          category_id: formData.category_id || null,
+          member_id: formData.member_id || null,
           transaction_date: formData.transaction_date,
           attachment_key,
           attachment_name,
@@ -1005,11 +1134,26 @@ function TransactionModal({
         throw new Error(error.error || (mode === "add" ? "创建失败" : "更新失败"));
       }
 
-      onClose(true);
+      draft.clear();
+      if (keepOpen) {
+        const next = { ...formData, amount: "", description: "" };
+        setFormData(next);
+        setBaseline(JSON.stringify(next));
+        setAttachment(null);
+        setRemoveExistingAttachment(false);
+        setUploadProgress(0);
+        if (attachmentRef.current) attachmentRef.current.value = "";
+        onSaved();
+        toast.success("已保存，继续记下一笔");
+        amountRef.current?.focus();
+      } else {
+        onClose(true);
+      }
     } catch (error) {
       console.error(mode === "add" ? "创建交易记录失败:" : "更新交易记录失败:", error);
       toast.error(error instanceof Error ? error.message : "操作失败，请重试");
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
       setIsUploading(false);
     }
@@ -1020,106 +1164,38 @@ function TransactionModal({
   return (
     <DialogContent className="sm:max-w-[500px]">
       <DialogHeader>
-        <DialogTitle>{mode === "add" ? "添加交易记录" : "编辑交易记录"}</DialogTitle>
+        <DialogTitle>{mode === "add" ? "快速记一笔" : "编辑交易记录"}</DialogTitle>
         <DialogDescription>
-          {mode === "add" ? "填写交易详情，记录您的收支情况" : "修改交易详情"}
+          {mode === "add" ? "先记金额与分类，更多信息可以稍后补充" : "修改交易详情"}
         </DialogDescription>
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}type`}>交易类型 *</Label>
-            <Select
-              value={formData.type}
-              onValueChange={(value) =>
-                setFormData({
-                  ...formData,
-                  type: value as TransactionType,
-                  category_id: "",
-                })
-              }
-            >
-              <SelectTrigger id={`${idPrefix}type`}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="income">收入</SelectItem>
-                <SelectItem value="expense">支出</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor={`${idPrefix}amount`}>金额 *</Label>
-            <Input
-              id={`${idPrefix}amount`}
-              type="number"
-              step="0.01"
-              min="0.01"
-              placeholder="请输入金额"
-              value={formData.amount}
-              onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-              required
-            />
-          </div>
+        <DraftNotice draft={draft} />
+        <div className="space-y-2 rounded-lg border bg-muted/30 p-4">
+          <Label htmlFor={`${idPrefix}amount`}>金额（元） *</Label>
+          <Input ref={amountRef} id={`${idPrefix}amount`} type="number" step="0.01" min="0.01"
+            inputMode="decimal" autoFocus placeholder="0.00" className="h-14 text-3xl font-semibold md:text-3xl"
+            value={formData.amount} onChange={(event) => setFormData({ ...formData, amount: event.target.value })} required />
+        </div>
+        <div className="flex gap-2" role="group" aria-label="收支类型">
+          {(["expense", "income"] as const).map((type) => (
+            <Button key={type} type="button" className="flex-1" variant={formData.type === type ? "default" : "outline"}
+              aria-pressed={formData.type === type} disabled={isSubmitting || isUploading || creatingCategory}
+              onClick={() => setFormData({ ...formData, type, category_id: formData.type === type ? formData.category_id : "" })}>
+              {type === "expense" ? "支出" : "收入"}
+            </Button>
+          ))}
         </div>
 
-        <div className="space-y-2">
-          <Label htmlFor={`${idPrefix}category`}>分类</Label>
-          <Select
-            value={formData.category_id}
-            onValueChange={(value) => setFormData({ ...formData, category_id: value })}
-            disabled={filteredCategories.length === 0}
-          >
-            <SelectTrigger id={`${idPrefix}category`}>
-              <SelectValue
-                placeholder={
-                  filteredCategories.length === 0
-                    ? `暂无${formData.type === "income" ? "收入" : "支出"}分类`
-                    : "请选择分类（可选）"
-                }
-              />
-            </SelectTrigger>
-            <SelectContent>
-              {filteredCategories.map((cat) => (
-                <SelectItem key={cat.id} value={cat.id}>
-                  {cat.icon} {cat.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${idPrefix}description`}>描述</Label>
-          <Input
-            id={`${idPrefix}description`}
-            type="text"
-            placeholder="请输入描述（可选）"
-            value={formData.description}
-            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${idPrefix}member`}>家庭成员</Label>
-          <Select
-            value={formData.member_id}
-            onValueChange={(value) => setFormData({ ...formData, member_id: value })}
-            disabled={members.length === 0}
-          >
-            <SelectTrigger id={`${idPrefix}member`}>
-              <SelectValue placeholder={members.length === 0 ? "暂无成员" : "请选择成员（可选）"} />
-            </SelectTrigger>
-            <SelectContent>
-              {members.map((member) => (
-                <SelectItem key={member.id} value={member.id}>
-                  {member.avatar} {member.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <TransactionCategoryPicker id={`${idPrefix}category`} type={formData.type} categories={categories}
+          value={formData.category_id} disabled={isSubmitting || isUploading}
+          onChange={(category_id) => setFormData((current) => ({ ...current, category_id }))}
+          onCreated={(category) => {
+            onCategoryCreated(category);
+            setFormData((current) => current.type === category.type ? { ...current, category_id: category.id } : current);
+          }}
+          onPendingChange={(pending, busy) => { setPendingCategory(pending); setCreatingCategory(busy); }} />
 
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}date`}>交易日期 *</Label>
@@ -1130,6 +1206,45 @@ function TransactionModal({
             onChange={(e) => setFormData({ ...formData, transaction_date: e.target.value })}
             required
           />
+        </div>
+
+        <Button type="button" variant="ghost" className="w-full justify-between"
+          aria-expanded={showOptional} aria-controls={`${idPrefix}optional-fields`}
+          onClick={() => setShowOptional((open) => !open)}>
+          备注、成员与附件（可选）
+          {showOptional ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </Button>
+        <div id={`${idPrefix}optional-fields`} hidden={!showOptional} className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}description`}>备注</Label>
+          <Input
+            id={`${idPrefix}description`}
+            type="text"
+            placeholder="如午餐、超市采购（可选）"
+            value={formData.description}
+            onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}member`}>家庭成员</Label>
+          <Select
+            value={formData.member_id || "__none__"}
+            onValueChange={(value) => setFormData({ ...formData, member_id: value === "__none__" ? "" : value })}
+            disabled={members.length === 0}
+          >
+            <SelectTrigger id={`${idPrefix}member`}>
+              <SelectValue placeholder={members.length === 0 ? "暂无成员" : "请选择成员（可选）"} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">不指定成员</SelectItem>
+              {members.map((member) => (
+                <SelectItem key={member.id} value={member.id}>
+                  {member.avatar} {member.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         <div className="space-y-2">
@@ -1173,6 +1288,7 @@ function TransactionModal({
           ) : null}
 
           <Input
+            ref={attachmentRef}
             id={`${idPrefix}attachment`}
             type="file"
             accept="image/*,application/pdf"
@@ -1193,7 +1309,7 @@ function TransactionModal({
                 type="button"
                 variant="ghost"
                 size="sm"
-                onClick={() => setAttachment(null)}
+                onClick={() => { setAttachment(null); if (attachmentRef.current) attachmentRef.current.value = ""; }}
                 disabled={isSubmitting || isUploading}
               >
                 移除
@@ -1201,20 +1317,28 @@ function TransactionModal({
             </div>
           ) : null}
         </div>
+        </div>
+        {isUploading ? <div className="space-y-1" role="status">
+          <p className="text-sm text-muted-foreground">附件上传中 {uploadProgress}%</p>
+          <progress className="w-full" max={100} value={uploadProgress} aria-label="附件上传进度" />
+        </div> : null}
         </DialogBody>
 
         <DialogFooter>
           <Button
             type="button"
             variant="outline"
-            onClick={() => onClose(false)}
+            onClick={() => { void requestClose(() => onClose(false)); }}
             disabled={isSubmitting || isUploading}
           >
             取消
           </Button>
-          <Button type="submit" disabled={isSubmitting || isUploading}>
+          <Button type="submit" name="action" value="save" disabled={isSubmitting || isUploading || creatingCategory}>
             {isSubmitting || isUploading ? "保存中..." : "保存"}
           </Button>
+          {mode === "add" ? <Button type="submit" name="action" value="continue" variant="outline" disabled={isSubmitting || isUploading || creatingCategory}>
+            保存并继续
+          </Button> : null}
         </DialogFooter>
       </form>
     </DialogContent>

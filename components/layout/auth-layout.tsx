@@ -1,6 +1,5 @@
 import { ReactNode } from "react";
-import { Wallet } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 interface AuthLayoutProps {
   children: ReactNode;
@@ -8,7 +7,7 @@ interface AuthLayoutProps {
   subtitle?: string;
 }
 
-export function AuthLayout({ children, title, subtitle }: AuthLayoutProps) {
+export function AuthLayout({ children, title }: AuthLayoutProps) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-primary/5 via-background to-secondary/5 flex items-center justify-center p-4">
       <div className="w-full max-w-md">

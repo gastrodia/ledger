@@ -38,6 +38,7 @@ export default function NotesPage() {
   const router = useRouter();
   const [notes, setNotes] = useState<Note[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [archived, setArchived] = useState<"false" | "true">("false");
 
@@ -45,28 +46,37 @@ export default function NotesPage() {
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [previewNote, setPreviewNote] = useState<Note | null>(null);
 
-  const loadNotes = async () => {
-    try {
-      setIsLoading(true);
-      const params = new URLSearchParams();
-      if (q.trim()) params.set("q", q.trim());
-      params.set("archived", archived);
-      const res = await fetch(`/api/notes?${params.toString()}`);
-      if (!res.ok) throw new Error("加载失败");
-      const json = await res.json();
-      setNotes(json.data || []);
-    } catch (error) {
-      console.error("加载留言失败:", error);
-      toast.error("加载失败，请重试");
-    } finally {
-      setIsLoading(false);
-    }
+  const [reload, setReload] = useState(0);
+  const loadNotes = () => {
+    setIsLoading(true);
+    setReload((value) => value + 1);
   };
 
   useEffect(() => {
-    loadNotes();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [archived]);
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (q.trim()) params.set("q", q.trim());
+        params.set("archived", archived);
+        const res = await fetch(`/api/notes?${params.toString()}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!res.ok) throw new Error("加载失败");
+        const json = await res.json();
+        if (controller.signal.aborted) return;
+        setLoadError(null);
+        setNotes(json.data || []);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("加载笔记失败:", error);
+        setLoadError("笔记加载失败，请重试。已有笔记不会因此被删除。");
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [archived, q, reload]);
 
   const visibleNotes = useMemo(() => {
     // 服务器已排序；这里只做本地过滤的兜底（输入框还没触发查询时）
@@ -123,7 +133,7 @@ export default function NotesPage() {
           <div>
             <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
               <MessageSquare className="h-6 w-6" />
-              留言
+              笔记
             </h1>
             <p className="text-muted-foreground mt-1">记录你的 Markdown 笔记</p>
           </div>
@@ -131,7 +141,7 @@ export default function NotesPage() {
           <Button asChild>
             <Link href="/dashboard/notes/new">
               <Plus className="h-4 w-4" />
-              新增留言
+              新增笔记
             </Link>
           </Button>
         </div>
@@ -143,13 +153,13 @@ export default function NotesPage() {
               <div className="flex items-center gap-2">
                 <Button
                   variant={archived === "false" ? "default" : "outline"}
-                  onClick={() => setArchived("false")}
+                  onClick={() => { if (archived !== "false") setIsLoading(true); setArchived("false"); }}
                 >
                   未归档
                 </Button>
                 <Button
                   variant={archived === "true" ? "default" : "outline"}
-                  onClick={() => setArchived("true")}
+                  onClick={() => { if (archived !== "true") setIsLoading(true); setArchived("true"); }}
                 >
                   已归档
                 </Button>
@@ -160,7 +170,7 @@ export default function NotesPage() {
             <div className="flex flex-col sm:flex-row gap-2">
               <Input
                 value={q}
-                onChange={(e) => setQ(e.target.value)}
+                onChange={(e) => { setIsLoading(true); setQ(e.target.value); }}
                 placeholder="搜索标题/内容"
               />
               <Button variant="outline" onClick={loadNotes} disabled={isLoading}>
@@ -170,9 +180,16 @@ export default function NotesPage() {
 
             {isLoading ? (
               <div className="text-center py-10 text-muted-foreground">加载中...</div>
+            ) : loadError ? (
+              <div className="space-y-3 rounded-md border p-6 text-center" role="alert">
+                <p>{loadError}</p>
+                <Button variant="outline" onClick={loadNotes}>重新加载</Button>
+              </div>
             ) : visibleNotes.length === 0 ? (
-              <div className="text-center py-10 text-muted-foreground">
-                暂无留言
+              <div className="space-y-3 py-10 text-center">
+                <p>{q.trim() ? "没有找到匹配的笔记" : archived === "true" ? "还没有已归档笔记" : "写下第一篇笔记"}</p>
+                <p className="text-sm text-muted-foreground">{q.trim() ? "试试其他关键词，或清除搜索查看全部笔记。" : archived === "true" ? "归档后的笔记会显示在这里，随时可以恢复。" : "记录计划、想法和图片，未完成的输入可以保存在本机草稿中。"}</p>
+                {q.trim() ? <Button variant="outline" onClick={() => { setIsLoading(true); setQ(""); }}>清除搜索</Button> : archived === "false" ? <Button asChild><Link href="/dashboard/notes/new">新建笔记</Link></Button> : null}
               </div>
             ) : (
               <div className="divide-y rounded-md border">
@@ -260,7 +277,7 @@ export default function NotesPage() {
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>确认删除</AlertDialogTitle>
-              <AlertDialogDescription>确定要删除这条留言吗？此操作无法撤销。</AlertDialogDescription>
+              <AlertDialogDescription>确定要删除这条笔记吗？此操作无法撤销。</AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>取消</AlertDialogCancel>

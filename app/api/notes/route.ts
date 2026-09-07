@@ -46,20 +46,20 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ data: rows });
   } catch (error) {
-    console.error('获取留言列表错误:', error);
+    console.error('获取笔记列表错误:', error);
     const message = error instanceof Error ? error.message : '未知错误';
     // 常见问题：数据库未创建 notes 表
     if (message.includes('relation') && message.includes('notes') && message.includes('does not exist')) {
       return NextResponse.json(
         {
-          error: '获取留言列表失败',
+          error: '获取笔记列表失败',
           details: '数据库缺少 notes 表。请先执行 scripts/init-db.sql（或跑一次迁移）创建表。',
         },
         { status: 500 }
       );
     }
     return NextResponse.json(
-      { error: '获取留言列表失败', details: message },
+      { error: '获取笔记列表失败', details: message },
       { status: 500 }
     );
   }
@@ -100,13 +100,13 @@ export async function POST(request: NextRequest) {
     `;
 
     return NextResponse.json(
-      { message: '留言创建成功', data: result[0] },
+      { message: '笔记创建成功', data: result[0] },
       { status: 201 }
     );
   } catch (error) {
-    console.error('创建留言错误:', error);
+    console.error('创建笔记错误:', error);
     const message = error instanceof Error ? error.message : '未知错误';
-    return NextResponse.json({ error: '创建留言失败', details: message }, { status: 500 });
+    return NextResponse.json({ error: '创建笔记失败', details: message }, { status: 500 });
   }
 }
 

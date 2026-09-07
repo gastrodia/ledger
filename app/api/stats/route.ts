@@ -1,33 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-
-function isValidMonth(month: string) {
-  return /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
-}
-
-function isValidYear(year: string) {
-  return /^\d{4}$/.test(year);
-}
-
-function getMonthRangeExclusive(month: string) {
-  const [y, m] = month.split("-");
-  const year = Number(y);
-  const monthNum = Number(m); // 1-12
-  const start = `${y}-${m}-01`;
-  const next = new Date(year, monthNum, 1); // monthNum is 1-based; Date month is 0-based, so this is next month
-  const nextY = next.getFullYear();
-  const nextM = String(next.getMonth() + 1).padStart(2, "0");
-  const endExclusive = `${nextY}-${nextM}-01`;
-  return { start, endExclusive };
-}
-
-function getYearRangeExclusive(yearStr: string) {
-  const year = Number(yearStr);
-  const start = `${yearStr}-01-01`;
-  const endExclusive = `${year + 1}-01-01`;
-  return { start, endExclusive };
-}
+import { getStatsPeriod, localCalendarDate } from "@/lib/stats-period";
 
 export async function GET(request: NextRequest) {
   try {
@@ -53,31 +27,12 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // 计算时间范围（半开区间：>= start 且 < endExclusive）
-    let startDate: string;
-    let endExclusive: string;
-    if (month) {
-      if (!isValidMonth(month)) {
-        return NextResponse.json(
-          { error: "月份格式错误，应为 YYYY-MM" },
-          { status: 400 }
-        );
-      }
-      const r = getMonthRangeExclusive(month);
-      startDate = r.start;
-      endExclusive = r.endExclusive;
-    } else {
-      // year 必定存在
-      if (!isValidYear(year as string)) {
-        return NextResponse.json(
-          { error: "年份格式错误，应为 YYYY" },
-          { status: 400 }
-        );
-      }
-      const r = getYearRangeExclusive(year as string);
-      startDate = r.start;
-      endExclusive = r.endExclusive;
+    const period = getStatsPeriod(month ? "month" : "year", (month || year) as string,
+      searchParams.get("asOf") || localCalendarDate());
+    if (!period) {
+      return NextResponse.json({ error: "月份、年份或统计日期格式错误" }, { status: 400 });
     }
+    const { startDate, endExclusive } = period;
 
     // 按分类统计 - 收入
     const categoryIncomeStats = await sql`
@@ -157,12 +112,26 @@ export async function GET(request: NextRequest) {
     const summaryResult = await sql`
       SELECT 
         COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as "totalIncome",
-        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as "totalExpense"
+        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as "totalExpense",
+        COALESCE(SUM(CASE WHEN type = 'expense' AND transaction_date < ${period.dailyEndExclusive} THEN amount ELSE 0 END), 0) as "elapsedExpense"
       FROM transactions
       WHERE user_id = ${session.userId}
         AND transaction_date >= ${startDate}
         AND transaction_date < ${endExclusive}
     `;
+
+    // The comparison deliberately uses both complete calendar ranges. The client
+    // labels an unfinished current period, rather than presenting this as same-progress growth.
+    const previousResult = await sql`
+      SELECT
+        COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as "totalIncome",
+        COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as "totalExpense"
+      FROM transactions
+      WHERE user_id = ${session.userId}
+        AND transaction_date >= ${period.previousStartDate}
+        AND transaction_date < ${period.previousEndExclusive}
+    `;
+    const previous = previousResult[0] || { totalIncome: 0, totalExpense: 0 };
 
     const summary = summaryResult[0] || { totalIncome: 0, totalExpense: 0 };
     let monthlyStats: Array<{ month: number; income: number; expense: number }> = [];
@@ -217,6 +186,12 @@ export async function GET(request: NextRequest) {
           totalExpense: Number(summary.totalExpense) || 0,
           balance: (Number(summary.totalIncome) || 0) - (Number(summary.totalExpense) || 0),
         },
+        period,
+        comparison: {
+          totalIncome: Number(previous.totalIncome) || 0,
+          totalExpense: Number(previous.totalExpense) || 0,
+        },
+        dailyExpense: period.elapsedDays > 0 ? (Number(summary.elapsedExpense) || 0) / period.elapsedDays : null,
         monthlyStats,
       },
     });

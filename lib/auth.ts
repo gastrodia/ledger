@@ -1,9 +1,7 @@
 import { SignJWT, jwtVerify, JWTPayload } from 'jose';
 import { cookies } from 'next/headers';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'your-secret-key-change-this-in-production'
-);
+import { sessionSecret } from '@/lib/session-secret';
 
 const SESSION_DURATION = 30 * 24 * 60 * 60 * 1000; // 30天
 
@@ -21,7 +19,7 @@ export async function createSession(data: SessionData): Promise<string> {
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('30d')
-    .sign(JWT_SECRET);
+    .sign(sessionSecret);
 
   return token;
 }
@@ -31,7 +29,7 @@ export async function createSession(data: SessionData): Promise<string> {
  */
 export async function verifySession(token: string): Promise<SessionData | null> {
   try {
-    const verified = await jwtVerify(token, JWT_SECRET);
+    const verified = await jwtVerify(token, sessionSecret);
     return verified.payload as SessionData;
   } catch {
     return null;

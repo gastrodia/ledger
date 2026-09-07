@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
+import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
+import { useFormDraft } from "@/hooks/use-form-draft";
+import { DraftNotice } from "@/components/ui/draft-notice";
+
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,7 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/use-confirm";
-import { upload } from "@vercel/blob/client";
+import { upload } from "@/lib/upload";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type { GivenGiftDetail, GivenGiftListItem, GiftsGivenSummary } from "@/types";
 import type { GivenGiftItem } from "@/types";
@@ -42,11 +47,30 @@ function formatQty(q: number) {
   return s.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
+type FormCloseGuard = (onClose: () => void) => Promise<boolean>;
+type RegisterCloseGuard = (guard: FormCloseGuard) => () => void;
+
+function useFormCloseBridge() {
+  const guardRef = useRef<FormCloseGuard | null>(null);
+  const register = useCallback((guard: FormCloseGuard) => {
+    guardRef.current = guard;
+    return () => { if (guardRef.current === guard) guardRef.current = null; };
+  }, []);
+  const close = useCallback((onClose: () => void) => {
+    if (guardRef.current) void guardRef.current(onClose);
+    else onClose();
+  }, []);
+  return { register, close };
+}
+
 export default function GiftsGivenPage() {
+  const formClose = useFormCloseBridge();
   const router = useRouter();
   const { confirm } = useConfirm();
 
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const requestVersion = useRef(0);
   const [items, setItems] = useState<GivenGiftListItem[]>([]);
   const [summary, setSummary] = useState<GiftsGivenSummary>({
     cashTotal: 0,
@@ -70,42 +94,51 @@ export default function GiftsGivenPage() {
   const [editingGift, setEditingGift] = useState<GivenGiftDetail | null>(null);
   const [editingLoading, setEditingLoading] = useState(false);
 
-  const loadGifts = async () => {
-    try {
-      setIsLoading(true);
-      const params = new URLSearchParams();
-      if (q.trim()) params.append("q", q.trim());
-      if (startDate) params.append("startDate", startDate);
-      if (endDate) params.append("endDate", endDate);
-      if (hasCash) params.append("hasCash", "true");
-      if (hasItems) params.append("hasItems", "true");
+  const loadGifts = (isActive = () => true) => {
+    const version = ++requestVersion.current;
+    const params = new URLSearchParams();
+    if (q.trim()) params.append("q", q.trim());
+    if (startDate) params.append("startDate", startDate);
+    if (endDate) params.append("endDate", endDate);
+    if (hasCash) params.append("hasCash", "true");
+    if (hasItems) params.append("hasItems", "true");
 
-      const res = await fetch(`/api/gifts-given?${params.toString()}`);
-      if (!res.ok) {
-        if (res.status === 401) {
-          router.push("/login");
-          return;
+    return fetch(`/api/gifts-given?${params.toString()}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          if (res.status === 401) {
+            router.push("/login");
+            return;
+          }
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || "获取送礼记录失败");
         }
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "获取送礼记录失败");
-      }
-      const result = await res.json();
-      setItems(result.data || []);
-      setSummary(
-        result.summary || { cashTotal: 0, itemEstimatedTotal: 0, recordCount: 0 }
-      );
-    } catch (e) {
-      console.error("加载送礼记录失败:", e);
-      toast.error(e instanceof Error ? e.message : "加载失败，请重试");
-    } finally {
-      setIsLoading(false);
-    }
+        const result = await res.json();
+        if (!isActive() || version !== requestVersion.current) return;
+        setLoadError(null);
+        setItems(result.data || []);
+        setSummary(result.summary || { cashTotal: 0, itemEstimatedTotal: 0, recordCount: 0 });
+      })
+      .catch((e: unknown) => {
+        console.error("加载送礼记录失败:", e);
+        if (isActive() && version === requestVersion.current) setLoadError(e instanceof Error ? e.message : "加载失败，请重试");
+      })
+      .finally(() => { if (isActive() && version === requestVersion.current) setIsLoading(false); });
   };
 
   useEffect(() => {
-    loadGifts();
+    let active = true;
+    loadGifts(() => active);
+    return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, startDate, endDate, hasCash, hasItems]);
+
+  const hasFilters = !!(q.trim() || startDate || endDate || hasCash || hasItems);
+  const clearFilters = () => {
+    setIsLoading(true);
+    setQ(""); setStartDate(""); setEndDate(""); setHasCash(false); setHasItems(false);
+  };
+  const retryLoad = () => { setIsLoading(true); setLoadError(null); void loadGifts(); };
 
   const openAdd = () => {
     setModalMode("add");
@@ -173,7 +206,7 @@ export default function GiftsGivenPage() {
   const handleDelete = async (g: GivenGiftListItem) => {
     const ok = await confirm({
       title: "删除送礼记录",
-      description: "确定要删除这条送礼记录吗？附件也会同时删除，且无法撤销。",
+      description: "将永久删除这次送礼的现金、物品明细及附件。已关联收支会保留，仅解除关联。此操作无法撤销。",
       confirmText: "删除",
       cancelText: "取消",
     });
@@ -203,12 +236,13 @@ export default function GiftsGivenPage() {
 
   return (
     <DashboardLayout>
+      <TransactionLinksProvider sourceType="given_gift" sourceIds={items.map((record) => record.id)}>
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">送礼</h1>
             <p className="text-muted-foreground mt-1">
-              记录我送给别人的现金与物品（支持组合礼、附件）
+              记录我送给别人的现金与物品；本台账不自动进入收支统计。
             </p>
           </div>
           <Button className="w-full sm:w-auto" onClick={openAdd}>
@@ -232,17 +266,18 @@ export default function GiftsGivenPage() {
           ))}
         </div>
 
+        <p className="text-xs text-muted-foreground">以上汇总按当前筛选计算，现金与物品估值分别统计。</p>
         <Card>
           <CardHeader className="border-b">
             <div className="flex flex-col gap-4">
-              <CardTitle>筛选</CardTitle>
+              <div className="flex items-center justify-between gap-3"><CardTitle>筛选</CardTitle>{hasFilters && <Button variant="ghost" size="sm" onClick={clearFilters}>清除筛选</Button>}</div>
               <div className="grid gap-4 md:grid-cols-4">
                 <div className="space-y-2">
                   <Label>关键词</Label>
                   <Input
                     placeholder="收礼人 / 事由 / 备注"
                     value={q}
-                    onChange={(e) => setQ(e.target.value)}
+                    onChange={(e) => { setIsLoading(true); setQ(e.target.value); }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -250,7 +285,7 @@ export default function GiftsGivenPage() {
                   <Input
                     type="date"
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
+                    onChange={(e) => { setIsLoading(true); setStartDate(e.target.value); }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -258,7 +293,7 @@ export default function GiftsGivenPage() {
                   <Input
                     type="date"
                     value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
+                    onChange={(e) => { setIsLoading(true); setEndDate(e.target.value); }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -267,14 +302,14 @@ export default function GiftsGivenPage() {
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Checkbox
                         checked={hasCash}
-                        onCheckedChange={(v) => setHasCash(!!v)}
+                        onCheckedChange={(v) => { setIsLoading(true); setHasCash(!!v); }}
                       />
                       现金
                     </label>
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Checkbox
                         checked={hasItems}
-                        onCheckedChange={(v) => setHasItems(!!v)}
+                        onCheckedChange={(v) => { setIsLoading(true); setHasItems(!!v); }}
                       />
                       物品
                     </label>
@@ -287,9 +322,17 @@ export default function GiftsGivenPage() {
           <CardContent className="p-0">
             {isLoading ? (
               <div className="text-center py-12 text-muted-foreground">加载中...</div>
+            ) : loadError ? (
+              <div role="alert" className="space-y-3 px-4 py-10 text-center">
+                <p className="text-sm text-destructive">{loadError}</p>
+                <Button variant="outline" onClick={retryLoad}>重新加载</Button>
+              </div>
             ) : items.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
-                暂无记录，点击右上角“新增记录”开始记录
+                <p>{hasFilters ? "没有符合筛选条件的送礼记录" : "还没有送礼记录"}</p>
+                <Button className="mt-3" variant="outline" onClick={hasFilters ? clearFilters : openAdd}>
+                  {hasFilters ? "清除筛选" : "新增第一条记录"}
+                </Button>
               </div>
             ) : (
               <>
@@ -350,6 +393,7 @@ export default function GiftsGivenPage() {
                                 </button>
                               ) : null}
                             </div>
+                            <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.recipient_name}的送礼记录`} /></div>
                             {g.notes ? (
                               <div className="mt-1 text-xs text-muted-foreground truncate max-w-[420px]">
                                 备注：{g.notes}
@@ -414,6 +458,7 @@ export default function GiftsGivenPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{g.recipient_name}</div>
+                          <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.recipient_name}的送礼记录`} /></div>
                           <div className="text-sm text-muted-foreground mt-1">
                             {formatDate(g.gift_date)}
                           </div>
@@ -542,11 +587,13 @@ export default function GiftsGivenPage() {
         <Dialog
           open={isModalOpen}
           onOpenChange={(open) => {
-            setIsModalOpen(open);
-            if (!open) setEditingGift(null);
+            if (open) setIsModalOpen(true);
+            else formClose.close(() => { setIsModalOpen(false); setEditingGift(null); });
           }}
         >
           <GiftsGivenModal
+            enabled={isModalOpen}
+            registerCloseGuard={formClose.register}
             key={
               isModalOpen
                 ? `${modalMode}-${editingGift?.id || "new"}`
@@ -622,16 +669,21 @@ export default function GiftsGivenPage() {
           </DialogContent>
         </Dialog>
       </div>
+      </TransactionLinksProvider>
     </DashboardLayout>
   );
 }
 
 function GiftsGivenModal({
+  registerCloseGuard,
+  enabled,
   mode,
   gift,
   loading,
   onClose,
 }: {
+  registerCloseGuard: RegisterCloseGuard;
+  enabled: boolean;
   mode: "add" | "edit";
   gift: GivenGiftDetail | null;
   loading: boolean;
@@ -651,7 +703,7 @@ function GiftsGivenModal({
         hasItems: (gift.items || []).length > 0,
         items:
           (gift.items || []).map((it, idx) => ({
-            id: `${Date.now()}_${idx}`,
+            id: `existing-${gift.id}-${idx}`,
             item_name: it.item_name,
             quantity: String(it.quantity),
             unit: it.unit || "件",
@@ -679,17 +731,16 @@ function GiftsGivenModal({
 
   const [form, setForm] = useState(initial);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // 附件：对齐交易记录（单附件，三态）
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
-  useEffect(() => {
-    setForm(initial);
-    setAttachment(null);
-    setRemoveExistingAttachment(false);
-  }, [initial]);
+  // The parent key changes when the gift loads or the dialog opens/closes.
+  // Form state is initialized by that remount, without an effect resetting edits.
 
   const canEditFields = mode === "add" || !!gift;
 
@@ -741,10 +792,32 @@ function GiftsGivenModal({
     }
   };
 
+  const [initialSnapshot] = useState(() => JSON.stringify(form));
+  const draft = useFormDraft({
+    scope: `gifts-given:${mode === "edit" ? gift?.id : "new"}`,
+    value: form,
+    dirty: JSON.stringify(form) !== initialSnapshot,
+    enabled: enabled && (mode === "add" || !!gift) && !loading,
+    onRestore: (restored) => {
+      setForm(restored);
+      setSubmitError(null);
+      setAttachment(null);
+      setRemoveExistingAttachment(false);
+    },
+  });
+
+  const { requestClose } = useFormLeaveGuard({
+    draft,
+    isBusy: isSubmitting || isUploading,
+    hasPendingFiles: !!attachment,
+  });
+  useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canEditFields) return;
     setIsSubmitting(true);
+    setSubmitError(null);
 
     try {
       validate();
@@ -764,6 +837,7 @@ function GiftsGivenModal({
         if (!isAllowed) throw new Error("仅支持上传图片或 PDF");
         if (attachment.size > maxBytes) throw new Error("附件过大（最大 10MB）");
 
+        setUploadProgress(0);
         setIsUploading(true);
         const safeName = attachment.name.replace(/[^\w.\-() ]+/g, "_");
         const pathname = `gifts-given/${Date.now()}_${safeName}`;
@@ -771,7 +845,9 @@ function GiftsGivenModal({
           access: "public",
           handleUploadUrl: "/api/blob/upload",
           contentType: attachment.type || undefined,
+          onUploadProgress: ({ percentage }) => setUploadProgress(percentage),
         });
+        setIsUploading(false);
         attachment_key = blob.url;
         attachment_name = attachment.name;
         attachment_type = blob.contentType || attachment.type || undefined;
@@ -816,8 +892,10 @@ function GiftsGivenModal({
       }
 
       toast.success(mode === "add" ? "已创建" : "已更新");
+      draft.clear();
       onClose(true);
     } catch (e) {
+      setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error(mode === "add" ? "创建送礼失败:" : "更新送礼失败:", e);
       toast.error(e instanceof Error ? e.message : "操作失败，请重试");
     } finally {
@@ -848,6 +926,15 @@ function GiftsGivenModal({
       ) : (
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
           <DialogBody className="space-y-5 py-4">
+          <DraftNotice draft={draft} />
+          {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
+          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
+          {isUploading && (
+            <div className="space-y-1" role="status" aria-live="polite">
+              <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>
+              <progress aria-label="附件上传进度" max={100} value={uploadProgress} className="w-full" />
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor={`${idPrefix}recipient`}>收礼人 *</Label>
@@ -1156,7 +1243,7 @@ function GiftsGivenModal({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onClose(false)}
+              onClick={() => requestClose(() => onClose(false))}
               disabled={isSubmitting || isUploading}
             >
               取消

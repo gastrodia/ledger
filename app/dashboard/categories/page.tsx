@@ -54,41 +54,52 @@ export default function CategoriesPage() {
   const router = useRouter();
   const { confirm } = useConfirm();
   const [categories, setCategories] = useState<Category[]>([]);
-  const [filterType, setFilterType] = useState<TransactionType | "all">("all");
+  const [filterType] = useState<TransactionType | "all">("all");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // 加载分类
-  const loadCategories = async () => {
-    try {
-      setIsLoading(true);
-      const params = new URLSearchParams();
-      if (filterType !== "all") params.append("type", filterType);
-
-      const response = await fetch(`/api/categories?${params.toString()}`);
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/login");
-          return;
-        }
-        throw new Error("获取分类失败");
-      }
-
-      const result = await response.json();
-      setCategories(result.data || []);
-    } catch (error) {
-      console.error("加载分类失败:", error);
-    } finally {
-      setIsLoading(false);
-    }
+  const [reload, setReload] = useState(0);
+  const loadCategories = () => {
+    setLoadError(null);
+    setIsLoading(true);
+    setReload((value) => value + 1);
   };
 
-  // 初始加载
   useEffect(() => {
-    loadCategories();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterType]);
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (filterType !== "all") params.append("type", filterType);
+
+        const response = await fetch(`/api/categories?${params.toString()}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!response.ok) {
+          if (response.status === 401) {
+            router.push("/login");
+            return;
+          }
+          throw new Error("获取分类失败");
+        }
+
+        const result = await response.json();
+        if (controller.signal.aborted) return;
+        setCategories(result.data || []);
+        setLoadError(null);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("加载分类失败:", error);
+        setLoadError("分类加载失败，请检查网络后重试");
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
+    };
+    void load();
+    return () => controller.abort();
+  }, [filterType, router, reload]);
 
   const filteredCategories = categories.filter((c) => filterType === "all" || c.type === filterType);
 
@@ -169,6 +180,13 @@ export default function CategoriesPage() {
               <p className="text-muted-foreground mt-4">加载中...</p>
             </CardContent>
           </Card>
+        ) : loadError ? (
+          <Card>
+            <CardContent className="py-12 text-center space-y-4" role="alert">
+              <p className="font-medium">{loadError}</p>
+              <Button variant="outline" onClick={loadCategories}>重新加载</Button>
+            </CardContent>
+          </Card>
         ) : (
           <>
             {/* Categories Grid */}
@@ -238,6 +256,7 @@ export default function CategoriesPage() {
 
       {/* Add/Edit Modal */}
       <CategoryModal
+        key={`${isAddModalOpen}:${editingCategory?.id || "new"}`}
         isOpen={isAddModalOpen}
         onClose={handleCloseModal}
         category={editingCategory}
@@ -300,28 +319,11 @@ function CategoryModal({
   onSave: () => void;
 }) {
   const [formData, setFormData] = useState({
-    name: "",
-    type: "expense" as TransactionType,
-    icon: "",
+    name: category?.name || "",
+    type: category?.type || "expense" as TransactionType,
+    icon: category?.icon || "",
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // 当 category 变化时更新表单数据
-  useEffect(() => {
-    if (category) {
-      setFormData({
-        name: category.name,
-        type: category.type,
-        icon: category.icon || "",
-      });
-    } else {
-      setFormData({
-        name: "",
-        type: "expense",
-        icon: "",
-      });
-    }
-  }, [category, isOpen]);
 
   // 快速选择预设分类
   const handleSelectPreset = (preset: { name: string; icon: string }) => {

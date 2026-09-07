@@ -7,7 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
  * GET /api/members
  * 获取家庭成员列表
  */
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
     // 验证用户登录
     const session = await getSession();
