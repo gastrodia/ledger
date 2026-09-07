@@ -14,7 +14,8 @@ export function parseTransactionFilters(search: string, defaults: TransactionFil
   const type = params.get('type');
   return {
     ...emptyFilters,
-    startDate: params.get('startDate') || '', endDate: params.get('endDate') || '',
+    startDate: params.get('startDate') || (!params.get('endDate') ? defaults.startDate : ''),
+    endDate: params.get('endDate') || (!params.get('startDate') ? defaults.endDate : ''),
     type: type === 'income' || type === 'expense' ? type : 'all',
     categoryId: params.get('categoryId') || '__all__', memberId: params.get('memberId') || '__all__',
     q: params.get('q') || '',
@@ -50,8 +51,8 @@ export class TransactionNavigationSession {
     try {
       const value = JSON.parse(this.storage.getItem(`ledger:transactions:v1:${encodeURIComponent(this.userId)}`) || 'null');
       if (value?.userId !== this.userId || typeof value.search !== 'string' || !Number.isFinite(value.scroll) || value.scroll < 0) return null;
-      // An empty stored search means all records, rather than this month's defaults.
-      return { filters: value.search ? parseTransactionFilters(value.search, this.defaults) : { ...emptyFilters }, scroll: value.scroll as number };
+      // Legacy unbounded filters fall back to the default month.
+      return { filters: parseTransactionFilters(value.search, this.defaults), scroll: value.scroll as number };
     } catch { return null; }
   }
   setLocation(search: string) {

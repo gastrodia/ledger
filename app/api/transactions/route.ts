@@ -147,7 +147,7 @@ export async function GET(request: NextRequest) {
  * 请求体：
  * - type: 交易类型 'income' 或 'expense'
  * - category_id: 分类ID
- * - member_id: 成员ID（可选）
+ * - member_id: 成员ID（必填，须属于当前用户）
  * - amount: 金额
  * - transaction_date: 交易日期 YYYY-MM-DD
  * - description: 描述（可选）
@@ -185,6 +185,10 @@ export async function POST(request: NextRequest) {
         { error: '请填写必填字段' },
         { status: 400 }
       );
+    }
+
+    if (typeof member_id !== 'string' || !member_id.trim()) {
+      return NextResponse.json({ error: '请选择家庭成员' }, { status: 400 });
     }
 
     // 验证 type 值
@@ -227,19 +231,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 如果提供了 member_id，验证该成员是否存在且属于当前用户
-    if (member_id) {
-      const members = await sql`
-        SELECT id FROM members 
-        WHERE id = ${member_id} AND user_id = ${session.userId}
-      `;
-      
-      if (members.length === 0) {
-        return NextResponse.json(
-          { error: '家庭成员不存在' },
-          { status: 400 }
-        );
-      }
+    // 必须选择当前用户的家庭成员
+    const members = await sql`
+      SELECT id FROM members
+      WHERE id = ${member_id} AND user_id = ${session.userId}
+    `;
+
+    if (members.length === 0) {
+      return NextResponse.json(
+        { error: '家庭成员不存在' },
+        { status: 400 }
+      );
     }
 
     const attachmentError = await validateAttachment(attachment_key, session.userId);
@@ -261,7 +263,7 @@ export async function POST(request: NextRequest) {
         ${id},
         ${session.userId},
         ${category_id || null},
-        ${member_id || null},
+        ${member_id},
         ${type},
         ${amountNum},
         ${description || null},

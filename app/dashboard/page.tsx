@@ -47,6 +47,7 @@ import {
   ChevronUp,
   Eye,
   EyeOff,
+  Search,
 } from "lucide-react";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useRouter } from "next/navigation";
@@ -60,10 +61,9 @@ import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { groupTransactionsByDay } from "@/lib/transaction-days";
 import { TransactionCategoryPicker } from "@/components/transactions/category-picker";
 
-type DatePreset = "today" | "month" | "lastMonth" | "all";
+type DatePreset = "today" | "month" | "lastMonth";
 function getTransactionDateRange(preset: DatePreset, now = new Date()) {
   const format = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-  if (preset === "all") return { start: "", end: "" };
   if (preset === "today") return { start: format(now), end: format(now) };
   if (preset === "lastMonth") return {
     start: format(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
@@ -166,7 +166,6 @@ function DashboardContent() {
   const setFilterType = (value: TransactionType | "all") => navigation.setFilters((current) => ({ ...current, type: value }));
   const setFilterCategoryId = (value: string) => navigation.setFilters((current) => ({ ...current, categoryId: value }));
   const setFilterMemberId = (value: string) => navigation.setFilters((current) => ({ ...current, memberId: value }));
-  const setSearchText = (value: string) => navigation.setFilters((current) => ({ ...current, q: value }));
   const addCloseRef = useRef<(() => Promise<boolean>) | null>(null);
   const editCloseRef = useRef<(() => Promise<boolean>) | null>(null);
   const [categoriesReload, setCategoriesReload] = useState(0);
@@ -179,6 +178,9 @@ function DashboardContent() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [membersStatus, setMembersStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [membersReload, setMembersReload] = useState(0);
+  const retryMembers = () => { setMembersStatus("loading"); setMembersReload((value) => value + 1); };
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
@@ -189,26 +191,20 @@ function DashboardContent() {
   const [loadError, setLoadError] = useState<{ key: string; message: string } | null>(null);
   const [isMobileSummaryOpen, setIsMobileSummaryOpen] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchDraft, setSearchDraft] = useState({ q: "", startDate, endDate });
   const [previewAttachment, setPreviewAttachment] = useState<{
     url: string;
     name?: string;
     type?: string;
   } | null>(null);
   
-  const dateRangeError = startDate && endDate && startDate > endDate
-    ? "开始日期不能晚于结束日期，请调整日期范围。" : null;
+  const dateRangeError = !startDate || !endDate
+    ? "请选择开始和结束日期后查看记录。"
+    : startDate > endDate ? "开始日期不能晚于结束日期，请调整日期范围。" : null;
   const clearFilters = () => {
-    setSearchText("");
-    setFilterType("all");
-    setFilterCategoryId("__all__");
-    setFilterMemberId("__all__");
-    setStartDate("");
-    setEndDate("");
-  };
-  const applyDatePreset = (preset: DatePreset) => {
-    const range = getTransactionDateRange(preset);
-    setStartDate(range.start);
-    setEndDate(range.end);
+    const range = getTransactionDateRange("month");
+    navigation.setFilters({ q: "", type: "all", categoryId: "__all__", memberId: "__all__", startDate: range.start, endDate: range.end });
   };
 
   const effectiveCategoryId = filterCategoryId || "__all__";
@@ -274,25 +270,29 @@ function DashboardContent() {
       }
     };
 
-    // 加载家庭成员
+    void loadCategories();
+    return () => controller.abort();
+  }, [categoriesReload]);
+
+  useEffect(() => {
+    const controller = new AbortController();
     const loadMembers = async () => {
       try {
         const response = await fetch("/api/members", { signal: controller.signal });
-        if (response.ok) {
-          const result = await response.json();
-          if (controller.signal.aborted) return;
-          setMembers(result.data || []);
-        }
+        if (!response.ok) throw new Error("加载家庭成员失败");
+        const result = await response.json();
+        if (controller.signal.aborted) return;
+        setMembers(result.data || []);
+        setMembersStatus("ready");
       } catch (error) {
         if (controller.signal.aborted) return;
         console.error("加载家庭成员失败:", error);
+        setMembersStatus("error");
       }
     };
-
-    void loadCategories();
     void loadMembers();
     return () => controller.abort();
-  }, [categoriesReload]);
+  }, [membersReload]);
 
   // 显示的交易记录就是从服务器获取的数据
   const filteredTransactions = transactions;
@@ -374,6 +374,9 @@ function DashboardContent() {
               onSaved={loadTransactions}
               categories={categories} 
               members={members}
+              membersStatus={membersStatus}
+              onRetryMembers={retryMembers}
+              onManageMembers={() => router.push("/dashboard/members")}
               onClose={(shouldRefresh?: boolean) => {
                 setIsAddModalOpen(false);
                 // 只有在成功保存时才刷新列表
@@ -439,43 +442,80 @@ function DashboardContent() {
           <CardHeader className="border-b">
             <div className="flex flex-col gap-4">
               <div className="flex items-center justify-between gap-3">
-                <CardTitle>交易明细</CardTitle>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 px-2 md:hidden"
-                  onClick={() => setIsMobileFiltersOpen((v) => !v)}
-                >
-                  {isMobileFiltersOpen ? (
-                    <>
-                      收起筛选
-                      <ChevronUp className="h-4 w-4" />
-                    </>
-                  ) : (
-                    <>
-                      展开筛选
-                      <ChevronDown className="h-4 w-4" />
-                    </>
-                  )}
-                </Button>
-              </div>
-              <div className="space-y-3">
-                <div className="space-y-1">
-                  <Label htmlFor="transaction-search" className="text-xs text-muted-foreground">搜索备注</Label>
-                  <Input id="transaction-search" type="search" placeholder="输入备注关键词，如午餐、房租"
-                    value={searchText} onChange={(event) => setSearchText(event.target.value)} />
-                </div>
-                <div className="flex flex-wrap items-center gap-2" aria-label="快捷日期">
-                  {([
-                    ["today", "今天"], ["month", "本月"], ["lastMonth", "上月"], ["all", "全部"],
-                  ] as const).map(([preset, label]) => {
-                    const range = getTransactionDateRange(preset);
-                    const active = startDate === range.start && endDate === range.end;
-                    return <Button key={preset} type="button" size="sm" variant={active ? "default" : "outline"}
-                      aria-pressed={active} onClick={() => applyDatePreset(preset)}>{label}</Button>;
-                  })}
-                  <Button type="button" size="sm" variant="ghost" onClick={clearFilters}>清除筛选</Button>
+                <CardTitle className="shrink-0">交易明细</CardTitle>
+                <div className="flex items-center gap-1">
+                  <Dialog open={isSearchOpen} onOpenChange={(open) => {
+                    if (open) setSearchDraft({ q: searchText, startDate, endDate });
+                    setIsSearchOpen(open);
+                  }}>
+                    <DialogTrigger asChild>
+                      <Button type="button" variant={searchText ? "secondary" : "ghost"} size="sm" className="h-8 px-2">
+                        <Search className="h-4 w-4" />{searchText ? "搜索中" : "搜索与日期"}
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="sm:max-w-[420px]">
+                      <DialogHeader>
+                        <DialogTitle>搜索与快捷日期</DialogTitle>
+                        <DialogDescription>在指定日期范围内查找记录。</DialogDescription>
+                      </DialogHeader>
+                      <form onSubmit={(event) => {
+                        event.preventDefault();
+                        navigation.setFilters((current) => ({ ...current, ...searchDraft, q: searchDraft.q.trim() }));
+                        setIsSearchOpen(false);
+                      }} className="flex min-h-0 flex-1 flex-col">
+                        <DialogBody className="space-y-4 py-4">
+                          <div className="space-y-1">
+                            <Label htmlFor="transaction-search">搜索备注（可选）</Label>
+                            <Input id="transaction-search" type="search" placeholder="输入备注关键词，如午餐、房租"
+                              value={searchDraft.q} onChange={(event) => setSearchDraft({ ...searchDraft, q: event.target.value })} />
+                          </div>
+                          <div className="flex gap-2" role="group" aria-label="快捷日期">
+                            {([["today", "今天"], ["month", "本月"], ["lastMonth", "上月"]] as const).map(([preset, label]) => {
+                              const range = getTransactionDateRange(preset);
+                              const active = searchDraft.startDate === range.start && searchDraft.endDate === range.end;
+                              return <Button key={preset} type="button" size="sm" variant={active ? "default" : "outline"}
+                                aria-pressed={active} onClick={() => setSearchDraft({ ...searchDraft, startDate: range.start, endDate: range.end })}>{label}</Button>;
+                            })}
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1">
+                              <Label htmlFor="search-start-date">开始日期</Label>
+                              <Input id="search-start-date" type="date" required value={searchDraft.startDate}
+                                onChange={(event) => setSearchDraft({ ...searchDraft, startDate: event.target.value })} />
+                            </div>
+                            <div className="space-y-1">
+                              <Label htmlFor="search-end-date">结束日期</Label>
+                              <Input id="search-end-date" type="date" required min={searchDraft.startDate} value={searchDraft.endDate}
+                                onChange={(event) => setSearchDraft({ ...searchDraft, endDate: event.target.value })} />
+                            </div>
+                          </div>
+                        </DialogBody>
+                        <DialogFooter>
+                          <Button type="button" variant="outline" onClick={() => { clearFilters(); setIsSearchOpen(false); }}>重置为本月</Button>
+                          <Button type="submit" disabled={!searchDraft.startDate || !searchDraft.endDate || searchDraft.startDate > searchDraft.endDate}>查看记录</Button>
+                        </DialogFooter>
+                      </form>
+                    </DialogContent>
+                  </Dialog>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 px-2 md:hidden"
+                    onClick={() => setIsMobileFiltersOpen((v) => !v)}
+                  >
+                    {isMobileFiltersOpen ? (
+                      <>
+                        收起筛选
+                        <ChevronUp className="h-4 w-4" />
+                      </>
+                    ) : (
+                      <>
+                        展开筛选
+                        <ChevronDown className="h-4 w-4" />
+                      </>
+                    )}
+                  </Button>
                 </div>
               </div>
               {/* 筛选器 */}
@@ -592,7 +632,7 @@ function DashboardContent() {
               <div className="space-y-3 p-8 text-center text-muted-foreground">
                 <p className="font-medium">当前筛选没有匹配的记录</p>
                 <p className="text-sm">试试其他关键词或日期范围。</p>
-                <Button type="button" variant="outline" onClick={clearFilters}>清除筛选，查看全部</Button>
+                <Button type="button" variant="outline" onClick={clearFilters}>重置筛选，查看本月</Button>
               </div>
             ) : (
               <>
@@ -876,6 +916,9 @@ function DashboardContent() {
             transaction={selectedTransaction}
             categories={categories}
             members={members}
+            membersStatus={membersStatus}
+            onRetryMembers={retryMembers}
+            onManageMembers={() => router.push("/dashboard/members")}
             onClose={(shouldRefresh?: boolean) => {
               setIsEditModalOpen(false);
               setSelectedTransaction(null);
@@ -968,6 +1011,9 @@ function TransactionModal({
   transaction,
   categories,
   members,
+  membersStatus,
+  onRetryMembers,
+  onManageMembers,
   onClose,
   onSaved,
   isOpen,
@@ -982,6 +1028,9 @@ function TransactionModal({
   transaction?: Transaction;
   categories: Category[];
   members: Member[];
+  membersStatus: "loading" | "ready" | "error";
+  onRetryMembers: () => void;
+  onManageMembers: () => void;
   onClose: (shouldRefresh?: boolean) => void;
 }) {
   const idPrefix = mode === "edit" ? "edit-" : "";
@@ -1026,7 +1075,7 @@ function TransactionModal({
   const [formData, setFormData] = useState(initial);
   const [baseline, setBaseline] = useState(() => JSON.stringify(initial));
   const [showOptional, setShowOptional] = useState(() => !!(
-    transaction?.description || transaction?.member_id || transaction?.attachment_key
+    transaction?.description || transaction?.attachment_key
   ));
   const amountRef = useRef<HTMLInputElement>(null);
   const attachmentRef = useRef<HTMLInputElement>(null);
@@ -1039,7 +1088,7 @@ function TransactionModal({
     value: formData,
     onRestore: (value) => {
       setFormData(value);
-      if (value.description || value.member_id) setShowOptional(true);
+      if (value.description) setShowOptional(true);
     },
     dirty: JSON.stringify(formData) !== baseline,
     enabled: isOpen,
@@ -1060,11 +1109,17 @@ function TransactionModal({
     return () => { if (closeGuardRef.current === guard) closeGuardRef.current = null; };
   }, [closeGuardRef, onClose, requestClose]);
 
+  const needsMember = mode === "add" && (membersStatus !== "ready" || !members.some((member) => member.id === formData.member_id));
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submittingRef.current || creatingCategory) return;
     if (pendingCategory) {
       toast.error("请先添加分类或取消新增分类，再保存交易");
+      return;
+    }
+    if (needsMember) {
+      toast.error("请选择有效的家庭成员后再保存");
       return;
     }
     const keepOpen = mode === "add" && (e.nativeEvent as SubmitEvent).submitter?.getAttribute("value") === "continue";
@@ -1166,7 +1221,7 @@ function TransactionModal({
       <DialogHeader>
         <DialogTitle>{mode === "add" ? "快速记一笔" : "编辑交易记录"}</DialogTitle>
         <DialogDescription>
-          {mode === "add" ? "先记金额与分类，更多信息可以稍后补充" : "修改交易详情"}
+          {mode === "add" ? "填写金额并选择家庭成员，备注与附件可稍后补充" : "修改交易详情"}
         </DialogDescription>
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
@@ -1208,10 +1263,42 @@ function TransactionModal({
           />
         </div>
 
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}member`}>家庭成员{mode === "add" ? " *" : "（可选）"}</Label>
+          <Select
+            value={formData.member_id || (mode === "add" ? "" : "__none__")}
+            onValueChange={(value) => setFormData({ ...formData, member_id: value === "__none__" ? "" : value })}
+            required={mode === "add"}
+            disabled={membersStatus !== "ready" || members.length === 0 || isSubmitting || isUploading}
+          >
+            <SelectTrigger id={`${idPrefix}member`} aria-describedby={`${idPrefix}member-help`}>
+              <SelectValue placeholder={membersStatus === "loading" ? "正在加载成员…" : "请选择家庭成员"} />
+            </SelectTrigger>
+            <SelectContent>
+              {mode === "edit" ? <SelectItem value="__none__">不指定成员</SelectItem> : null}
+              {members.map((member) => (
+                <SelectItem key={member.id} value={member.id}>
+                  {member.avatar} {member.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <div id={`${idPrefix}member-help`} className="text-sm text-muted-foreground" aria-live="polite">
+            {membersStatus === "error" ? <>
+              家庭成员加载失败。
+              <Button type="button" variant="link" className="h-auto px-1 py-0" onClick={onRetryMembers}>重新加载</Button>
+            </> : membersStatus === "ready" && members.length === 0 ? <>
+              暂无家庭成员，请先添加成员再记账。
+              <Button type="button" variant="link" className="h-auto px-1 py-0"
+                onClick={() => { void requestClose(onManageMembers); }}>添加家庭成员</Button>
+            </> : membersStatus === "ready" && needsMember ? "请选择家庭成员后保存。" : null}
+          </div>
+        </div>
+
         <Button type="button" variant="ghost" className="w-full justify-between"
           aria-expanded={showOptional} aria-controls={`${idPrefix}optional-fields`}
           onClick={() => setShowOptional((open) => !open)}>
-          备注、成员与附件（可选）
+          备注与附件（可选）
           {showOptional ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
         </Button>
         <div id={`${idPrefix}optional-fields`} hidden={!showOptional} className="space-y-4">
@@ -1224,27 +1311,6 @@ function TransactionModal({
             value={formData.description}
             onChange={(e) => setFormData({ ...formData, description: e.target.value })}
           />
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor={`${idPrefix}member`}>家庭成员</Label>
-          <Select
-            value={formData.member_id || "__none__"}
-            onValueChange={(value) => setFormData({ ...formData, member_id: value === "__none__" ? "" : value })}
-            disabled={members.length === 0}
-          >
-            <SelectTrigger id={`${idPrefix}member`}>
-              <SelectValue placeholder={members.length === 0 ? "暂无成员" : "请选择成员（可选）"} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__none__">不指定成员</SelectItem>
-              {members.map((member) => (
-                <SelectItem key={member.id} value={member.id}>
-                  {member.avatar} {member.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
         </div>
 
         <div className="space-y-2">
@@ -1333,10 +1399,10 @@ function TransactionModal({
           >
             取消
           </Button>
-          <Button type="submit" name="action" value="save" disabled={isSubmitting || isUploading || creatingCategory}>
+          <Button type="submit" name="action" value="save" disabled={isSubmitting || isUploading || creatingCategory || needsMember}>
             {isSubmitting || isUploading ? "保存中..." : "保存"}
           </Button>
-          {mode === "add" ? <Button type="submit" name="action" value="continue" variant="outline" disabled={isSubmitting || isUploading || creatingCategory}>
+          {mode === "add" ? <Button type="submit" name="action" value="continue" variant="outline" disabled={isSubmitting || isUploading || creatingCategory || needsMember}>
             保存并继续
           </Button> : null}
         </DialogFooter>

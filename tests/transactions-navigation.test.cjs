@@ -24,8 +24,8 @@
     assert.match(serializeTransactionFilters(filters), /q=all/);
     const categoryOnly = parseTransactionFilters('categoryId=cat-a', defaults);
     assert.equal(categoryOnly.categoryId, 'cat-a');
-    assert.equal(categoryOnly.startDate, '', 'Category-only links must not inherit an unrelated month');
-    assert.equal(categoryOnly.endDate, '');
+    assert.equal(categoryOnly.startDate, defaults.startDate, 'Undated links must use a bounded default month');
+    assert.equal(categoryOnly.endDate, defaults.endDate);
     assert.equal(categoryOnly.type, 'all');
   });
 
@@ -77,15 +77,15 @@
     assert.equal(arrival.getSnapshot().filters.q, 'new', 'Returning through a bare ledger URL keeps the saved filters');
   });
 
-  test('cleared dates remain all-time on return; logout invalidates delayed restoration', () => {
+  test('legacy unbounded filters restore the default month; logout invalidates delayed restoration', () => {
     const storage = memoryStorage();
     const first = new TransactionNavigationSession(defaults);
     first.initialize('user-a', storage); first.finishScrollRestore();
     first.updateFilters({ ...defaults, startDate: '', endDate: '' });
     const next = new TransactionNavigationSession(defaults);
     next.initialize('user-a', storage);
-    assert.equal(next.getSnapshot().filters.startDate, '');
-    assert.equal(next.getSnapshot().filters.endDate, '');
+    assert.equal(next.getSnapshot().filters.startDate, defaults.startDate);
+    assert.equal(next.getSnapshot().filters.endDate, defaults.endDate);
     next.stop();
     next.initialize('user-b', storage);
     next.updateFilters({ ...defaults, q: 'stale' });

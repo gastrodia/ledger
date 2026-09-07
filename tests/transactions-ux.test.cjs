@@ -108,7 +108,21 @@
     assert.deepEqual(ranges('lastMonth', new Date(2024, 2, 7, 12)), { start: '2024-02-01', end: '2024-02-29' });
     assert.deepEqual(ranges('today', new Date(2026, 8, 7, 12)), { start: '2026-09-07', end: '2026-09-07' });
     assert.deepEqual(ranges('month', new Date(2026, 8, 7, 12)), { start: '2026-09-01', end: '2026-09-30' });
-    assert.deepEqual(ranges('all'), { start: '', end: '' });
+  });
+
+  test('incomplete date filters block reads and reset uses a bounded month in one update', () => {
+    const guard = sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'dateRangeError');
+    for (const [startDate, endDate] of [['', ''], ['2026-09-01', ''], ['', '2026-09-30'], ['2026-09-30', '2026-09-01']]) {
+      assert.ok(evaluate(`const ${guard};`, { startDate, endDate }, 'dateRangeError'));
+    }
+    assert.equal(evaluate(`const ${guard};`, { startDate: '2026-09-01', endDate: '2026-09-30' }, 'dateRangeError'), null);
+    const updates = [];
+    const reset = sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'clearFilters');
+    evaluate(`const ${reset};`, {
+      navigation: { setFilters: (value) => updates.push(value) },
+      getTransactionDateRange: (preset) => { assert.equal(preset, 'month'); return { start: '2026-09-01', end: '2026-09-30' }; },
+    }, 'clearFilters')();
+    assert.deepEqual(updates, [{ q: '', type: 'all', categoryId: '__all__', memberId: '__all__', startDate: '2026-09-01', endDate: '2026-09-30' }]);
   });
 
   test('a failed read has an independent retryable error and retry success clears it', async () => {
@@ -142,11 +156,13 @@
     assert.deepEqual(state.data, []);
   });
 
-  function submitHarness({ mode = 'add', ok = true } = {}) {
+  function submitHarness({ mode = 'add', ok = true, memberId = 'member', membersStatus = 'ready' } = {}) {
     const code = sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'handleSubmit');
-    const initial = { type: 'expense', category_id: 'food', member_id: 'member', transaction_date: '2026-09-07', amount: '12.34', description: 'lunch' };
+    const initial = { type: 'expense', category_id: 'food', member_id: memberId, transaction_date: '2026-09-07', amount: '12.34', description: 'lunch' };
     const state = { value: initial, baseline: '', attachment: 'selected', clears: 0, refreshes: 0, closes: [], focus: 0, payload: null, errors: [] };
     const bindings = {
+      needsMember: evaluate(`const ${sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'needsMember')};`,
+        { mode, membersStatus, members: [{ id: 'member' }], formData: initial }, 'needsMember'),
       mode, formData: initial, transaction: { id: 'transaction' }, attachment: null,
       removeExistingAttachment: false, creatingCategory: false, pendingCategory: false, submittingRef: { current: false },
       setIsSubmitting: () => {}, setIsUploading: () => {}, setUploadProgress: () => {},
@@ -161,6 +177,24 @@
     };
     return { state, bindings, submit: evaluate(`const ${code};`, bindings, 'handleSubmit') };
   }
+
+  test('new entries reject missing, stale, or unavailable members before any side effect', async () => {
+    for (const options of [{ memberId: '' }, { memberId: 'deleted' }, { membersStatus: 'loading' }, { membersStatus: 'error' }]) {
+      const { state, submit } = submitHarness(options);
+      await submit({ preventDefault() {} });
+      assert.equal(state.payload, null);
+      assert.equal(state.clears, 0);
+      assert.deepEqual(state.closes, []);
+      assert.deepEqual(state.errors, ['请选择有效的家庭成员后再保存']);
+    }
+  });
+
+  test('editing a historical entry still permits an unassigned member', async () => {
+    const { state, submit } = submitHarness({ mode: 'edit', memberId: '' });
+    await submit({ preventDefault() {}, nativeEvent: {} });
+    assert.equal(state.payload.member_id, null);
+    assert.deepEqual(state.closes, [true]);
+  });
 
   test('both transaction dialog close events delegate to the shared draft guard', async () => {
     for (const refName of ['addCloseRef', 'editCloseRef']) {
