@@ -637,7 +637,7 @@ function DashboardContent() {
             ) : (
               <>
                 {/* PC端表格视图 */}
-                <div className="hidden md:block overflow-x-auto">
+                <div className="hidden lg:block overflow-x-auto">
                   <table className="w-full">
                     <thead>
                       <tr className="border-b bg-muted/50">
@@ -771,7 +771,7 @@ function DashboardContent() {
                 </div>
 
                 {/* 移动端卡片视图 */}
-                <div className="md:hidden">
+                <div className="lg:hidden">
                   {dailyGroups.map((day) => <section key={day.date} aria-label={`${day.date}的交易`}>
                     <div className="flex flex-wrap items-center justify-between gap-2 bg-muted/70 px-4 py-3">
                       <h3 className="text-sm font-semibold">{day.date}</h3>

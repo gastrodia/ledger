@@ -13,7 +13,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
       <DashboardNav />
       <main className="min-w-0 lg:ml-56">
         <div className="pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0">
-          <div className="min-h-[calc(100dvh-4rem)] lg:min-h-screen px-4 py-5 md:p-6 lg:px-8 lg:py-7 max-w-[1440px] mx-auto">
+          <div className="min-h-[calc(100dvh-4rem)] lg:min-h-screen px-4 py-5 md:p-6 lg:px-8 lg:py-7 mx-auto">
             {children}
           </div>
         </div>
