@@ -40,6 +40,28 @@
     return { queries, GET: exports.GET };
   }
 
+  test('legacy transaction drafts are removed without writing drafts or deleting other storage', () => {
+    const call = sourceNode((node, source) => ts.isCallExpression(node)
+      && node.expression.getText(source) === 'useEffect'
+      && node.arguments[0].getText(source).includes('Remove legacy transaction drafts'));
+    const data = new Map([
+      ['ledger:draft:v1:user-a:transaction%3Anew', 'old'],
+      ['ledger:draft:v1:user-b:transaction%3A123', 'old'],
+      ['ledger:draft:v1:user-a:budget%3Anew', 'keep'],
+      ['ledger:preferences', 'keep'],
+    ]);
+    evaluate(call, {
+      useEffect: (effect) => effect(),
+      window: { localStorage: {
+        get length() { return data.size; },
+        key: (index) => [...data.keys()][index],
+        removeItem: (key) => data.delete(key),
+        setItem: () => assert.fail('Transaction forms must not persist drafts'),
+      } },
+    }, 'undefined');
+    assert.deepEqual([...data.keys()], ['ledger:draft:v1:user-a:budget%3Anew', 'ledger:preferences']);
+  });
+
   test('keyword search uses the same parameterized literal matching in list and totals', async () => {
     const { GET, queries } = getRoute(true);
     const keyword = "50%_off\\cash' OR true --";
@@ -156,18 +178,19 @@
     assert.deepEqual(state.data, []);
   });
 
-  function submitHarness({ mode = 'add', ok = true, memberId = 'member', membersStatus = 'ready' } = {}) {
+  function submitHarness({ mode = 'add', ok = true, memberId = 'member', membersStatus = 'ready', categoryId = 'food' } = {}) {
     const code = sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'handleSubmit');
-    const initial = { type: 'expense', category_id: 'food', member_id: memberId, transaction_date: '2026-09-07', amount: '12.34', description: 'lunch' };
-    const state = { value: initial, baseline: '', attachment: 'selected', clears: 0, refreshes: 0, closes: [], focus: 0, payload: null, errors: [] };
+    const initial = { type: 'expense', category_id: categoryId, member_id: memberId, transaction_date: '2026-09-07', amount: '12.34', description: 'lunch' };
+    const state = { value: initial, attachment: 'selected', refreshes: 0, closes: [], focus: 0, payload: null, errors: [] };
     const bindings = {
+      needsCategory: evaluate(`const ${sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'needsCategory')};`,
+        { categories: [{ id: 'food', type: 'expense' }], formData: initial }, 'needsCategory'),
       needsMember: evaluate(`const ${sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'needsMember')};`,
         { mode, membersStatus, members: [{ id: 'member' }], formData: initial }, 'needsMember'),
       mode, formData: initial, transaction: { id: 'transaction' }, attachment: null,
-      removeExistingAttachment: false, creatingCategory: false, pendingCategory: false, submittingRef: { current: false },
+      removeExistingAttachment: false, submittingRef: { current: false },
       setIsSubmitting: () => {}, setIsUploading: () => {}, setUploadProgress: () => {},
-      draft: { clear: () => { state.clears++; } },
-      setFormData: (value) => { state.value = value; }, setBaseline: (value) => { state.baseline = value; },
+      setFormData: (value) => { state.value = value; },
       setAttachment: (value) => { state.attachment = value; }, setRemoveExistingAttachment: () => {},
       attachmentRef: { current: { value: 'previous.pdf' } }, amountRef: { current: { focus: () => { state.focus++; } } },
       onSaved: () => { state.refreshes++; }, onClose: (value) => { state.closes.push(value); },
@@ -178,12 +201,22 @@
     return { state, bindings, submit: evaluate(`const ${code};`, bindings, 'handleSubmit') };
   }
 
+  test('new and edited entries require a valid category before saving', async () => {
+    for (const mode of ['add', 'edit']) {
+      for (const categoryId of ['', 'deleted']) {
+        const { state, submit } = submitHarness({ mode, categoryId });
+        await submit({ preventDefault() {} });
+        assert.equal(state.payload, null);
+        assert.deepEqual(state.errors, ['请选择有效的分类后再保存']);
+      }
+    }
+  });
+
   test('new entries reject missing, stale, or unavailable members before any side effect', async () => {
     for (const options of [{ memberId: '' }, { memberId: 'deleted' }, { membersStatus: 'loading' }, { membersStatus: 'error' }]) {
       const { state, submit } = submitHarness(options);
       await submit({ preventDefault() {} });
       assert.equal(state.payload, null);
-      assert.equal(state.clears, 0);
       assert.deepEqual(state.closes, []);
       assert.deepEqual(state.errors, ['请选择有效的家庭成员后再保存']);
     }
@@ -196,7 +229,7 @@
     assert.deepEqual(state.closes, [true]);
   });
 
-  test('both transaction dialog close events delegate to the shared draft guard', async () => {
+  test('both transaction dialog close events delegate to the shared close guard', async () => {
     for (const refName of ['addCloseRef', 'editCloseRef']) {
       const attribute = sourceNode((node, source) => ts.isJsxAttribute(node)
         && node.name.getText(source) === 'onOpenChange'
@@ -219,31 +252,27 @@
     }
   });
 
-  test('save and continue clears one-entry fields and draft but keeps reusable choices', async () => {
+  test('save and continue clears one-entry fields but keeps reusable choices', async () => {
     const { state, bindings, submit } = submitHarness();
     await submit({ preventDefault() {}, nativeEvent: { submitter: { getAttribute: () => 'continue' } } });
     assert.deepEqual(state.value, { type: 'expense', category_id: 'food', member_id: 'member', transaction_date: '2026-09-07', amount: '', description: '' });
-    assert.equal(state.baseline, JSON.stringify(state.value));
     assert.equal(state.attachment, null);
     assert.equal(bindings.attachmentRef.current.value, '');
-    assert.equal(state.clears, 1);
     assert.equal(state.refreshes, 1);
     assert.deepEqual(state.closes, []);
     assert.equal(state.focus, 1);
     assert.equal(state.payload.amount, 12.34);
   });
 
-  test('failed save retains draft and form; normal save closes after success', async () => {
+  test('failed save retains form; normal save closes after success', async () => {
     const failed = submitHarness({ ok: false });
     await failed.submit({ preventDefault() {}, nativeEvent: { submitter: { getAttribute: () => 'continue' } } });
-    assert.equal(failed.state.clears, 0);
     assert.equal(failed.state.value.amount, '12.34');
     assert.equal(failed.state.refreshes, 0);
     assert.deepEqual(failed.state.closes, []);
     assert.deepEqual(failed.state.errors, ['save failed']);
     const saved = submitHarness();
     await saved.submit({ preventDefault() {}, nativeEvent: { submitter: { getAttribute: () => 'save' } } });
-    assert.equal(saved.state.clears, 1);
     assert.deepEqual(saved.state.closes, [true]);
   });
 })().catch((error) => { console.error(error); process.exitCode = 1; });

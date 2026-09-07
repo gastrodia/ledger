@@ -85,7 +85,7 @@ for (const [file, endpoint, setter] of [
 }
 
 test('transaction edit serializes explicitly cleared optional fields as null', () => {
-  for (const field of ['description', 'category_id', 'member_id']) {
+  for (const field of ['description', 'member_id']) {
     const text = findNode('app/dashboard/page.tsx', (node, source) => ts.isPropertyAssignment(node)
       && node.name.getText(source) === field
       && node.initializer.getText(source).startsWith(`formData.${field} ||`));

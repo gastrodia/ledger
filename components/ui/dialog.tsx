@@ -62,7 +62,7 @@ const DialogBody = ({
   <div
     className={cn(
       // 只让内容区域滚动（配合 DialogContent 的 max-h + overflow-hidden）
-      "flex-1 min-h-0 overflow-y-auto overscroll-contain pr-1",
+      "flex-1 min-h-0 overflow-y-auto overscroll-contain p-1",
       className
     )}
     data-slot="dialog-body"

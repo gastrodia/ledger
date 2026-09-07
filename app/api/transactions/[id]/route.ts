@@ -73,28 +73,29 @@ export async function PATCH(
       newAmount = amountNum;
     }
 
-    // 如果提供了新的 category_id，验证该分类是否存在且属于当前用户
+    // PATCH 未提供分类时沿用原分类，但最终分类必须有效
     const newCategoryId = category_id !== undefined ? category_id : existingTransaction.category_id;
-    if (newCategoryId) {
-      const categories = await sql`
-        SELECT id, type FROM categories 
-        WHERE id = ${newCategoryId} AND user_id = ${session.userId}
-      `;
-      
-      if (categories.length === 0) {
-        return NextResponse.json(
-          { error: '分类不存在' },
-          { status: 400 }
-        );
-      }
+    if (typeof newCategoryId !== 'string' || !newCategoryId.trim()) {
+      return NextResponse.json({ error: '请选择分类' }, { status: 400 });
+    }
+    const categories = await sql`
+      SELECT id, type FROM categories
+      WHERE id = ${newCategoryId} AND user_id = ${session.userId}
+    `;
 
-      // 验证分类类型是否匹配
-      if (categories[0].type !== newType) {
-        return NextResponse.json(
-          { error: `分类类型不匹配：该分类是${categories[0].type === 'income' ? '收入' : '支出'}分类` },
-          { status: 400 }
-        );
-      }
+    if (categories.length === 0) {
+      return NextResponse.json(
+        { error: '分类不存在' },
+        { status: 400 }
+      );
+    }
+
+    // 验证分类类型是否匹配
+    if (categories[0].type !== newType) {
+      return NextResponse.json(
+        { error: `分类类型不匹配：该分类是${categories[0].type === 'income' ? '收入' : '支出'}分类` },
+        { status: 400 }
+      );
     }
 
     // 如果提供了新的 member_id，验证该成员是否存在且属于当前用户
@@ -104,7 +105,7 @@ export async function PATCH(
         SELECT id FROM members 
         WHERE id = ${newMemberId} AND user_id = ${session.userId}
       `;
-      
+
       if (members.length === 0) {
         return NextResponse.json(
           { error: '家庭成员不存在' },
@@ -118,12 +119,12 @@ export async function PATCH(
 
     // 更新交易记录
     const [, result] = await sql.transaction([
-      sql`SELECT id FROM categories WHERE id = ${newCategoryId || null} AND user_id = ${session.userId} FOR SHARE`,
+      sql`SELECT id FROM categories WHERE id = ${newCategoryId} AND user_id = ${session.userId} FOR SHARE`,
       sql`
       UPDATE transactions
       SET
         type = ${type !== undefined ? type : existingTransaction.type},
-        category_id = ${newCategoryId || null},
+        category_id = ${newCategoryId},
         member_id = ${newMemberId || null},
         amount = ${newAmount},
         transaction_date = ${transaction_date !== undefined ? transaction_date : existingTransaction.transaction_date},
@@ -133,10 +134,10 @@ export async function PATCH(
         attachment_type = ${attachment_type !== undefined ? attachment_type : existingTransaction.attachment_type},
         updated_at = NOW()
       WHERE id = ${id} AND user_id = ${session.userId}
-        AND (${newCategoryId || null}::varchar IS NULL OR EXISTS (
-          SELECT 1 FROM categories WHERE id = ${newCategoryId || null}
+        AND EXISTS (
+          SELECT 1 FROM categories WHERE id = ${newCategoryId}
             AND user_id = ${session.userId} AND type = ${newType}
-        ))
+        )
       RETURNING *
     `], { isolationLevel: "Serializable" });
     if (result.length === 0) {

@@ -54,8 +54,6 @@ import { useRouter } from "next/navigation";
 import type { Transaction, TransactionType, Summary, Category, Member } from "@/types";
 import { toast } from "@/hooks/use-toast";
 import { upload } from "@/lib/upload";
-import { useFormDraft } from "@/hooks/use-form-draft";
-import { DraftNotice } from "@/components/ui/draft-notice";
 import { useTransactionNavigation, useTransactionScrollRestore } from "@/hooks/use-transaction-navigation";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { groupTransactionsByDay } from "@/lib/transaction-days";
@@ -168,7 +166,6 @@ function DashboardContent() {
   const setFilterMemberId = (value: string) => navigation.setFilters((current) => ({ ...current, memberId: value }));
   const addCloseRef = useRef<(() => Promise<boolean>) | null>(null);
   const editCloseRef = useRef<(() => Promise<boolean>) | null>(null);
-  const [categoriesReload, setCategoriesReload] = useState(0);
   const [summary, setSummary] = useState<Summary>({
     totalIncome: 0,
     totalExpense: 0,
@@ -198,7 +195,7 @@ function DashboardContent() {
     name?: string;
     type?: string;
   } | null>(null);
-  
+
   const dateRangeError = !startDate || !endDate
     ? "请选择开始和结束日期后查看记录。"
     : startDate > endDate ? "开始日期不能晚于结束日期，请调整日期范围。" : null;
@@ -272,7 +269,7 @@ function DashboardContent() {
 
     void loadCategories();
     return () => controller.abort();
-  }, [categoriesReload]);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -298,11 +295,6 @@ function DashboardContent() {
   const filteredTransactions = transactions;
   const dailyGroups = groupTransactionsByDay(filteredTransactions);
   useTransactionScrollRestore(navigation.session, navigation.ready && !isLoading && !currentError && !dateRangeError);
-  const onCategoryCreated = (category: Category) => {
-    setCategories((current) => [...current.filter((item) => item.id !== category.id), category]);
-    setCategoriesReload((value) => value + 1);
-  };
-
   const incomeCategories = categories.filter((cat) => cat.type === "income");
   const expenseCategories = categories.filter((cat) => cat.type === "expense");
 
@@ -351,8 +343,8 @@ function DashboardContent() {
               管理您的收支记录，实时统计收支情况
             </p>
           </div>
-          <Dialog 
-            open={isAddModalOpen} 
+          <Dialog
+            open={isAddModalOpen}
             onOpenChange={(open) => {
               if (open) setIsAddModalOpen(true);
               else if (addCloseRef.current) void addCloseRef.current();
@@ -365,14 +357,12 @@ function DashboardContent() {
                 添加记录
               </Button>
             </DialogTrigger>
-            <TransactionModal 
+            <TransactionModal
               key={isAddModalOpen ? 'open' : 'closed'} // 每次打开时重新挂载组件，确保表单是干净的
               mode="add"
-              isOpen={isAddModalOpen}
               closeGuardRef={addCloseRef}
-              onCategoryCreated={onCategoryCreated}
               onSaved={loadTransactions}
-              categories={categories} 
+              categories={categories}
               members={members}
               membersStatus={membersStatus}
               onRetryMembers={retryMembers}
@@ -383,7 +373,7 @@ function DashboardContent() {
                 if (shouldRefresh) {
                   loadTransactions();
                 }
-              }} 
+              }}
             />
           </Dialog>
         </div>
@@ -740,9 +730,9 @@ function DashboardContent() {
                           </td>
                           <td className="p-4">
                             <div className="flex items-center justify-end gap-1">
-                              <Button 
-                                variant="ghost" 
-                                size="icon" 
+                              <Button
+                                variant="ghost"
+                                size="icon"
                                 className="h-8 w-8"
                                 onClick={() => {
                                   setSelectedTransaction(transaction);
@@ -786,7 +776,7 @@ function DashboardContent() {
                       <div className="flex items-start gap-3">
                         {/* 左侧图标 */}
                         <div
-                          className="flex items-center justify-center w-12 h-12 rounded-xl text-2xl shrink-0 shadow-sm bg-muted"
+                          className="flex items-center justify-center w-12 h-12 rounded-xl text-2xl shrink-0 bg-muted"
                         >
                           {transaction.category?.icon}
                         </div>
@@ -808,9 +798,9 @@ function DashboardContent() {
                             </div>
                             {/* 操作按钮 */}
                             <div className="flex items-center gap-0.5 shrink-0">
-                              <Button 
-                                variant="ghost" 
-                                size="icon" 
+                              <Button
+                                variant="ghost"
+                                size="icon"
                                 className="h-7 w-7"
                                 onClick={() => {
                                   setSelectedTransaction(transaction);
@@ -898,8 +888,8 @@ function DashboardContent() {
 
       {/* 编辑对话框 */}
       {selectedTransaction && (
-        <Dialog 
-          open={isEditModalOpen} 
+        <Dialog
+          open={isEditModalOpen}
           onOpenChange={(open) => {
             if (open) setIsEditModalOpen(true);
             else if (editCloseRef.current) void editCloseRef.current();
@@ -909,9 +899,7 @@ function DashboardContent() {
           <TransactionModal
             key={selectedTransaction.id} // 使用 key 确保每次编辑不同记录时重新挂载组件
             mode="edit"
-            isOpen={isEditModalOpen}
             closeGuardRef={editCloseRef}
-            onCategoryCreated={onCategoryCreated}
             onSaved={loadTransactions}
             transaction={selectedTransaction}
             categories={categories}
@@ -1016,14 +1004,10 @@ function TransactionModal({
   onManageMembers,
   onClose,
   onSaved,
-  isOpen,
   closeGuardRef,
-  onCategoryCreated,
 }: {
   closeGuardRef: React.MutableRefObject<(() => Promise<boolean>) | null>;
-  onCategoryCreated: (category: Category) => void;
   mode: "add" | "edit";
-  isOpen: boolean;
   onSaved: () => void;
   transaction?: Transaction;
   categories: Category[];
@@ -1073,35 +1057,29 @@ function TransactionModal({
   })();
 
   const [formData, setFormData] = useState(initial);
-  const [baseline, setBaseline] = useState(() => JSON.stringify(initial));
-  const [showOptional, setShowOptional] = useState(() => !!(
-    transaction?.description || transaction?.attachment_key
-  ));
   const amountRef = useRef<HTMLInputElement>(null);
   const attachmentRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [pendingCategory, setPendingCategory] = useState(false);
-  const [creatingCategory, setCreatingCategory] = useState(false);
-  const draft = useFormDraft({
-    scope: mode === "add" ? "transaction:new" : `transaction:${transaction?.id}`,
-    value: formData,
-    onRestore: (value) => {
-      setFormData(value);
-      if (value.description) setShowOptional(true);
-    },
-    dirty: JSON.stringify(formData) !== baseline,
-    enabled: isOpen,
-  });
+  useEffect(() => {
+    // Remove legacy transaction drafts without touching other stored preferences.
+    try {
+      const storage = window.localStorage;
+      const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index));
+      for (const key of keys) {
+        if (key && /^ledger:draft:v1:[^:]+:transaction%3A/i.test(key)) storage.removeItem(key);
+      }
+    } catch { /* Storage may be disabled; this form never saves drafts. */ }
+  }, []);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
   const { requestClose } = useFormLeaveGuard({
-    draft: { needsProtection: draft.needsProtection || pendingCategory },
+    draft: { needsProtection: false },
     hasPendingFiles: !!attachment || removeExistingAttachment,
-    isBusy: isSubmitting || isUploading || creatingCategory,
+    isBusy: isSubmitting || isUploading,
   });
   useEffect(() => {
     const guard = () => requestClose(() => onClose(false));
@@ -1109,13 +1087,14 @@ function TransactionModal({
     return () => { if (closeGuardRef.current === guard) closeGuardRef.current = null; };
   }, [closeGuardRef, onClose, requestClose]);
 
+  const needsCategory = !categories.some((category) => category.id === formData.category_id && category.type === formData.type);
   const needsMember = mode === "add" && (membersStatus !== "ready" || !members.some((member) => member.id === formData.member_id));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (submittingRef.current || creatingCategory) return;
-    if (pendingCategory) {
-      toast.error("请先添加分类或取消新增分类，再保存交易");
+    if (submittingRef.current) return;
+    if (needsCategory) {
+      toast.error("请选择有效的分类后再保存");
       return;
     }
     if (needsMember) {
@@ -1175,7 +1154,7 @@ function TransactionModal({
           type: formData.type,
           amount: parseFloat(formData.amount),
           description: formData.description || null,
-          category_id: formData.category_id || null,
+          category_id: formData.category_id,
           member_id: formData.member_id || null,
           transaction_date: formData.transaction_date,
           attachment_key,
@@ -1189,11 +1168,9 @@ function TransactionModal({
         throw new Error(error.error || (mode === "add" ? "创建失败" : "更新失败"));
       }
 
-      draft.clear();
       if (keepOpen) {
         const next = { ...formData, amount: "", description: "" };
         setFormData(next);
-        setBaseline(JSON.stringify(next));
         setAttachment(null);
         setRemoveExistingAttachment(false);
         setUploadProgress(0);
@@ -1217,40 +1194,37 @@ function TransactionModal({
   const hasExistingAttachment = !!transaction?.attachment_key;
 
   return (
-    <DialogContent className="sm:max-w-[500px]">
+    <DialogContent className="gap-3 sm:max-w-[500px]" {...(mode === "add" ? { "aria-describedby": undefined } : {})}>
       <DialogHeader>
         <DialogTitle>{mode === "add" ? "快速记一笔" : "编辑交易记录"}</DialogTitle>
-        <DialogDescription>
-          {mode === "add" ? "填写金额并选择家庭成员，备注与附件可稍后补充" : "修改交易详情"}
-        </DialogDescription>
+        {mode === "edit" ? <DialogDescription>修改交易详情</DialogDescription> : null}
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
-        <DialogBody className="space-y-4 py-4">
-        <DraftNotice draft={draft} />
-        <div className="space-y-2 rounded-lg border bg-muted/30 p-4">
+        <DialogBody className="space-y-4">
+        <div className="space-y-2">
           <Label htmlFor={`${idPrefix}amount`}>金额（元） *</Label>
-          <Input ref={amountRef} id={`${idPrefix}amount`} type="number" step="0.01" min="0.01"
-            inputMode="decimal" autoFocus placeholder="0.00" className="h-14 text-3xl font-semibold md:text-3xl"
-            value={formData.amount} onChange={(event) => setFormData({ ...formData, amount: event.target.value })} required />
-        </div>
-        <div className="flex gap-2" role="group" aria-label="收支类型">
-          {(["expense", "income"] as const).map((type) => (
-            <Button key={type} type="button" className="flex-1" variant={formData.type === type ? "default" : "outline"}
-              aria-pressed={formData.type === type} disabled={isSubmitting || isUploading || creatingCategory}
-              onClick={() => setFormData({ ...formData, type, category_id: formData.type === type ? formData.category_id : "" })}>
-              {type === "expense" ? "支出" : "收入"}
-            </Button>
-          ))}
+          <div className="flex items-center gap-2">
+            <div className="flex h-11 shrink-0 items-center gap-1 rounded-md border bg-muted/50 p-1" role="group" aria-label="收支类型">
+              {(["expense", "income"] as const).map((type) => (
+                <Button key={type} type="button" className="h-full px-3" variant={formData.type === type ? "default" : "ghost"}
+                  aria-pressed={formData.type === type} disabled={isSubmitting || isUploading}
+                  onClick={() => setFormData({ ...formData, type, category_id: formData.type === type ? formData.category_id : "" })}>
+                  {type === "expense" ? "支出" : "收入"}
+                </Button>
+              ))}
+            </div>
+            <div className="min-w-0 flex-1">
+              <Input ref={amountRef} id={`${idPrefix}amount`} type="number" step="0.01" min="0.01"
+                inputMode="decimal" autoComplete="off" autoFocus placeholder="0.00" className="h-11 min-w-0 text-2xl font-semibold md:text-2xl"
+                value={formData.amount} onChange={(event) => setFormData({ ...formData, amount: event.target.value })} required />
+            </div>
+          </div>
         </div>
 
         <TransactionCategoryPicker id={`${idPrefix}category`} type={formData.type} categories={categories}
           value={formData.category_id} disabled={isSubmitting || isUploading}
           onChange={(category_id) => setFormData((current) => ({ ...current, category_id }))}
-          onCreated={(category) => {
-            onCategoryCreated(category);
-            setFormData((current) => current.type === category.type ? { ...current, category_id: category.id } : current);
-          }}
-          onPendingChange={(pending, busy) => { setPendingCategory(pending); setCreatingCategory(busy); }} />
+        />
 
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}date`}>交易日期 *</Label>
@@ -1295,13 +1269,7 @@ function TransactionModal({
           </div>
         </div>
 
-        <Button type="button" variant="ghost" className="w-full justify-between"
-          aria-expanded={showOptional} aria-controls={`${idPrefix}optional-fields`}
-          onClick={() => setShowOptional((open) => !open)}>
-          备注与附件（可选）
-          {showOptional ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-        </Button>
-        <div id={`${idPrefix}optional-fields`} hidden={!showOptional} className="space-y-4">
+        <div className="space-y-4">
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}description`}>备注</Label>
           <Input
@@ -1399,10 +1367,10 @@ function TransactionModal({
           >
             取消
           </Button>
-          <Button type="submit" name="action" value="save" disabled={isSubmitting || isUploading || creatingCategory || needsMember}>
+          <Button type="submit" name="action" value="save" disabled={isSubmitting || isUploading || needsMember || needsCategory}>
             {isSubmitting || isUploading ? "保存中..." : "保存"}
           </Button>
-          {mode === "add" ? <Button type="submit" name="action" value="continue" variant="outline" disabled={isSubmitting || isUploading || creatingCategory || needsMember}>
+          {mode === "add" ? <Button type="submit" name="action" value="continue" variant="outline" disabled={isSubmitting || isUploading || needsMember || needsCategory}>
             保存并继续
           </Button> : null}
         </DialogFooter>

@@ -208,27 +208,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 如果提供了 category_id，验证该分类是否存在且属于当前用户
-    if (category_id) {
-      const categories = await sql`
-        SELECT id, type FROM categories 
-        WHERE id = ${category_id} AND user_id = ${session.userId}
-      `;
-      
-      if (categories.length === 0) {
-        return NextResponse.json(
-          { error: '分类不存在' },
-          { status: 400 }
-        );
-      }
+    // 分类必填，验证分类归属及收支类型
+    if (typeof category_id !== 'string' || !category_id.trim()) {
+      return NextResponse.json({ error: '请选择分类' }, { status: 400 });
+    }
+    const categories = await sql`
+      SELECT id, type FROM categories
+      WHERE id = ${category_id} AND user_id = ${session.userId}
+    `;
 
-      // 验证分类类型是否匹配
-      if (categories[0].type !== type) {
-        return NextResponse.json(
-          { error: `分类类型不匹配：该分类是${categories[0].type === 'income' ? '收入' : '支出'}分类` },
-          { status: 400 }
-        );
-      }
+    if (categories.length === 0) {
+      return NextResponse.json(
+        { error: '分类不存在' },
+        { status: 400 }
+      );
+    }
+
+    // 验证分类类型是否匹配
+    if (categories[0].type !== type) {
+      return NextResponse.json(
+        { error: `分类类型不匹配：该分类是${categories[0].type === 'income' ? '收入' : '支出'}分类` },
+        { status: 400 }
+      );
     }
 
     // 必须选择当前用户的家庭成员
@@ -252,7 +253,7 @@ export async function POST(request: NextRequest) {
 
     // 插入交易记录
     const [, result] = await sql.transaction([
-      sql`SELECT id FROM categories WHERE id = ${category_id || null} AND user_id = ${session.userId} FOR SHARE`,
+      sql`SELECT id FROM categories WHERE id = ${category_id} AND user_id = ${session.userId} FOR SHARE`,
       sql`
       INSERT INTO transactions (
         id, user_id, category_id, member_id, type, amount, 
@@ -262,7 +263,7 @@ export async function POST(request: NextRequest) {
       SELECT
         ${id},
         ${session.userId},
-        ${category_id || null},
+        ${category_id},
         ${member_id},
         ${type},
         ${amountNum},
@@ -273,8 +274,8 @@ export async function POST(request: NextRequest) {
         ${transaction_date},
         NOW(),
         NOW()
-      WHERE ${category_id || null}::varchar IS NULL OR EXISTS (
-        SELECT 1 FROM categories WHERE id = ${category_id || null}
+      WHERE EXISTS (
+        SELECT 1 FROM categories WHERE id = ${category_id}
           AND user_id = ${session.userId} AND type = ${type}
       )
       RETURNING *

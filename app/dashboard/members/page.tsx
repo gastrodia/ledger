@@ -86,7 +86,7 @@ export default function MembersPage() {
       confirmText: "删除",
       cancelText: "取消",
     });
-    
+
     if (!confirmed) {
       return;
     }
@@ -225,7 +225,7 @@ function MemberCard({
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 bg-background shadow-sm"
+          className="h-7 w-7 bg-background"
           onClick={() => onEdit(member)}
         >
           <Edit className="h-3 w-3" />
@@ -233,7 +233,7 @@ function MemberCard({
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7 bg-background shadow-sm text-destructive hover:text-destructive"
+          className="h-7 w-7 bg-background text-destructive hover:text-destructive"
           onClick={() => onDelete(member.id)}
         >
           <Trash2 className="h-3 w-3" />

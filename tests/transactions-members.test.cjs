@@ -8,6 +8,7 @@
     const sql = (strings, ...values) => {
       const text = strings.join('?');
       calls.queries.push({ text, values });
+      if (text.includes('FROM categories')) return [{ id: 'food', type: 'expense' }];
       if (text.includes('FROM members')) return exists ? [{ id: 'member' }] : [];
       return [];
     };
@@ -23,7 +24,7 @@
     vm.runInNewContext(ts.transpileModule(fs.readFileSync('app/api/transactions/route.ts', 'utf8'), {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText, { exports, require: (id) => { assert.ok(id in mocks); return mocks[id]; }, console });
-    return { calls, create: (member_id) => exports.POST({ json: async () => ({ type: 'expense', amount: 10, transaction_date: '2026-09-07', member_id }) }) };
+    return { calls, create: (member_id) => exports.POST({ json: async () => ({ type: 'expense', category_id: 'food', amount: 10, transaction_date: '2026-09-07', member_id }) }) };
   }
 
   test('create requires a nonblank string member before SQL or attachment processing', async () => {
@@ -43,8 +44,8 @@
     const response = await f.create('foreign-member');
     assert.equal(response.status, 400);
     assert.equal((await response.json()).error, '家庭成员不存在');
-    assert.match(f.calls.queries[0].text, /id = \? AND user_id = \?/);
-    assert.deepEqual(f.calls.queries[0].values, ['foreign-member', 'owner']);
+    assert.match(f.calls.queries.find((query) => query.text.includes('FROM members')).text, /id = \? AND user_id = \?/);
+    assert.deepEqual(f.calls.queries.find((query) => query.text.includes('FROM members')).values, ['foreign-member', 'owner']);
     assert.equal(f.calls.attachments, 0);
     assert.equal(f.calls.writes, 0);
   });
