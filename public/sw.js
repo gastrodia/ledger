@@ -1,4 +1,4 @@
-const CACHE_NAME = "ledger-pwa-v2";
+const CACHE_NAME = "ledger-pwa-v3";
 const OFFLINE_URL = "/offline.html";
 
 self.addEventListener("install", (event) => {
@@ -17,7 +17,7 @@ self.addEventListener("activate", (event) => {
       const keys = await caches.keys();
       await Promise.all(
         keys
-          .filter((k) => k !== CACHE_NAME)
+          .filter((k) => k.startsWith("ledger-pwa-") && k !== CACHE_NAME)
           .map((k) => caches.delete(k))
       );
       await self.clients.claim();
@@ -31,12 +31,6 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-
-  // API 一律走网络，避免缓存导致“列表不更新”
-  if (url.pathname.startsWith("/api/")) {
-    event.respondWith(fetch(request));
-    return;
-  }
 
   // 对页面导航使用“网络优先”，离线时回退到离线页
   if (request.mode === "navigate") {
@@ -55,27 +49,6 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // 静态资源：缓存优先 + 后台刷新（避免影响数据接口）
-  event.respondWith(
-    (async () => {
-      const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(request);
-
-      const fetchPromise = (async () => {
-        try {
-          const response = await fetch(request);
-          // 避免缓存非常规响应
-          if (response && response.ok) {
-            await cache.put(request, response.clone());
-          }
-          return response;
-        } catch {
-          return cached;
-        }
-      })();
-
-      return cached || fetchPromise;
-    })()
-  );
+  // Next.js 的 RSC/预取响应包含当前构建的模块引用，不能跨部署复用。
+  // 脚本、样式和 API 也交由网络及浏览器 HTTP 缓存处理；SW 只保留离线页。
 });
-
