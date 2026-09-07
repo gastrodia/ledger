@@ -145,8 +145,8 @@ export default function GiftBooksPage() {
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">礼簿</h1>
-            <p className="text-muted-foreground mt-1">管理人情往来记录；每本汇总涵盖全部礼金与礼品明细，不自动进入收支统计。</p>
+            <h1 className="text-2xl font-semibold tracking-tight">礼簿</h1>
+            <p className="text-sm leading-6 text-muted-foreground mt-1">管理人情往来记录；每本汇总涵盖全部礼金与礼品明细，不自动进入收支统计。</p>
           </div>
 
           <Dialog open={isCreateOpen} onOpenChange={(open) => { if (open) setIsCreateOpen(true); else createClose.close(() => setIsCreateOpen(false)); }}>

@@ -240,8 +240,8 @@ export default function GiftsGivenPage() {
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">送礼</h1>
-            <p className="text-muted-foreground mt-1">
+            <h1 className="text-2xl font-semibold tracking-tight">送礼</h1>
+            <p className="text-sm leading-6 text-muted-foreground mt-1">
               记录我送给别人的现金与物品；本台账不自动进入收支统计。
             </p>
           </div>
@@ -459,16 +459,16 @@ export default function GiftsGivenPage() {
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{g.recipient_name}</div>
                           <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.recipient_name}的送礼记录`} /></div>
-                          <div className="text-sm text-muted-foreground mt-1">
+                          <div className="text-sm leading-6 text-muted-foreground mt-1">
                             {formatDate(g.gift_date)}
                           </div>
                           {g.occasion ? (
-                            <div className="text-sm text-muted-foreground mt-1 truncate">
+                            <div className="text-sm leading-6 text-muted-foreground mt-1 truncate">
                               事由：{g.occasion}
                             </div>
                           ) : null}
                           {g.notes ? (
-                            <div className="text-sm text-muted-foreground mt-1 truncate">
+                            <div className="text-sm leading-6 text-muted-foreground mt-1 truncate">
                               备注：{g.notes}
                             </div>
                           ) : null}

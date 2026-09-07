@@ -196,9 +196,9 @@ export function DashboardNav() {
                   onClick={() => setMobileMenuPath(null)}
                   aria-current={isActive ? "page" : undefined}
                   className={cn(
-                    "flex min-h-11 items-center gap-3 px-3 py-2 rounded-lg transition-colors",
+                    "flex min-h-11 items-center gap-3 px-3 py-2 rounded-md transition-colors",
                     isActive
-                      ? "bg-primary text-primary-foreground font-medium hover:bg-primary/90"
+                      ? "bg-primary/10 text-primary font-semibold hover:bg-primary/15"
                       : "text-muted-foreground hover:bg-accent hover:text-foreground"
                   )}
                 >
@@ -214,7 +214,7 @@ export function DashboardNav() {
   );
 
   const branding = (
-    <div className="flex shrink-0 items-center gap-3 h-20 px-6 border-b">
+    <div className="flex shrink-0 items-center gap-3 h-18 px-5 border-b">
       <Image src="/icons/icon-maskable.svg" alt="" width={40} height={40} className="size-10" priority />
       <div>
         <p className="font-bold text-lg">钱钱去哪了</p>
@@ -228,7 +228,7 @@ export function DashboardNav() {
       <button
         onClick={handleInstall}
         disabled={isInstalling}
-        className="flex min-h-11 items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex min-h-11 items-center gap-3 px-3 py-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <Download className="h-5 w-5 shrink-0" aria-hidden="true" />
         <span className="text-sm font-medium">{isInstalling ? "安装中..." : "安装"}</span>
@@ -236,7 +236,7 @@ export function DashboardNav() {
       <button
         onClick={handleLogout}
         disabled={isLoggingOut}
-        className="flex min-h-11 items-center gap-3 px-3 py-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed"
+        className="flex min-h-11 items-center gap-3 px-3 py-2 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <LogOut className="h-5 w-5 shrink-0" aria-hidden="true" />
         <span className="text-sm font-medium">{isLoggingOut ? "退出中..." : "退出登录"}</span>
@@ -246,7 +246,7 @@ export function DashboardNav() {
 
   return (
     <>
-      <aside aria-label="侧栏导航" className="fixed inset-y-0 left-0 z-30 hidden w-64 flex-col border-r bg-card lg:flex">
+      <aside aria-label="侧栏导航" className="fixed inset-y-0 left-0 z-30 hidden w-56 flex-col border-r bg-card lg:flex">
         {branding}
         {navigation}
         {accountActions}

@@ -517,11 +517,11 @@ export default function LoansPage() {
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{l.counterparty_name}</div>
                           <div className="mt-1"><TransactionLinkButton sourceId={l.id} label={`${l.counterparty_name}的借还记录`} /></div>
-                          <div className="text-sm text-muted-foreground mt-1 truncate">
+                          <div className="text-sm leading-6 text-muted-foreground mt-1 truncate">
                             {subject}
                           </div>
                           {l.notes ? (
-                            <div className="text-sm text-muted-foreground mt-1 truncate">
+                            <div className="text-sm leading-6 text-muted-foreground mt-1 truncate">
                               备注：{l.notes}
                             </div>
                           ) : null}
@@ -592,8 +592,8 @@ export default function LoansPage() {
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">借还</h1>
-            <p className="text-muted-foreground mt-1">
+            <h1 className="text-2xl font-semibold tracking-tight">借还</h1>
+            <p className="text-sm leading-6 text-muted-foreground mt-1">
               区分我欠别人、别人欠我，记录每次归还。借还台账不自动进入收支统计。
             </p>
           </div>
@@ -738,7 +738,7 @@ export default function LoansPage() {
                               </div>
                               <div className="mt-1"><TransactionLinkButton sourceId={r.id} label={`${repaymentsLoan.counterparty_name}的归还记录`} /></div>
                               {r.notes ? (
-                                <div className="text-sm text-muted-foreground mt-1 break-words">
+                                <div className="text-sm leading-6 text-muted-foreground mt-1 break-words">
                                   {r.notes}
                                 </div>
                               ) : null}

@@ -88,7 +88,7 @@ function SummaryCards({
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="pt-4 sm:pt-5">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
@@ -108,7 +108,7 @@ function SummaryCards({
                 {showIncome ? formatCurrency(summary.totalIncome) : "****"}
               </p>
             </div>
-            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-green-100">
+            <div className="flex items-center justify-center w-10 h-10 rounded-md bg-green-100">
               <TrendingUp className="h-6 w-6 text-green-600" />
             </div>
           </div>
@@ -116,13 +116,13 @@ function SummaryCards({
       </Card>
 
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="pt-4 sm:pt-5">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <p className="text-sm font-medium text-muted-foreground">总支出</p>
               <p className="text-2xl font-bold text-red-600">{formatCurrency(summary.totalExpense)}</p>
             </div>
-            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-100">
+            <div className="flex items-center justify-center w-10 h-10 rounded-md bg-red-100">
               <TrendingDown className="h-6 w-6 text-red-600" />
             </div>
           </div>
@@ -130,7 +130,7 @@ function SummaryCards({
       </Card>
 
       <Card>
-        <CardContent className="pt-6">
+        <CardContent className="pt-4 sm:pt-5">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <p className="text-sm font-medium text-muted-foreground">结余</p>
@@ -138,7 +138,7 @@ function SummaryCards({
                 {showIncome ? formatCurrency(summary.balance) : "****"}
               </p>
             </div>
-            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-primary/10">
+            <div className="flex items-center justify-center w-10 h-10 rounded-md bg-primary/10">
               <Calendar className="h-6 w-6 text-primary" />
             </div>
           </div>
@@ -344,10 +344,10 @@ function DashboardContent() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">
+            <h1 className="text-2xl font-semibold tracking-tight">
               交易记录
             </h1>
-            <p className="text-muted-foreground mt-1">
+            <p className="text-sm leading-6 text-muted-foreground mt-1">
               管理您的收支记录，实时统计收支情况
             </p>
           </div>

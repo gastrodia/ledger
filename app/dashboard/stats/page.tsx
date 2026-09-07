@@ -101,7 +101,7 @@ function YearlyBarChart({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="pt-6">
+      <CardContent className="pt-4 sm:pt-5">
         {maxAmount === 0 ? (
           <div className="text-center py-8 text-muted-foreground text-sm">
             暂无年度收支记录
@@ -366,10 +366,10 @@ export default function StatsPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">
+            <h1 className="text-2xl font-semibold tracking-tight">
               统计分析
             </h1>
-            <p className="text-muted-foreground mt-1">
+            <p className="text-sm leading-6 text-muted-foreground mt-1">
               统计仅包含收支记录；礼簿、送礼和借还台账保持独立，不会自动计入。
             </p>
           </div>
@@ -440,7 +440,7 @@ export default function StatsPage() {
             {/* Summary Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <Card>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <div className="flex items-center gap-2">
@@ -460,7 +460,7 @@ export default function StatsPage() {
                         {formatIncome(statsData.summary.totalIncome)}
                       </p>
                     </div>
-                    <div className="flex items-center justify-center w-12 h-12 rounded-full bg-green-100">
+                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-green-100">
                       <TrendingUp className="h-6 w-6 text-green-600" />
                     </div>
                   </div>
@@ -468,7 +468,7 @@ export default function StatsPage() {
               </Card>
 
               <Card>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm font-medium text-muted-foreground">总支出</p>
@@ -476,7 +476,7 @@ export default function StatsPage() {
                         {formatCurrency(statsData.summary.totalExpense)}
                       </p>
                     </div>
-                    <div className="flex items-center justify-center w-12 h-12 rounded-full bg-red-100">
+                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-red-100">
                       <TrendingDown className="h-6 w-6 text-red-600" />
                     </div>
                   </div>
@@ -484,7 +484,7 @@ export default function StatsPage() {
               </Card>
 
               <Card>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   <div className="flex items-center justify-between">
                     <div className="space-y-1">
                       <p className="text-sm font-medium text-muted-foreground">结余</p>
@@ -492,7 +492,7 @@ export default function StatsPage() {
                         {showIncome ? formatCurrency(statsData.summary.balance) : "****"}
                       </p>
                     </div>
-                    <div className="flex items-center justify-center w-12 h-12 rounded-full bg-primary/10">
+                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-primary/10">
                       <Calendar className="h-6 w-6 text-primary" />
                     </div>
                   </div>
@@ -562,7 +562,7 @@ export default function StatsPage() {
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="pt-6">
+              <CardContent className="pt-4 sm:pt-5">
                 {aiError ? (
                   <div className="text-sm text-red-600 whitespace-pre-wrap">
                     {aiError}
@@ -618,7 +618,7 @@ export default function StatsPage() {
                     </span>
                   </div>
                 </CardHeader>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   {statsData.categoryStats.expense.length === 0 ? (
                     <div className="text-center py-8 text-muted-foreground text-sm">
                       暂无支出记录
@@ -677,7 +677,7 @@ export default function StatsPage() {
                     </span>
                   </div>
                 </CardHeader>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   {statsData.categoryStats.income.length === 0 ? (
                     <div className="text-center py-8 text-muted-foreground text-sm">
                       暂无收入记录
@@ -736,7 +736,7 @@ export default function StatsPage() {
                     </span>
                   </div>
                 </CardHeader>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   {statsData.memberStats.expense.length === 0 ? (
                     <div className="text-center py-8 text-muted-foreground text-sm">
                       暂无支出记录
@@ -795,7 +795,7 @@ export default function StatsPage() {
                     </span>
                   </div>
                 </CardHeader>
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-5">
                   {statsData.memberStats.income.length === 0 ? (
                     <div className="text-center py-8 text-muted-foreground text-sm">
                       暂无收入记录

@@ -341,10 +341,10 @@ export default function GiftBookDetailPage() {
                 </Link>
               </Button>
               <div className="min-w-0">
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight truncate">
+                <h1 className="text-2xl font-semibold tracking-tight truncate">
                   {giftbook?.name || "礼簿详情"}
                 </h1>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-muted-foreground mt-1">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs leading-6 text-muted-foreground mt-1">
                   {giftbook?.event_date && (
                     <span className="flex items-center gap-1.5">
                       <CalendarDays className="h-3.5 w-3.5" />
@@ -385,7 +385,7 @@ export default function GiftBookDetailPage() {
         {/* Summary */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card>
-            <CardContent className="pt-6">
+            <CardContent className="pt-4 sm:pt-5">
               <div className="space-y-1">
                 <p className="text-sm font-medium text-muted-foreground">礼金合计</p>
                 <p className="text-2xl font-bold text-green-600">
@@ -395,7 +395,7 @@ export default function GiftBookDetailPage() {
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="pt-6">
+            <CardContent className="pt-4 sm:pt-5">
               <div className="space-y-1">
                 <p className="text-sm font-medium text-muted-foreground">礼品估值合计</p>
                 <p className="text-2xl font-bold text-primary">
@@ -406,7 +406,7 @@ export default function GiftBookDetailPage() {
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="pt-6">
+            <CardContent className="pt-4 sm:pt-5">
               <div className="space-y-1">
                 <p className="text-sm font-medium text-muted-foreground">礼金/礼品明细数</p>
                 <p className="text-2xl font-bold text-primary">
@@ -589,11 +589,11 @@ export default function GiftBookDetailPage() {
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{g.counterparty_name}</div>
                           <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.counterparty_name}的收礼记录`} /></div>
-                          <div className="text-sm text-muted-foreground mt-1">
+                          <div className="text-sm leading-6 text-muted-foreground mt-1">
                             {formatDate(g.gift_date)}
                           </div>
                           {g.notes ? (
-                            <div className="text-sm text-muted-foreground mt-1 truncate">
+                            <div className="text-sm leading-6 text-muted-foreground mt-1 truncate">
                               备注：{g.notes}
                             </div>
                           ) : null}

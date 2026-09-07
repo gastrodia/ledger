@@ -173,7 +173,7 @@ export default function NoteDetailPage() {
     <DashboardLayout>
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <h1 className="text-3xl font-bold tracking-tight">编辑笔记</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">编辑笔记</h1>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" onClick={backToList}>
               返回列表

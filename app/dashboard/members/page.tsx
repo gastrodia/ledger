@@ -127,10 +127,10 @@ export default function MembersPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">
+            <h1 className="text-2xl font-semibold tracking-tight">
               家庭成员
             </h1>
-            <p className="text-muted-foreground mt-1">
+            <p className="text-sm leading-6 text-muted-foreground mt-1">
               管理您的家庭成员，用于记录交易的归属人
             </p>
           </div>
@@ -211,9 +211,9 @@ function MemberCard({
 }) {
   return (
     <div className="relative group">
-      <div className="p-6 rounded-xl border bg-card hover:shadow-md transition-all text-center cursor-pointer">
+      <div className="p-4 pt-12 rounded-lg border bg-card hover:border-primary/30 hover:shadow-sm transition-colors text-center">
         <div className="flex flex-col items-center space-y-3">
-          <div className="flex items-center justify-center w-16 h-16 rounded-full bg-primary/10 text-4xl">
+          <div className="flex items-center justify-center w-12 h-12 rounded-lg bg-primary/10 text-3xl">
             {member.avatar || "👤"}
           </div>
           <div>
@@ -221,7 +221,7 @@ function MemberCard({
           </div>
         </div>
       </div>
-      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 transition-opacity">
         <Button
           variant="ghost"
           size="icon"

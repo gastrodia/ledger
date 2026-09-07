@@ -131,11 +131,11 @@ export default function NotesPage() {
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
+            <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
               <MessageSquare className="h-6 w-6" />
               笔记
             </h1>
-            <p className="text-muted-foreground mt-1">记录你的 Markdown 笔记</p>
+            <p className="text-sm leading-6 text-muted-foreground mt-1">记录你的 Markdown 笔记</p>
           </div>
 
           <Button asChild>
@@ -208,7 +208,7 @@ export default function NotesPage() {
                             </span>
                           ) : null}
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">
+                        <p className="text-xs leading-6 text-muted-foreground mt-1">
                           更新于 {formatDate(n.updated_at)}
                         </p>
                         <p className="text-sm text-muted-foreground mt-2 line-clamp-2 whitespace-pre-wrap">

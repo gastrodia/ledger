@@ -159,10 +159,10 @@ export default function CategoriesPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">
+            <h1 className="text-2xl font-semibold tracking-tight">
               分类管理
             </h1>
-            <p className="text-muted-foreground mt-1">
+            <p className="text-sm leading-6 text-muted-foreground mt-1">
               管理您的收入和支出分类
             </p>
           </div>
@@ -276,16 +276,16 @@ function CategoryCard({
   onDelete: (id: string) => void;
 }) {
   return (
-    <div className="relative p-4 rounded-xl border bg-card hover:shadow-md transition-all cursor-pointer group">
+    <div className="relative p-4 pt-12 rounded-lg border bg-card hover:border-primary/30 hover:shadow-sm transition-colors group">
       <div className="flex flex-col items-center text-center space-y-2">
-        <div className="flex items-center justify-center w-12 h-12 rounded-xl text-2xl bg-accent">
+        <div className="flex items-center justify-center w-10 h-10 rounded-md text-xl bg-accent">
           {category.icon || "📁"}
         </div>
         <div>
           <p className="font-medium">{category.name}</p>
         </div>
       </div>
-      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 transition-opacity">
         <Button
           variant="ghost"
           size="icon"
