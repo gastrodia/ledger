@@ -79,6 +79,7 @@ export interface Note {
   user_id: string;
   title?: string | null;
   content: string;
+  color?: string;
   pinned_at?: string | null;
   archived_at?: string | null;
   created_at: string;

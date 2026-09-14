@@ -1,0 +1,42 @@
+.notes-workspace { max-width: 1600px; margin-inline: auto; }
+.notes-wall { min-height: 65vh; padding: 20px 24px 32px; border: 1px solid #e8e5df; border-radius: 8px; background-color: #f7f6f2; background-image: radial-gradient(#dcd9d0 0.7px, transparent 0.7px); background-size: 18px 18px; }
+.notes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); align-items: start; gap: 24px; }
+.sticky-note { position: relative; display: flex; min-width: 0; flex-direction: column; padding: 16px 20px 12px; color: #303730; background: var(--paper); border: 1px solid var(--paper-edge); border-radius: 2px 2px 18px 2px; box-shadow: 1px 4px 7px #554d3510, 0 1px 2px #554d3509; transition: box-shadow 150ms ease, transform 150ms ease; }
+.sticky-note::after { content: ''; pointer-events: none; position: absolute; right: 0; bottom: 0; width: 17px; height: 17px; border-radius: 2px 0 15px 0; background: linear-gradient(135deg, #ffffff65 49%, var(--paper-edge) 51%); }
+.sticky-note:focus-within { box-shadow: 0 6px 16px #554d3520; }
+@media (hover: hover) { .sticky-note:hover { transform: translateY(-3px); box-shadow: 1px 8px 16px #554d3520; } }
+.sticky-note-top { display: flex; height: 20px; align-items: center; justify-content: space-between; margin-bottom: 14px; color: #626858; font-size: 10px; }
+.note-action { display: inline-flex; width: 40px; height: 40px; align-items: center; justify-content: center; border-radius: 4px; color: #515b51; }
+.note-action:hover { background: #ffffff60; }
+.note-action:disabled { opacity: .4; cursor: wait; }
+.note-action svg { width: 15px; height: 15px; }
+.note-quick-add { display: flex; width: 100%; align-items: center; gap: 12px; border: 1px dashed #cbc7ba; border-radius: 4px; background: #fdfbf4dd; padding: 12px 16px; text-align: left; color: #666657; font-size: 14px; }
+.note-quick-add:hover { border-color: #99977e; background: #fffdf5; }
+.note-markdown { font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.note-markdown > :first-child { margin-top: 0; }
+.note-markdown p { margin-block: 0 10px; white-space: pre-wrap; }
+.note-markdown h1, .note-markdown h2, .note-markdown h3 { margin-block: 10px 6px; font-size: 1.05em; font-weight: 600; }
+.note-markdown ul, .note-markdown ol { padding-left: 20px; list-style: disc; }
+.note-markdown ol { list-style: decimal; }
+.note-markdown .contains-task-list { padding-left: 0; list-style: none; }
+.note-markdown input { margin-right: 7px; accent-color: #56624d; }
+.note-markdown img { max-width: 100%; max-height: 140px; border-radius: 3px; object-fit: cover; }
+.note-markdown a { color: #344d77; text-decoration: underline; }
+.note-markdown blockquote { border-left: 2px solid #0003; padding-left: 10px; }
+.note-markdown pre { overflow-x: auto; background: #ffffff50; padding: 6px; }
+.note-markdown code { font-size: 12px; }
+.note-markdown table { width: 100%; border-collapse: collapse; }
+.note-markdown td, .note-markdown th { padding: 4px; border: 1px solid #0002; }
+.note-composer .sticky-editor { --color-canvas-default: transparent; --color-fg-default: #303730; }
+.note-composer .w-md-editor { background: transparent; box-shadow: none; font-family: inherit; }
+.note-composer .w-md-editor-text, .note-composer .w-md-editor-text-input, .note-composer .w-md-editor-text-pre > code { font-family: inherit !important; font-size: 15px !important; line-height: 1.9 !important; }
+.note-composer .w-md-editor-toolbar { background: #ffffff60; border-color: #0001; flex-wrap: wrap; }
+.note-composer .w-md-editor-preview { background: transparent; box-shadow: none; }
+.note-composer .wmde-markdown { background: transparent; color: #303730; overflow-wrap: anywhere; }
+.note-composer .wmde-markdown img { max-width: 100%; }
+@media (max-width: 639px) {
+  .notes-wall { padding: 12px 12px 24px; }
+  .notes-grid { gap: 18px; }
+  .sticky-note { padding-inline: 18px; }
+  .note-composer { max-height: 90dvh; }
+}

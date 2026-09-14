@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS notes (
     user_id VARCHAR(36) NOT NULL,
     title VARCHAR(255),
     content TEXT NOT NULL,
+    color VARCHAR(16) NOT NULL DEFAULT 'yellow' CHECK (color IN ('yellow', 'pink', 'green', 'blue', 'purple')),
     pinned_at TIMESTAMP,
     archived_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

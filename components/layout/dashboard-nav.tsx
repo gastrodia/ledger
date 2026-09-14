@@ -11,7 +11,7 @@ import {
   Menu,
   BarChart3,
   Gift,
-  MessageSquare,
+  StickyNote,
   HandCoins,
   Download,
   X,
@@ -39,7 +39,7 @@ const navigationIcons = {
   loans: HandCoins,
   giftbooks: Gift,
   gifts: Gift,
-  notes: MessageSquare,
+  notes: StickyNote,
 };
 
 export function DashboardNav() {

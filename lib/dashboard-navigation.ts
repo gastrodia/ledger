@@ -5,7 +5,7 @@ export const dashboardNavigationGroups = [
       { href: "/dashboard", label: "交易记录", icon: "transactions" },
       { href: "/dashboard/stats", label: "统计分析", icon: "stats" },
       { href: "/dashboard/loans", label: "欠款/借款", icon: "loans" },
-      { href: "/dashboard/notes", label: "笔记", icon: "notes" },
+      { href: "/dashboard/notes", label: "便利贴", icon: "notes" },
     ],
   },
   {

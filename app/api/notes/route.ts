@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
 import { v4 as uuidv4 } from 'uuid';
+import { ensureNotesSchema } from '@/lib/notes-schema';
+import { validateNoteInput } from '@/lib/notes';
 
 export async function GET(request: NextRequest) {
   try {
@@ -10,6 +12,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '未登录' }, { status: 401 });
     }
 
+    await ensureNotesSchema();
     const searchParams = request.nextUrl.searchParams;
     const q = (searchParams.get('q') || '').trim();
     const archived = searchParams.get('archived'); // 'true' | 'false' | null
@@ -18,7 +21,7 @@ export async function GET(request: NextRequest) {
     let idx = 2;
 
     let query = `
-      SELECT id, user_id, title, content, pinned_at, archived_at, created_at, updated_at
+      SELECT id, user_id, title, content, color, pinned_at, archived_at, created_at, updated_at
       FROM notes
       WHERE user_id = $1
     `;
@@ -46,20 +49,21 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ data: rows });
   } catch (error) {
-    console.error('获取笔记列表错误:', error);
+    if (error instanceof SyntaxError) return NextResponse.json({ error: '请求格式不正确' }, { status: 400 });
+    console.error('获取便利贴列表错误:', error);
     const message = error instanceof Error ? error.message : '未知错误';
     // 常见问题：数据库未创建 notes 表
     if (message.includes('relation') && message.includes('notes') && message.includes('does not exist')) {
       return NextResponse.json(
         {
-          error: '获取笔记列表失败',
+          error: '获取便利贴列表失败',
           details: '数据库缺少 notes 表。请先执行 scripts/init-db.sql（或跑一次迁移）创建表。',
         },
         { status: 500 }
       );
     }
     return NextResponse.json(
-      { error: '获取笔记列表失败', details: message },
+      { error: '获取便利贴列表失败', details: message },
       { status: 500 }
     );
   }
@@ -73,6 +77,10 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
+    const inputError = validateNoteInput(body, true);
+    if (inputError) return NextResponse.json({ error: inputError }, { status: 400 });
+    await ensureNotesSchema();
+    const color = body.color ?? 'yellow';
     const title = (body?.title ?? null) as string | null;
     const content = (body?.content ?? '') as string;
 
@@ -84,13 +92,14 @@ export async function POST(request: NextRequest) {
 
     const result = await sql`
       INSERT INTO notes (
-        id, user_id, title, content, pinned_at, archived_at, created_at, updated_at
+        id, user_id, title, content, color, pinned_at, archived_at, created_at, updated_at
       )
       VALUES (
         ${id},
         ${session.userId},
         ${title && title.trim() ? title.trim() : null},
         ${content},
+        ${color},
         NULL,
         NULL,
         NOW(),
@@ -100,13 +109,14 @@ export async function POST(request: NextRequest) {
     `;
 
     return NextResponse.json(
-      { message: '笔记创建成功', data: result[0] },
+      { message: '便利贴创建成功', data: result[0] },
       { status: 201 }
     );
   } catch (error) {
-    console.error('创建笔记错误:', error);
+    if (error instanceof SyntaxError) return NextResponse.json({ error: '请求格式不正确' }, { status: 400 });
+    console.error('创建便利贴错误:', error);
     const message = error instanceof Error ? error.message : '未知错误';
-    return NextResponse.json({ error: '创建笔记失败', details: message }, { status: 500 });
+    return NextResponse.json({ error: '创建便利贴失败', details: message }, { status: 500 });
   }
 }
 

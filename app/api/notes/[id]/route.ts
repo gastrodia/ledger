@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
+import { ensureNotesSchema } from '@/lib/notes-schema';
+import { validateNoteInput } from '@/lib/notes';
 
 export async function GET(
   request: NextRequest,
@@ -13,20 +15,22 @@ export async function GET(
     }
 
     const { id } = await context.params;
+    await ensureNotesSchema();
     const rows = await sql`
-      SELECT id, user_id, title, content, pinned_at, archived_at, created_at, updated_at
+      SELECT id, user_id, title, content, color, pinned_at, archived_at, created_at, updated_at
       FROM notes
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
 
     if (rows.length === 0) {
-      return NextResponse.json({ error: '笔记不存在' }, { status: 404 });
+      return NextResponse.json({ error: '便利贴不存在' }, { status: 404 });
     }
 
     return NextResponse.json({ data: rows[0] });
   } catch (error) {
-    console.error('获取笔记错误:', error);
-    return NextResponse.json({ error: '获取笔记失败' }, { status: 500 });
+    if (error instanceof SyntaxError) return NextResponse.json({ error: '请求格式不正确' }, { status: 400 });
+    console.error('获取便利贴错误:', error);
+    return NextResponse.json({ error: '获取便利贴失败' }, { status: 500 });
   }
 }
 
@@ -41,53 +45,32 @@ export async function PATCH(
     }
 
     const { id } = await context.params;
-
-    const existing = await sql`
-      SELECT * FROM notes
-      WHERE id = ${id} AND user_id = ${session.userId}
-    `;
-    if (existing.length === 0) {
-      return NextResponse.json({ error: '笔记不存在' }, { status: 404 });
-    }
+    await ensureNotesSchema();
 
     const body = await request.json();
-    const title = body?.title as string | null | undefined;
-    const content = body?.content as string | undefined;
-    const pinned = body?.pinned as boolean | undefined;
-    const archived = body?.archived as boolean | undefined;
-
-    if (content !== undefined && !content.trim()) {
-      return NextResponse.json({ error: '内容不能为空' }, { status: 400 });
-    }
+    const inputError = validateNoteInput(body);
+    if (inputError) return NextResponse.json({ error: inputError }, { status: 400 });
+    const { title, content, color, pinned, archived } = body;
 
     const result = await sql`
       UPDATE notes
       SET
-        title = ${title !== undefined ? (title && title.trim() ? title.trim() : null) : existing[0].title},
-        content = ${content !== undefined ? content : existing[0].content},
-        pinned_at = ${
-          pinned === undefined
-            ? existing[0].pinned_at
-            : pinned
-              ? sql`NOW()`
-              : null
-        },
-        archived_at = ${
-          archived === undefined
-            ? existing[0].archived_at
-            : archived
-              ? sql`NOW()`
-              : null
-        },
+        title = CASE WHEN ${title !== undefined} THEN ${typeof title === 'string' ? title.trim() || null : null} ELSE title END,
+        content = CASE WHEN ${content !== undefined} THEN ${content ?? null} ELSE content END,
+        color = CASE WHEN ${color !== undefined} THEN ${color ?? null} ELSE color END,
+        pinned_at = CASE WHEN ${pinned !== undefined} THEN CASE WHEN ${pinned === true} THEN NOW() ELSE NULL END ELSE pinned_at END,
+        archived_at = CASE WHEN ${archived !== undefined} THEN CASE WHEN ${archived === true} THEN NOW() ELSE NULL END ELSE archived_at END,
         updated_at = NOW()
       WHERE id = ${id} AND user_id = ${session.userId}
       RETURNING *
     `;
 
-    return NextResponse.json({ message: '笔记更新成功', data: result[0] });
+    if (result.length === 0) return NextResponse.json({ error: '便利贴不存在' }, { status: 404 });
+    return NextResponse.json({ message: '便利贴更新成功', data: result[0] });
   } catch (error) {
-    console.error('更新笔记错误:', error);
-    return NextResponse.json({ error: '更新笔记失败' }, { status: 500 });
+    if (error instanceof SyntaxError) return NextResponse.json({ error: '请求格式不正确' }, { status: 400 });
+    console.error('更新便利贴错误:', error);
+    return NextResponse.json({ error: '更新便利贴失败' }, { status: 500 });
   }
 }
 
@@ -108,7 +91,7 @@ export async function DELETE(
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
     if (existing.length === 0) {
-      return NextResponse.json({ error: '笔记不存在' }, { status: 404 });
+      return NextResponse.json({ error: '便利贴不存在' }, { status: 404 });
     }
 
     await sql`
@@ -116,10 +99,11 @@ export async function DELETE(
       WHERE id = ${id} AND user_id = ${session.userId}
     `;
 
-    return NextResponse.json({ message: '笔记删除成功' });
+    return NextResponse.json({ message: '便利贴删除成功' });
   } catch (error) {
-    console.error('删除笔记错误:', error);
-    return NextResponse.json({ error: '删除笔记失败' }, { status: 500 });
+    if (error instanceof SyntaxError) return NextResponse.json({ error: '请求格式不正确' }, { status: 400 });
+    console.error('删除便利贴错误:', error);
+    return NextResponse.json({ error: '删除便利贴失败' }, { status: 500 });
   }
 }
 

@@ -1,7 +1,7 @@
 # Ledger（账本 / 礼簿 / 借还）
 
 
-一个基于 **Next.js 16 + React 19** 的个人/家庭账本 Web 应用，包含交易记账、分类与成员管理、统计分析（含可选 AI 月度总结）、留言/笔记（Markdown）、礼簿、送礼台账、欠款/借款（支持部分归还）以及附件上传能力，并内置 PWA（离线页 + Service Worker）。
+一个基于 **Next.js 16 + React 19** 的个人/家庭账本 Web 应用，包含交易记账、分类与成员管理、统计分析（含可选 AI 月度总结）、便利贴（Markdown）、礼簿、送礼台账、欠款/借款（支持部分归还）以及附件上传能力，并内置 PWA（离线页 + Service Worker）。
 
 ![](cover.png)
 
@@ -24,7 +24,7 @@
 - **成员管理**：家庭成员（用于交易归属统计）
 - **统计分析**：按月份聚合统计（分类/成员 Top、收入/支出/结余）；支持隐藏收入金额
 - **AI 总结（可选）**：基于当月统计数据生成“可读、可执行”的月度总结（流式输出）
-- **留言/笔记**：Markdown 内容，支持置顶/归档/预览
+- **便利贴**：五色纸张贴墙，快速新建/原地编辑、颜色与内容筛选、置顶分区、归档收纳；保留 Markdown、图片上传和账户隔离的本机草稿
 - **礼簿**：按“事件/礼簿”管理礼金/礼品（含估值）汇总
 - **送礼**：记录“我送给别人”的现金 + 多行物品组合礼（含估值），支持筛选与附件
 - **欠款/借款（借还）**：欠款/借款分组展示；支持部分归还、归还列表、附件与状态（未还/部分/结清）
@@ -128,7 +128,7 @@ API 概览（节选）
   - `GET /api/stats?month=YYYY-MM`：月度统计（分类/成员聚合 + 总计）
   - `GET /api/stats/ai-summary?month=YYYY-MM`：AI 月度总结（**流式**文本返回，需要 `GROQ_API_KEY`）
 
-- **留言/笔记**
+- **便利贴**
   - `GET/POST /api/notes`，`PATCH/DELETE /api/notes/:id`
 
 - **礼簿**
@@ -174,7 +174,7 @@ AI 总结说明
 - **categories**：分类（收入/支出）
 - **members**：家庭成员
 - **transactions**：交易（可选关联分类/成员；可选附件字段）
-- **notes**：留言/笔记（支持置顶/归档）
+- **notes**：便利贴（支持置顶/归档）
 - **giftbooks / gift_records**：礼簿与礼簿记录
 - **given_gifts**：送礼记录（含 `items` JSONB）
 - **loans / loan_repayments**：欠款/借款及归还记录
@@ -253,3 +253,11 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 - `PUT /api/transaction-links` 接收 `{sourceType,sourceId,transactionId}`；`DELETE` 接收 `{sourceType,sourceId}`。`sourceType` 支持 `given_gift`、`gift_group`、`loan`、`repayment`。
 - 返回的 `transaction` 含 `id`、`type`、数值 `amount`、`description`、`transaction_date`。已被其他来源占用返回 409 / `TRANSACTION_ALREADY_LINKED`；并发变更返回 409 / `LINK_CONFLICT`，应刷新后重试。
 - 新数据库执行 `scripts/init-db.sql`。已有数据库可由管理员在各模块基础表已存在后执行 `scripts/transaction-links.sql`，其中包含关联表、外键和延迟组清理触发器；请完整执行。应用首次使用会尝试初始化，缺少权限明确返回 503 / `LINK_SCHEMA_UNAVAILABLE`，不会以成功或未关联状态掩盖配置失败。已初始化后的读写不再需要 DDL 权限。
+
+便利贴升级
+---
+
+- `/dashboard/notes` 为便利贴墙；原有 `/new` 与 `/:id` 链接继续可用，打开相同的便利贴编辑面板。
+- 旧笔记保持原始标题、Markdown 和图片内容，默认显示为奶油黄色。颜色保存在数据库中，可跨设备同步。
+- 新库使用 `scripts/init-db.sql`；旧库首次访问时仅在缺少 `notes.color` 时尝试追加字段。运行账户没有 DDL 权限时，请由管理员执行 `scripts/notes-sticky.sql` 后重试；不需要清空或重建 notes 表。
+- 编辑时输入自动保存在本机草稿，点击“保存”或“贴上去”才提交服务器；未完成上传或保存时禁止关闭面板。

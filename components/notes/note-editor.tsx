@@ -25,17 +25,20 @@ export function NoteEditor({
   onChange,
   onUploadingChange,
   disabled = false,
+  compact = false,
 }: {
   value: string;
   onChange: Dispatch<SetStateAction<string>>;
   onUploadingChange?: (uploading: boolean) => void;
   disabled?: boolean;
+  compact?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
 
   const isNarrow = useSyncExternalStore(subscribeViewport, isNarrowViewport, () => false);
+  const [showFormatting, setShowFormatting] = useState(false);
   const [mobileView, setMobileView] = useState<"edit" | "preview">("edit");
 
   const maxBytes = 10 * 1024 * 1024;
@@ -110,12 +113,13 @@ export function NoteEditor({
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-end gap-2">
-        {isNarrow ? (
-          <div className="mr-auto flex gap-1" aria-label="笔记视图">
+        {isNarrow || compact ? (
+          <div className="mr-auto flex gap-1" aria-label="便利贴视图">
             <Button type="button" size="sm" variant={mobileView === "edit" ? "default" : "outline"} aria-pressed={mobileView === "edit"} onClick={() => setMobileView("edit")}>编辑</Button>
             <Button type="button" size="sm" variant={mobileView === "preview" ? "default" : "outline"} aria-pressed={mobileView === "preview"} onClick={() => setMobileView("preview")}>预览</Button>
           </div>
         ) : null}
+        {compact ? <Button type="button" size="sm" variant="ghost" aria-pressed={showFormatting} onClick={() => setShowFormatting(!showFormatting)}>格式</Button> : null}
         <input
           ref={fileInputRef}
           type="file"
@@ -141,14 +145,15 @@ export function NoteEditor({
         </Button>
       </div>
 
-      {isUploading ? <p role="status" className="text-xs text-muted-foreground">图片上传完成后才能保存笔记，请保持页面打开。</p> : null}
-      <div data-color-mode="light" className="rounded-md border bg-background">
+      {isUploading ? <p role="status" className="text-xs text-muted-foreground">图片上传完成后才能保存便利贴，请保持页面打开。</p> : null}
+      <div data-color-mode="light" className={compact ? "sticky-editor" : "rounded-md border bg-background"}>
         <MDEditor
-          textareaProps={{ disabled }}
+          textareaProps={{ disabled, "aria-label": "便利贴内容", placeholder: "写点什么，留住这一刻的想法…" }}
           value={value}
           onChange={(v) => onChange(v || "")}
-          height={520}
-          preview={isNarrow ? mobileView : "live"}
+          height={compact ? 300 : 520}
+          hideToolbar={compact && !showFormatting}
+          preview={isNarrow || compact ? mobileView : "live"}
           visibleDragbar={false}
           commands={toolbar}
           extraCommands={extraCommands}
