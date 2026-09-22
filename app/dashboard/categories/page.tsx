@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,10 +23,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Plus, Edit, Trash2, Loader2 } from "lucide-react";
+import { Plus, Loader2 } from "lucide-react";
 import type { Category, TransactionType } from "@/types";
 import { toast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/use-confirm";
+import { SortableCategoryGrid } from "@/components/categories/sortable-category-grid";
 
 // 预设分类模板
 const presetCategories = {
@@ -59,6 +60,39 @@ export default function CategoriesPage() {
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [isSavingOrder, setIsSavingOrder] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const savingOrder = useRef(false);
+  const interactionsDisabled = isSavingOrder || isDeleting || isAddModalOpen;
+
+  const handleReorder = async (type: TransactionType, ordered: Category[]) => {
+    if (savingOrder.current || interactionsDisabled) return;
+    const previous = categories;
+    savingOrder.current = true;
+    setIsSavingOrder(true);
+    setCategories([...categories.filter(category => category.type !== type), ...ordered]);
+    try {
+      const response = await fetch("/api/categories/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, ids: ordered.map(category => category.id) }),
+      });
+      if (!response.ok) {
+        const result = await response.json();
+        if (response.status === 401) router.push("/login");
+        if (response.status === 409) loadCategories();
+        throw new Error(result.error || "排序保存失败，请重试");
+      }
+      toast.success("分类顺序已保存");
+    } catch (error) {
+      setCategories(previous);
+      toast.error(error instanceof Error ? error.message : "排序保存失败，请重试");
+    } finally {
+      savingOrder.current = false;
+      setIsSavingOrder(false);
+    }
+  };
 
   // 加载分类
   const [reload, setReload] = useState(0);
@@ -109,34 +143,30 @@ export default function CategoriesPage() {
   };
 
   const handleDelete = async (id: string) => {
-    const confirmed = await confirm({
-      title: "删除分类",
-      description: "确定要删除这个分类吗？此操作无法撤销。",
-      confirmText: "删除",
-      cancelText: "取消",
-    });
-    
-    if (!confirmed) {
-      return;
-    }
-
+    if (interactionsDisabled || savingOrder.current) return;
+    setIsDeleting(true);
     try {
-      const response = await fetch(`/api/categories/${id}`, {
-        method: "DELETE",
+      const confirmed = await confirm({
+        title: "删除分类",
+        description: "确定要删除这个分类吗？此操作无法撤销。",
+        confirmText: "删除",
+        cancelText: "取消",
       });
+      if (!confirmed) return;
 
+      const response = await fetch(`/api/categories/${id}`, { method: "DELETE" });
       const result = await response.json();
-
       if (!response.ok) {
         toast.error(result.error || "删除失败");
         return;
       }
-
       toast.success("删除成功");
       loadCategories();
     } catch (error) {
       console.error("删除分类失败:", error);
       toast.error("删除失败");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -163,14 +193,18 @@ export default function CategoriesPage() {
               分类管理
             </h1>
             <p className="text-sm leading-6 text-muted-foreground mt-1">
-              管理您的收入和支出分类
+              拖动卡片左上角手柄排序，松开后自动保存
             </p>
           </div>
-          <Button onClick={() => setIsAddModalOpen(true)}>
+          <Button disabled={interactionsDisabled} onClick={() => setIsAddModalOpen(true)}>
             <Plus className="h-4 w-4" />
             添加分类
           </Button>
         </div>
+
+        <p role="status" aria-live="polite" className={isSavingOrder ? "text-sm text-muted-foreground" : "sr-only"}>
+          {isSavingOrder ? "正在保存分类顺序…" : ""}
+        </p>
 
         {/* Loading State */}
         {isLoading ? (
@@ -198,16 +232,14 @@ export default function CategoriesPage() {
                     <CardTitle className="text-lg">支出分类</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                      {expenseCategories.map((category) => (
-                        <CategoryCard
-                          key={category.id}
-                          category={category}
-                          onEdit={handleEdit}
-                          onDelete={handleDelete}
-                        />
-                      ))}
-                    </div>
+                    <SortableCategoryGrid
+                      categories={expenseCategories}
+                      type="expense"
+                      disabled={interactionsDisabled}
+                      onReorder={handleReorder}
+                      onEdit={handleEdit}
+                      onDelete={handleDelete}
+                    />
                   </CardContent>
                 </Card>
               )}
@@ -219,16 +251,14 @@ export default function CategoriesPage() {
                     <CardTitle className="text-lg">收入分类</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                      {incomeCategories.map((category) => (
-                        <CategoryCard
-                          key={category.id}
-                          category={category}
-                          onEdit={handleEdit}
-                          onDelete={handleDelete}
-                        />
-                      ))}
-                    </div>
+                    <SortableCategoryGrid
+                      categories={incomeCategories}
+                      type="income"
+                      disabled={interactionsDisabled}
+                      onReorder={handleReorder}
+                      onEdit={handleEdit}
+                      onDelete={handleDelete}
+                    />
                   </CardContent>
                 </Card>
               )}
@@ -263,47 +293,6 @@ export default function CategoriesPage() {
         onSave={handleSave}
       />
     </DashboardLayout>
-  );
-}
-
-function CategoryCard({
-  category,
-  onEdit,
-  onDelete,
-}: {
-  category: Category;
-  onEdit: (category: Category) => void;
-  onDelete: (id: string) => void;
-}) {
-  return (
-    <div className="relative p-4 pt-12 rounded-lg border bg-card hover:border-primary/30 hover:shadow-sm transition-colors group">
-      <div className="flex flex-col items-center text-center space-y-2">
-        <div className="flex items-center justify-center w-10 h-10 rounded-md text-xl bg-accent">
-          {category.icon || "📁"}
-        </div>
-        <div>
-          <p className="font-medium">{category.name}</p>
-        </div>
-      </div>
-      <div className="absolute top-2 right-2 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 transition-opacity">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => onEdit(category)}
-        >
-          <Edit className="h-3 w-3" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7 text-destructive hover:text-destructive"
-          onClick={() => onDelete(category.id)}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
-      </div>
-    </div>
   );
 }
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
 import { v4 as uuidv4 } from 'uuid';
+import { ensureCategoriesSchema } from '@/lib/categories-schema';
 
 /**
  * GET /api/categories
@@ -24,21 +25,22 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const type = searchParams.get('type');
 
+    await ensureCategoriesSchema();
     let categories;
     
     if (type && (type === 'income' || type === 'expense')) {
       categories = await sql`
-        SELECT id, user_id, name, type, icon, created_at
+        SELECT id, user_id, name, type, icon, sort_order, created_at
         FROM categories
         WHERE user_id = ${session.userId} AND type = ${type}
-        ORDER BY created_at DESC
+        ORDER BY sort_order ASC NULLS LAST, created_at DESC, id ASC
       `;
     } else {
       categories = await sql`
-        SELECT id, user_id, name, type, icon, created_at
+        SELECT id, user_id, name, type, icon, sort_order, created_at
         FROM categories
         WHERE user_id = ${session.userId}
-        ORDER BY created_at DESC
+        ORDER BY sort_order ASC NULLS LAST, created_at DESC, id ASC
       `;
     }
 

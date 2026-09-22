@@ -36,6 +36,7 @@ export interface Category {
   name: string;
   type: TransactionType;
   color?: string;
+  sort_order?: number | null;
   icon?: string;
   created_at: string;
 }

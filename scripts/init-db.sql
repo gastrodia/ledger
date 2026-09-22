@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS categories (
     type VARCHAR(20) NOT NULL CHECK (type IN ('income', 'expense')),
     color VARCHAR(20),
     icon VARCHAR(50),
+    sort_order INTEGER,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
