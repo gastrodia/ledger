@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { toast } from "@/hooks/use-toast";
 
-type SavedTarget = { id: string; scope: string };
+type SavedTarget = { id: string; scope: string; keepFormFocus: boolean };
 
 export function useSavedTransactionFeedback({ transactions, scope, ready, dialogOpen }: {
   transactions: readonly { id: string }[];
@@ -17,14 +17,18 @@ export function useSavedTransactionFeedback({ transactions, scope, ready, dialog
   const [target, setTarget] = useState<SavedTarget | null>(null);
   const isPresent = transactions.some(row => row.id === target?.id);
 
-  const queueSaved = (id: string) => { pending.current = { id, scope }; };
+  const queueSaved = (id: string, keepFormFocus = false) => {
+    const saved = { id, scope, keepFormFocus };
+    pending.current = saved;
+    if (keepFormFocus) setTarget(saved);
+  };
   const onCloseAutoFocus = (event: Event) => {
     const saved = pending.current;
     pending.current = null;
     if (!saved || saved.scope !== scope) return;
     // Radix otherwise focuses the add button and scrolls back to the page header.
     if (transactions.some(row => row.id === saved.id)) event.preventDefault();
-    setTarget(saved);
+    setTarget({ ...saved, keepFormFocus: false });
   };
 
   useEffect(() => {
@@ -33,7 +37,7 @@ export function useSavedTransactionFeedback({ transactions, scope, ready, dialog
       handled.current = target;
       return;
     }
-    if (!ready || dialogOpen) return;
+    if (!ready || (dialogOpen && !target.keepFormFocus)) return;
     if (!isPresent) {
       handled.current = target;
       toast.info("已保存，该记录不在当前筛选范围内");
@@ -65,7 +69,8 @@ export function useSavedTransactionFeedback({ transactions, scope, ready, dialog
         if (entries.some(entry => entry.isIntersecting && entry.intersectionRatio >= 0.75)) highlight();
       }, { threshold: 0.75 });
       observer.observe(row);
-      row.focus({ preventScroll: true });
+      // Save-and-continue keeps the dialog's amount input focused for the next entry.
+      if (!dialogOpen) row.focus({ preventScroll: true });
       row.scrollIntoView({ behavior: reducedMotion ? "instant" : "smooth", block: "center", inline: "nearest" });
     });
     return () => {

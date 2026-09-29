@@ -220,13 +220,13 @@ function DashboardContent() {
     ready: navigation.ready && !isLoading && !currentError && !dateRangeError,
     dialogOpen: isAddModalOpen || isEditModalOpen,
   });
-  const saveTransaction = (saved?: Transaction) => {
+  const saveTransaction = (saved?: Transaction, keepFormFocus = false) => {
     const row = saved ? { ...saved,
       category: categories.find(category => category.id === saved.category_id),
       member: members.find(member => member.id === saved.member_id),
     } : undefined;
     resource.update(current => row ? updateTransactions(current, navigation.filters, row) : current);
-    if (row) queueSaved(row.id);
+    if (row) queueSaved(row.id, keepFormFocus);
   };
 
   useEffect(() => {
@@ -339,7 +339,7 @@ function DashboardContent() {
               key={isAddModalOpen ? 'open' : 'closed'} // 每次打开时重新挂载组件，确保表单是干净的
               mode="add"
               closeGuardRef={addCloseRef}
-              onSaved={saveTransaction}
+              onSaved={(saved) => saveTransaction(saved, true)}
               onCloseAutoFocus={onCloseAutoFocus}
               categories={categories}
               members={members}
