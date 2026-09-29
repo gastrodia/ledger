@@ -62,6 +62,7 @@ import { useTransactionNavigation, useTransactionScrollRestore } from "@/hooks/u
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { groupTransactionsByDay } from "@/lib/transaction-days";
 import { TransactionCategoryPicker } from "@/components/transactions/category-picker";
+import { useSavedTransactionFeedback } from "@/hooks/use-saved-transaction-feedback";
 
 type DatePreset = "today" | "month" | "lastMonth";
 function getTransactionDateRange(preset: DatePreset, now = new Date()) {
@@ -214,12 +215,18 @@ function DashboardContent() {
   const transactions = resource.data?.data ?? [];
   const hasAnyTransactions = resource.data?.hasAnyTransactions ?? null;
   const visibleSummary = !dateRangeError ? resource.data?.summary ?? null : null;
+  const { listRef: transactionListRef, queueSaved, onCloseAutoFocus } = useSavedTransactionFeedback({
+    transactions, scope: query,
+    ready: navigation.ready && !isLoading && !currentError && !dateRangeError,
+    dialogOpen: isAddModalOpen || isEditModalOpen,
+  });
   const saveTransaction = (saved?: Transaction) => {
     const row = saved ? { ...saved,
       category: categories.find(category => category.id === saved.category_id),
       member: members.find(member => member.id === saved.member_id),
     } : undefined;
     resource.update(current => row ? updateTransactions(current, navigation.filters, row) : current);
+    if (row) queueSaved(row.id);
   };
 
   useEffect(() => {
@@ -333,6 +340,7 @@ function DashboardContent() {
               mode="add"
               closeGuardRef={addCloseRef}
               onSaved={saveTransaction}
+              onCloseAutoFocus={onCloseAutoFocus}
               categories={categories}
               members={members}
               membersStatus={membersStatus}
@@ -567,7 +575,7 @@ function DashboardContent() {
               </div>
             </div>
           </CardHeader>
-          <CardContent className="p-0">
+          <CardContent ref={transactionListRef} className="p-0">
             <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {dateRangeError ? (
               <div className="p-8 text-center text-destructive" role="alert">{dateRangeError}</div>
@@ -625,7 +633,9 @@ function DashboardContent() {
                       {day.transactions.map((transaction) => (
                         <tr
                           key={transaction.id}
-                          className="border-b last:border-0 hover:bg-accent/50 transition-colors group"
+                          data-transaction-id={transaction.id}
+                          tabIndex={-1}
+                          className="border-b last:border-0 hover:bg-accent/50 transition-colors group scroll-mt-20 scroll-mb-24 outline-none"
                         >
                           <td className="p-4">
                             <div className="flex items-center gap-3">
@@ -745,7 +755,9 @@ function DashboardContent() {
                   {day.transactions.map((transaction) => (
                     <div
                       key={transaction.id}
-                      className="p-4 hover:bg-accent/30 transition-colors active:bg-accent/50"
+                      data-transaction-id={transaction.id}
+                      tabIndex={-1}
+                      className="p-4 hover:bg-accent/30 transition-colors active:bg-accent/50 scroll-mt-20 scroll-mb-24 outline-none"
                     >
                       <div className="flex items-start gap-3">
                         {/* 左侧图标 */}
@@ -877,6 +889,7 @@ function DashboardContent() {
             mode="edit"
             closeGuardRef={editCloseRef}
             onSaved={saveTransaction}
+            onCloseAutoFocus={onCloseAutoFocus}
             transaction={selectedTransaction}
             categories={categories}
             members={members}
@@ -980,11 +993,13 @@ function TransactionModal({
   onManageMembers,
   onClose,
   onSaved,
+  onCloseAutoFocus,
   closeGuardRef,
 }: {
   closeGuardRef: React.MutableRefObject<(() => Promise<boolean>) | null>;
   mode: "add" | "edit";
   onSaved: (saved?: Transaction) => void;
+  onCloseAutoFocus: (event: Event) => void;
   transaction?: Transaction;
   categories: Category[];
   members: Member[];
@@ -1171,7 +1186,7 @@ function TransactionModal({
   const hasExistingAttachment = !!transaction?.attachment_key;
 
   return (
-    <DialogContent className="gap-3 sm:max-w-[500px]" {...(mode === "add" ? { "aria-describedby": undefined } : {})}>
+    <DialogContent onCloseAutoFocus={onCloseAutoFocus} className="gap-3 sm:max-w-[500px]" {...(mode === "add" ? { "aria-describedby": undefined } : {})}>
       <DialogHeader>
         <DialogTitle>{mode === "add" ? "快速记一笔" : "编辑交易记录"}</DialogTitle>
         {mode === "edit" ? <DialogDescription>修改交易详情</DialogDescription> : null}
