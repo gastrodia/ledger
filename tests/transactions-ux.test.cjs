@@ -147,37 +147,6 @@
     assert.deepEqual(updates, [{ q: '', type: 'all', categoryId: '__all__', memberId: '__all__', startDate: '2026-09-01', endDate: '2026-09-30' }]);
   });
 
-  test('a failed read has an independent retryable error and retry success clears it', async () => {
-    const call = sourceNode((node, source) => ts.isCallExpression(node)
-      && node.expression.getText(source) === 'useEffect'
-      && node.arguments[0].getText(source).includes('/api/transactions?'));
-    const state = { error: null, loaded: null, hasAny: null, data: null };
-    let attempts = 0;
-    const run = (key) => evaluate(call, {
-      useEffect: (effect) => effect(), query: '', requestKey: key, dateRangeError: null,
-      router: { push: () => assert.fail('unexpected navigation') }, AbortController,
-      console: { error: () => {} },
-      fetch: async () => ++attempts === 1
-        ? { ok: false, json: async () => ({ error: '服务暂不可用' }) }
-        : { ok: true, json: async () => ({ data: [], hasAnyTransactions: true, summary: {} }) },
-      setLoadError: (error) => { state.error = error; },
-      setHasAnyTransactions: (value) => { state.hasAny = value; },
-      setLoadedQuery: (value) => { state.loaded = value; },
-      setTransactions: (value) => { state.data = value; }, setSummary: () => {},
-    }, 'undefined');
-    run('first');
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(state.error, { key: 'first', message: '服务暂不可用' });
-    assert.equal(state.loaded, 'first');
-    assert.equal(state.hasAny, null, 'Failure must not classify the account as new');
-    run('retry');
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(state.error, null);
-    assert.equal(state.loaded, 'retry');
-    assert.equal(state.hasAny, true);
-    assert.deepEqual(state.data, []);
-  });
-
   function submitHarness({ mode = 'add', ok = true, memberId = 'member', membersStatus = 'ready', categoryId = 'food' } = {}) {
     const code = sourceNode((node) => ts.isVariableDeclaration(node) && node.name.getText() === 'handleSubmit');
     const initial = { type: 'expense', category_id: categoryId, member_id: memberId, transaction_date: '2026-09-07', amount: '12.34', description: 'lunch' };

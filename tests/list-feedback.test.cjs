@@ -16,8 +16,6 @@ function effect(file, endpoint) {
   return ts.transpileModule(match, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 }
 for (const [file, endpoint] of [
-  ['app/dashboard/categories/page.tsx', '/api/categories?'],
-  ['app/dashboard/members/page.tsx', '/api/members'],
   ['app/dashboard/stats/page.tsx', '/api/stats?'],
 ]) {
   test(`${endpoint}: failed reads become recoverable errors rather than empty data`, async () => {

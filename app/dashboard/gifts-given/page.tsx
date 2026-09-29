@@ -1,5 +1,11 @@
 "use client";
 
+import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { upsertRow } from "@/lib/list-resource";
+import { matchesGiftSearch, giftSummary } from "@/lib/gift-list-updates";
+
+
 import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { useFormDraft } from "@/hooks/use-form-draft";
@@ -68,16 +74,6 @@ export default function GiftsGivenPage() {
   const router = useRouter();
   const { confirm } = useConfirm();
 
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const requestVersion = useRef(0);
-  const [items, setItems] = useState<GivenGiftListItem[]>([]);
-  const [summary, setSummary] = useState<GiftsGivenSummary>({
-    cashTotal: 0,
-    itemEstimatedTotal: 0,
-    recordCount: 0,
-  });
-
   const [q, setQ] = useState("");
   // 默认不限制日期范围，避免“新增了但看不到”被筛选条件挡住
   const [startDate, setStartDate] = useState("");
@@ -94,51 +90,30 @@ export default function GiftsGivenPage() {
   const [editingGift, setEditingGift] = useState<GivenGiftDetail | null>(null);
   const [editingLoading, setEditingLoading] = useState(false);
 
-  const loadGifts = (isActive = () => true) => {
-    const version = ++requestVersion.current;
-    const params = new URLSearchParams();
-    if (q.trim()) params.append("q", q.trim());
-    if (startDate) params.append("startDate", startDate);
-    if (endDate) params.append("endDate", endDate);
-    if (hasCash) params.append("hasCash", "true");
-    if (hasItems) params.append("hasItems", "true");
-
-    return fetch(`/api/gifts-given?${params.toString()}`)
-      .then(async (res) => {
-        if (!res.ok) {
-          if (res.status === 401) {
-            router.push("/login");
-            return;
-          }
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.error || "获取送礼记录失败");
-        }
-        const result = await res.json();
-        if (!isActive() || version !== requestVersion.current) return;
-        setLoadError(null);
-        setItems(result.data || []);
-        setSummary(result.summary || { cashTotal: 0, itemEstimatedTotal: 0, recordCount: 0 });
-      })
-      .catch((e: unknown) => {
-        console.error("加载送礼记录失败:", e);
-        if (isActive() && version === requestVersion.current) setLoadError(e instanceof Error ? e.message : "加载失败，请重试");
-      })
-      .finally(() => { if (isActive() && version === requestVersion.current) setIsLoading(false); });
-  };
-
-  useEffect(() => {
-    let active = true;
-    loadGifts(() => active);
-    return () => { active = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, startDate, endDate, hasCash, hasItems]);
-
+  const params = new URLSearchParams();
+  if (q.trim()) params.set("q", q.trim());
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
+  if (hasCash) params.set("hasCash", "true");
+  if (hasItems) params.set("hasItems", "true");
+  const query = params.toString();
+  const loader = useJsonLoader<{ data: GivenGiftListItem[]; summary: GiftsGivenSummary }>(`/api/gifts-given?${query}`);
+  const deleting = usePendingRows();
+  const resource = useListResource(`gifts:${query}`, loader);
+  const { isLoading, loadError, refresh: retryLoad } = resource;
+  const items = resource.data?.data ?? [];
+  const summary = useMemo(() => resource.data?.summary ?? { cashTotal: 0, itemEstimatedTotal: 0, recordCount: 0 }, [resource.data]);
+  const updateGifts = (saved?: GivenGiftListItem, deletedId?: string) => resource.update(current => {
+    let data = current.data.filter(row => row.id !== deletedId);
+    if (saved) data = upsertRow(data, saved).filter(row =>
+      (!startDate || row.gift_date.slice(0, 10) >= startDate) && (!endDate || row.gift_date.slice(0, 10) <= endDate)
+      && (!hasCash || row.cash_amount !== null) && (!hasItems || row.items_count > 0)
+      && [row.recipient_name, row.occasion, row.notes].some(value => matchesGiftSearch(value ?? "", q)));
+    data.sort((a, b) => Date.parse(b.gift_date) - Date.parse(a.gift_date) || Date.parse(b.created_at) - Date.parse(a.created_at));
+    return { data, summary: giftSummary(data) };
+  });
   const hasFilters = !!(q.trim() || startDate || endDate || hasCash || hasItems);
-  const clearFilters = () => {
-    setIsLoading(true);
-    setQ(""); setStartDate(""); setEndDate(""); setHasCash(false); setHasItems(false);
-  };
-  const retryLoad = () => { setIsLoading(true); setLoadError(null); void loadGifts(); };
+  const clearFilters = () => { setQ(""); setStartDate(""); setEndDate(""); setHasCash(false); setHasItems(false); };
 
   const openAdd = () => {
     setModalMode("add");
@@ -203,7 +178,7 @@ export default function GiftsGivenPage() {
     }
   };
 
-  const handleDelete = async (g: GivenGiftListItem) => {
+  const handleDelete = async (g: GivenGiftListItem) => deleting.run(g.id, async () => {
     const ok = await confirm({
       title: "删除送礼记录",
       description: "将永久删除这次送礼的现金、物品明细及附件。已关联收支会保留，仅解除关联。此操作无法撤销。",
@@ -219,12 +194,12 @@ export default function GiftsGivenPage() {
         throw new Error(err.error || "删除失败");
       }
       toast.success("已删除");
-      await loadGifts();
+      updateGifts(undefined, g.id);
     } catch (e) {
       console.error("删除送礼记录失败:", e);
       toast.error(e instanceof Error ? e.message : "删除失败，请重试");
     }
-  };
+  });
 
   const stats = useMemo(() => {
     return [
@@ -277,7 +252,7 @@ export default function GiftsGivenPage() {
                   <Input
                     placeholder="收礼人 / 事由 / 备注"
                     value={q}
-                    onChange={(e) => { setIsLoading(true); setQ(e.target.value); }}
+                    onChange={(e) => { setQ(e.target.value); }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -285,7 +260,7 @@ export default function GiftsGivenPage() {
                   <Input
                     type="date"
                     value={startDate}
-                    onChange={(e) => { setIsLoading(true); setStartDate(e.target.value); }}
+                    onChange={(e) => { setStartDate(e.target.value); }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -293,7 +268,7 @@ export default function GiftsGivenPage() {
                   <Input
                     type="date"
                     value={endDate}
-                    onChange={(e) => { setIsLoading(true); setEndDate(e.target.value); }}
+                    onChange={(e) => { setEndDate(e.target.value); }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -302,14 +277,14 @@ export default function GiftsGivenPage() {
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Checkbox
                         checked={hasCash}
-                        onCheckedChange={(v) => { setIsLoading(true); setHasCash(!!v); }}
+                        onCheckedChange={(v) => { setHasCash(!!v); }}
                       />
                       现金
                     </label>
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
                       <Checkbox
                         checked={hasItems}
-                        onCheckedChange={(v) => { setIsLoading(true); setHasItems(!!v); }}
+                        onCheckedChange={(v) => { setHasItems(!!v); }}
                       />
                       物品
                     </label>
@@ -320,6 +295,7 @@ export default function GiftsGivenPage() {
           </CardHeader>
 
           <CardContent className="p-0">
+            <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {isLoading ? (
               <div className="text-center py-12 text-muted-foreground">加载中...</div>
             ) : loadError ? (
@@ -438,7 +414,7 @@ export default function GiftsGivenPage() {
                               <Button
                                 variant="outline"
                                 size="icon"
-                                onClick={() => handleDelete(g)}
+                                disabled={deleting.has(g.id)} onClick={() => handleDelete(g)}
                                 aria-label="删除"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -524,7 +500,7 @@ export default function GiftsGivenPage() {
                           <Button
                             variant="outline"
                             size="icon"
-                            onClick={() => handleDelete(g)}
+                            disabled={deleting.has(g.id)} onClick={() => handleDelete(g)}
                             aria-label="删除"
                           >
                             <Trash2 className="h-4 w-4" />
@@ -602,10 +578,10 @@ export default function GiftsGivenPage() {
             mode={modalMode}
             loading={editingLoading}
             gift={editingGift}
-            onClose={async (refresh) => {
+            onClose={(refresh, saved) => {
               setIsModalOpen(false);
               setEditingGift(null);
-              if (refresh) await loadGifts();
+              if (refresh) updateGifts(saved);
             }}
           />
         </Dialog>
@@ -687,7 +663,7 @@ function GiftsGivenModal({
   mode: "add" | "edit";
   gift: GivenGiftDetail | null;
   loading: boolean;
-  onClose: (refresh?: boolean) => void;
+  onClose: (refresh?: boolean, saved?: GivenGiftListItem) => void;
 }) {
   const idPrefix = mode === "edit" ? "edit-" : "";
 
@@ -893,7 +869,8 @@ function GiftsGivenModal({
 
       toast.success(mode === "add" ? "已创建" : "已更新");
       draft.clear();
-      onClose(true);
+      onClose(true, { ...(await res.json()).data, items_count: payload.items.length,
+        items_estimated_total: payload.items.reduce((total, item) => total + Math.round(item.estimated_value * 100), 0) / 100 });
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error(mode === "add" ? "创建送礼失败:" : "更新送礼失败:", e);

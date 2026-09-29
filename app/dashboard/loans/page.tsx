@@ -1,5 +1,10 @@
 "use client";
 
+import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { upsertRow } from "@/lib/list-resource";
+import { updateLoan } from "@/lib/list-updates";
+
 import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { useFormDraft } from "@/hooks/use-form-draft";
@@ -43,13 +48,13 @@ import {
 } from "lucide-react";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type {
+  Loan,
   LoanDirection,
   LoanRepayment,
   LoanStatus,
   LoanSubjectType,
   LoanWithComputed,
 } from "@/types";
-import { useRouter } from "next/navigation";
 
 function formatQty(q: number) {
   const s = String(q);
@@ -81,12 +86,13 @@ function useFormCloseBridge() {
 export default function LoansPage() {
   const loanClose = useFormCloseBridge();
   const repaymentClose = useFormCloseBridge();
-  const router = useRouter();
   const { confirm } = useConfirm();
 
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [loans, setLoans] = useState<LoanWithComputed[]>([]);
+  const loader = useJsonLoader<{ data: LoanWithComputed[] }>("/api/loans");
+  const deleting = usePendingRows();
+  const resource = useListResource("loans", loader);
+  const { isLoading, loadError, refresh: loadLoans } = resource;
+  const loans = useMemo(() => resource.data?.data ?? [], [resource.data]);
   const [statusFilter, setStatusFilter] = useState<"open" | "all" | "settled">("open");
 
   const [previewAttachment, setPreviewAttachment] = useState<{
@@ -113,61 +119,21 @@ export default function LoansPage() {
   );
 
   const [isRepaymentsListOpen, setIsRepaymentsListOpen] = useState(false);
-  const [repaymentsLoan, setRepaymentsLoan] = useState<LoanWithComputed | null>(
+  const [repaymentsTarget, setRepaymentsLoan] = useState<LoanWithComputed | null>(
     null
   );
-  const [repayments, setRepayments] = useState<LoanRepayment[]>([]);
-  const [repaymentsLoading, setRepaymentsLoading] = useState(false);
-  const [repaymentsError, setRepaymentsError] = useState<string | null>(null);
-
-  const loadLoans = () => {
-    return fetch("/api/loans")
-      .then(async (res) => {
-        if (!res.ok) {
-          if (res.status === 401) {
-            router.push("/login");
-            return;
-          }
-          throw new Error("获取欠款/借款失败");
-        }
-        const result = await res.json();
-        setLoans(result.data || []);
-        setLoadError(null);
-      })
-      .catch((e: unknown) => {
-        console.error("加载欠款/借款失败:", e);
-        setLoadError(e instanceof Error ? e.message : "加载失败，请重试");
-      })
-      .finally(() => setIsLoading(false));
+  const repaymentsLoan = loans.find(loan => loan.id === repaymentsTarget?.id) ?? repaymentsTarget;
+  const repaymentsLoader = useJsonLoader<{ data: LoanRepayment[] }>(`/api/loans/${repaymentsTarget?.id}/repayments`);
+  const repaymentResource = useListResource(repaymentsTarget?.id ?? "", repaymentsLoader);
+  const { isLoading: repaymentsLoading, loadError: repaymentsError, refresh: loadRepayments } = repaymentResource;
+  const repayments = repaymentResource.data?.data ?? [];
+  const saveRepayment = (saved?: LoanRepayment, previous?: LoanRepayment) => {
+    repaymentResource.update(current => ({ data: (saved ? upsertRow(current.data, saved)
+      : current.data.filter(row => row.id !== previous?.id))
+      .filter(row => row.loan_id === repaymentsTarget?.id)
+      .sort((a, b) => Date.parse(b.repaid_at) - Date.parse(a.repaid_at) || Date.parse(b.created_at) - Date.parse(a.created_at)) }));
+    void loadLoans();
   };
-
-  const loadRepayments = async (loanId: string) => {
-    try {
-      setRepaymentsLoading(true);
-      setRepaymentsError(null);
-      const res = await fetch(`/api/loans/${loanId}/repayments`);
-      if (!res.ok) {
-        if (res.status === 401) {
-          router.push("/login");
-          return;
-        }
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "获取归还列表失败");
-      }
-      const result = await res.json();
-      setRepayments(result.data || []);
-    } catch (e) {
-      console.error("加载归还列表失败:", e);
-      setRepaymentsError(e instanceof Error ? e.message : "加载失败，请重试");
-    } finally {
-      setRepaymentsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadLoans();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const statusCounts = {
     all: loans.length,
@@ -214,7 +180,7 @@ export default function LoansPage() {
     setIsLoanModalOpen(true);
   };
 
-  const handleDeleteLoan = async (loan: LoanWithComputed) => {
+  const handleDeleteLoan = async (loan: LoanWithComputed) => deleting.run(loan.id, async () => {
     const ok = await confirm({
       title: "删除记录",
       description: `将永久删除这条借还单、${loan.repayment_count} 条归还记录及相关附件。已关联收支会保留，仅解除关联。此操作无法撤销。`,
@@ -230,12 +196,12 @@ export default function LoansPage() {
         throw new Error(err.error || "删除失败");
       }
       toast.success("已删除");
-      await loadLoans();
+      resource.update(current => ({ data: current.data.filter(row => row.id !== loan.id) }));
     } catch (e) {
       console.error("删除借还单失败:", e);
       toast.error(e instanceof Error ? e.message : "删除失败，请重试");
     }
-  };
+  });
 
   const openAddRepayment = (loan: LoanWithComputed) => {
     setRepaymentModalMode("add");
@@ -251,13 +217,13 @@ export default function LoansPage() {
     setIsRepaymentModalOpen(true);
   };
 
-  const openRepaymentsList = async (loan: LoanWithComputed) => {
+  const openRepaymentsList = (loan: LoanWithComputed) => {
     setRepaymentsLoan(loan);
     setIsRepaymentsListOpen(true);
-    await loadRepayments(loan.id);
+    if (repaymentsTarget?.id === loan.id) void loadRepayments();
   };
 
-  const handleDeleteRepayment = async (repayment: LoanRepayment) => {
+  const handleDeleteRepayment = async (repayment: LoanRepayment) => deleting.run(repayment.id, async () => {
     const ok = await confirm({
       title: "删除归还记录",
       description: "将永久删除这条归还记录及附件，借还单的已还与未还数会重新计算。已关联收支会保留，仅解除关联。此操作无法撤销。",
@@ -275,15 +241,12 @@ export default function LoansPage() {
         throw new Error(err.error || "删除失败");
       }
       toast.success("已删除");
-      if (repaymentsLoan) {
-        await loadRepayments(repaymentsLoan.id);
-      }
-      await loadLoans();
+      saveRepayment(undefined, repayment);
     } catch (e) {
       console.error("删除归还记录失败:", e);
       toast.error(e instanceof Error ? e.message : "删除失败，请重试");
     }
-  };
+  });
 
   const renderLoanContainer = ({
     title,
@@ -330,12 +293,13 @@ export default function LoansPage() {
         </CardHeader>
 
         <CardContent className="p-0">
+          <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
           {isLoading ? (
             <div className="text-center py-12 text-muted-foreground">加载中...</div>
           ) : loadError ? (
               <div role="alert" className="space-y-3 px-4 py-10 text-center">
                 <p className="text-sm text-destructive">{loadError}</p>
-                <Button variant="outline" onClick={() => { setIsLoading(true); setLoadError(null); void loadLoans(); }}>重新加载</Button>
+                <Button variant="outline" onClick={loadLoans}>重新加载</Button>
               </div>
             ) : items.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
@@ -477,7 +441,7 @@ export default function LoansPage() {
                               <Button
                                 variant="outline"
                                 size="icon"
-                                onClick={() => handleDeleteLoan(l)}
+                                disabled={deleting.has(l.id)} onClick={() => handleDeleteLoan(l)}
                                 aria-label="删除"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -554,7 +518,7 @@ export default function LoansPage() {
                           <Edit className="h-4 w-4" />
                           编辑
                         </Button>
-                        <Button variant="outline" size="sm" onClick={() => handleDeleteLoan(l)}>
+                        <Button variant="outline" size="sm" disabled={deleting.has(l.id)} onClick={() => handleDeleteLoan(l)}>
                           <Trash2 className="h-4 w-4" />
                           删除
                         </Button>
@@ -632,9 +596,9 @@ export default function LoansPage() {
               mode={loanModalMode}
               defaultDirection={loanModalDefaultDirection}
               loan={editingLoan || undefined}
-              onClose={(refresh) => {
+              onClose={(refresh, saved) => {
                 setIsLoanModalOpen(false);
-                if (refresh) loadLoans();
+                if (refresh) resource.update(current => ({ data: saved ? updateLoan(current.data, saved) : current.data }));
               }}
             />
           ) : null}
@@ -654,12 +618,9 @@ export default function LoansPage() {
               mode={repaymentModalMode}
               loan={loans.find((loan) => loan.id === repaymentLoan.id) || repaymentLoan}
               repayment={editingRepayment || undefined}
-              onClose={async (refresh) => {
+              onClose={(refresh, saved) => {
                 setIsRepaymentModalOpen(false);
-                if (refresh) {
-                  if (repaymentsLoan) await loadRepayments(repaymentsLoan.id);
-                  await loadLoans();
-                }
+                if (refresh) saveRepayment(saved, editingRepayment ?? undefined);
               }}
               onPreviewAttachment={(a) => setPreviewAttachment(a)}
             />
@@ -710,12 +671,13 @@ export default function LoansPage() {
                 </div>
 
                 <div className="border rounded-md overflow-hidden">
+                  <ListSyncFeedback error={repaymentResource.refreshError} refreshing={repaymentResource.isRefreshing} onRetry={repaymentResource.refresh} />
                   {repaymentsLoading ? (
                     <div className="text-center py-10 text-muted-foreground">加载中...</div>
                    ) : repaymentsError ? (
                     <div role="alert" className="space-y-3 px-4 py-10 text-center">
                       <p className="text-sm text-destructive">{repaymentsError}</p>
-                      <Button variant="outline" onClick={() => loadRepayments(repaymentsLoan.id)}>重新加载</Button>
+                      <Button variant="outline" onClick={loadRepayments}>重新加载</Button>
                     </div>
                   ) : repayments.length === 0 ? (
                     <div className="text-center py-10 text-muted-foreground">
@@ -775,7 +737,7 @@ export default function LoansPage() {
                               <Button
                                 variant="outline"
                                 size="icon"
-                                onClick={() => handleDeleteRepayment(r)}
+                                disabled={deleting.has(r.id)} onClick={() => handleDeleteRepayment(r)}
                                 aria-label="删除归还"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -855,7 +817,7 @@ function LoanModal({
   mode: "add" | "edit";
   defaultDirection: LoanDirection;
   loan?: LoanWithComputed;
-  onClose: (shouldRefresh?: boolean) => void;
+  onClose: (shouldRefresh?: boolean, saved?: Loan) => void;
 }) {
   const idPrefix = mode === "edit" ? "edit-" : "";
 
@@ -1009,7 +971,7 @@ function LoanModal({
 
       toast.success(mode === "add" ? "已新增" : "已更新");
       draft.clear();
-      onClose(true);
+      onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("保存借还单失败:", e);
@@ -1252,7 +1214,7 @@ function RepaymentModal({
   mode: "add" | "edit";
   loan: LoanWithComputed;
   repayment?: LoanRepayment;
-  onClose: (shouldRefresh?: boolean) => void;
+  onClose: (shouldRefresh?: boolean, saved?: LoanRepayment) => void;
   onPreviewAttachment: (a: { url: string; name?: string; type?: string }) => void;
 }) {
   const idPrefix = mode === "edit" ? "edit-repayment-" : "repayment-";
@@ -1420,7 +1382,7 @@ function RepaymentModal({
 
       toast.success(mode === "add" ? "已记录归还" : "已更新归还");
       draft.clear();
-      onClose(true);
+      onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("保存归还记录失败:", e);

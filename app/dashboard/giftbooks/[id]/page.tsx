@@ -1,5 +1,11 @@
 "use client";
 
+import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { upsertRow } from "@/lib/list-resource";
+import { matchesGiftSearch, groupGiftRecords, giftSummary } from "@/lib/gift-list-updates";
+
+
 import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { useFormDraft } from "@/hooks/use-form-draft";
@@ -101,10 +107,6 @@ export default function GiftBookDetailPage() {
   const params = useParams<{ id: string }>();
   const giftbookId = params?.id;
 
-  const [giftbook, setGiftbook] = useState<GiftBookDetail | null>(null);
-  const [records, setRecords] = useState<GiftBookRecordGroupListItem[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [previewAttachment, setPreviewAttachment] = useState<{
     url: string;
     name?: string | null;
@@ -136,77 +138,30 @@ export default function GiftBookDetailPage() {
 
   const hasFilters = !!(q.trim() || hasCash || hasItems);
   const clearFilters = () => {
-    setIsLoading(true);
     setQ(""); setHasCash(false); setHasItems(false);
   };
 
-  const loadGiftBook = async () => {
-    if (!giftbookId) return null;
-    const res = await fetch(`/api/giftbooks/${giftbookId}`);
-    if (!res.ok) {
-      if (res.status === 401) {
-        router.push("/login");
-        return null;
-      }
-      throw new Error("获取礼簿失败");
-    }
-    const result = await res.json();
-    return result.data as GiftBookDetail;
-  };
-
-  const loadRecords = async () => {
-    if (!giftbookId) return [];
-    const res = await fetch(`/api/giftbooks/${giftbookId}/records?${queryString}`);
-    if (!res.ok) {
-      if (res.status === 401) {
-        router.push("/login");
-        return [];
-      }
-      throw new Error("获取记录失败");
-    }
-    const result = await res.json();
-    return (result.data || []) as GiftBookRecordGroupListItem[];
-  };
-
-  const refreshAll = async () => {
-    try {
-      setIsLoading(true);
-      setLoadError(null);
-      if (!giftbookId) {
-        setGiftbook(null);
-        setRecords([]);
-        return;
-      }
-      const [gb, recs] = await Promise.all([loadGiftBook(), loadRecords()]);
-      if (gb) setGiftbook(gb);
-      setRecords(recs);
-      setLoadError(null);
-    } catch (e) {
-      console.error("加载礼簿详情失败:", e);
-      setLoadError(e instanceof Error ? e.message : "加载失败，请重试");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    let active = true;
-    Promise.all([loadGiftBook(), loadRecords()])
-      .then(([gb, recs]) => {
-        if (!active) return;
-        setGiftbook(gb);
-        setRecords(recs);
-        setLoadError(null);
-      })
-      .catch((error) => {
-        if (active) setLoadError(error instanceof Error ? error.message : "加载失败，请重试");
-      })
-      .finally(() => {
-        if (active) setIsLoading(false);
-      });
-    return () => { active = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, hasCash, hasItems, giftbookId]);
+  const bookLoader = useJsonLoader<{ data: GiftBookDetail }>(`/api/giftbooks/${giftbookId}`);
+  const recordsLoader = useJsonLoader<{ data: GiftBookRecordGroupListItem[] }>(`/api/giftbooks/${giftbookId}/records?${queryString}`);
+  const loader = useCallback(async (signal: AbortSignal) => {
+    const [book, records] = await Promise.all([bookLoader(signal), recordsLoader(signal)]);
+    return { book: book.data, records: records.data };
+  }, [bookLoader, recordsLoader]);
+  const deleting = usePendingRows();
+  const resource = useListResource(giftbookId ? `${giftbookId}:${queryString}` : "", loader);
+  const { isLoading, loadError, refresh: refreshAll } = resource;
+  const giftbook = resource.data?.book ?? null;
+  const records = resource.data?.records ?? [];
+  const loadGiftBook = async () => (await bookLoader(new AbortController().signal)).data;
+  const updateRecords = (saved?: GiftBookRecordGroupListItem, deletedId?: string) => resource.update(current => {
+    let records = current.records.filter(row => row.id !== deletedId);
+    if (saved) records = upsertRow(records, saved).filter(row =>
+      (!hasCash || !!row.cash_amount) && (!hasItems || row.items_count > 0)
+      && [row.counterparty_name, row.notes].some(value => matchesGiftSearch(value ?? "", q)));
+    records.sort((a, b) => Date.parse(b.gift_date) - Date.parse(a.gift_date));
+    // The book summary covers all records, including those hidden by filters.
+    return { book: current.book, records };
+  });
 
   const openAdd = () => {
     setModalMode("add");
@@ -271,7 +226,7 @@ export default function GiftBookDetailPage() {
     }
   };
 
-  const handleDeleteGroup = async (g: GiftBookRecordGroupListItem) => {
+  const handleDeleteGroup = async (g: GiftBookRecordGroupListItem) => deleting.run(g.id, async () => {
     const ok = await confirm({
       title: "删除记录",
       description: "将永久删除这次收礼的礼金、礼品明细及附件。已关联收支会保留，仅解除关联。此操作无法撤销。",
@@ -287,15 +242,15 @@ export default function GiftBookDetailPage() {
         throw new Error(err.error || "删除失败");
       }
       toast.success("记录已删除");
-      await refreshAll();
+      updateRecords(undefined, g.id);
     } catch (e) {
       console.error("删除礼簿记录失败:", e);
       toast.error(e instanceof Error ? e.message : "删除失败，请重试");
     }
-  };
+  });
 
   const handleDeleteGiftBook = async () => {
-    let recordCount = giftbook?.summary?.recordCount;
+    let recordCount = resource.isRefreshing || resource.refreshError ? undefined : giftbook?.summary?.recordCount;
     if (!Number.isSafeInteger(recordCount) || recordCount! < 0) {
       try {
         const details = await loadGiftBook();
@@ -330,7 +285,7 @@ export default function GiftBookDetailPage() {
 
   return (
     <DashboardLayout>
-      <TransactionLinksProvider sourceType="gift_group" sourceIds={records.map((record) => record.id)}>
+      <TransactionLinksProvider scopeKey={giftbookId} sourceType="gift_group" sourceIds={records.map((record) => record.id)}>
       <div className="space-y-6">
         <div className="flex flex-col gap-3">
           <div className="flex items-center justify-between gap-3">
@@ -431,7 +386,7 @@ export default function GiftBookDetailPage() {
                   <Input
                     id="q"
                     value={q}
-                    onChange={(e) => { setIsLoading(true); setQ(e.target.value); }}
+                    onChange={(e) => { setQ(e.target.value); }}
                     placeholder="按姓名/备注搜索"
                   />
                 </div>
@@ -439,11 +394,11 @@ export default function GiftBookDetailPage() {
                   <Label className="text-xs text-muted-foreground">包含</Label>
                   <div className="flex flex-wrap items-center gap-4 pt-2">
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Checkbox checked={hasCash} onCheckedChange={(v) => { setIsLoading(true); setHasCash(!!v); }} />
+                      <Checkbox checked={hasCash} onCheckedChange={(v) => { setHasCash(!!v); }} />
                       礼金
                     </label>
                     <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Checkbox checked={hasItems} onCheckedChange={(v) => { setIsLoading(true); setHasItems(!!v); }} />
+                      <Checkbox checked={hasItems} onCheckedChange={(v) => { setHasItems(!!v); }} />
                       礼品
                     </label>
                   </div>
@@ -452,6 +407,7 @@ export default function GiftBookDetailPage() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
+            <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {isLoading ? (
               <div className="text-center py-12 text-muted-foreground">加载中...</div>
             ) : loadError ? (
@@ -568,7 +524,7 @@ export default function GiftBookDetailPage() {
                               <Button
                                 variant="outline"
                                 size="icon"
-                                onClick={() => handleDeleteGroup(g)}
+                                disabled={deleting.has(g.id)} onClick={() => handleDeleteGroup(g)}
                                 aria-label="删除"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -649,7 +605,7 @@ export default function GiftBookDetailPage() {
                           <Button
                             variant="outline"
                             size="icon"
-                            onClick={() => handleDeleteGroup(g)}
+                            disabled={deleting.has(g.id)} onClick={() => handleDeleteGroup(g)}
                             aria-label="删除"
                           >
                             <Trash2 className="h-4 w-4" />
@@ -682,10 +638,10 @@ export default function GiftBookDetailPage() {
             mode={modalMode}
             loading={editingLoading}
             group={editingGroup}
-            onClose={async (refresh) => {
+            onClose={(refresh, saved) => {
               setIsModalOpen(false);
               setEditingGroup(null);
-              if (refresh) await refreshAll();
+              if (refresh) updateRecords(saved);
             }}
           />
         </Dialog>
@@ -825,7 +781,7 @@ function GiftBookRecordModal({
   mode: "add" | "edit";
   loading: boolean;
   group: GiftBookRecordGroupDetail | null;
-  onClose: (refresh?: boolean) => void;
+  onClose: (refresh?: boolean, saved?: GiftBookRecordGroupListItem) => void;
 }) {
   const canEditFields = mode === "add" || !!group;
 
@@ -1032,7 +988,12 @@ function GiftBookRecordModal({
 
       toast.success(mode === "add" ? "记录已添加" : "记录已更新");
       draft.clear();
-      onClose(true);
+      const result = await res.json();
+      const saved = Array.isArray(result.data) ? groupGiftRecords(result.data) : {
+        ...result.data, items_count: result.data.items.length,
+        items_estimated_total: giftSummary(result.data.items.map((item: { estimated_value: number }) => ({ items_estimated_total: item.estimated_value }))).itemEstimatedTotal,
+      };
+      onClose(true, saved);
     } catch (e2) {
       setSubmitError(e2 instanceof Error ? e2.message : "保存失败，请重试");
       console.error(mode === "add" ? "创建礼簿记录失败:" : "更新礼簿记录失败:", e2);

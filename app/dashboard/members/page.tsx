@@ -1,7 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { upsertRow } from "@/lib/list-resource";
+
+import { useState } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,58 +31,21 @@ const avatarOptions = [
 ];
 
 export default function MembersPage() {
-  const router = useRouter();
   const { confirm } = useConfirm();
-  const [members, setMembers] = useState<Member[]>([]);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  // 加载成员列表
-  const [reload, setReload] = useState(0);
-  const loadMembers = () => {
-    setLoadError(null);
-    setIsLoading(true);
-    setReload((value) => value + 1);
-  };
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const load = async () => {
-      try {
-        const response = await fetch("/api/members", { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        if (!response.ok) {
-          if (response.status === 401) {
-            router.push("/login");
-            return;
-          }
-          throw new Error("获取家庭成员失败");
-        }
-
-        const result = await response.json();
-        if (controller.signal.aborted) return;
-        setMembers(result.data || []);
-        setLoadError(null);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        console.error("加载家庭成员失败:", error);
-        setLoadError("家庭成员加载失败，请检查网络后重试");
-      } finally {
-        if (!controller.signal.aborted) setIsLoading(false);
-      }
-    };
-    void load();
-    return () => controller.abort();
-  }, [router, reload]);
+  const loader = useJsonLoader<{ data: Member[] }>("/api/members");
+  const deleting = usePendingRows();
+  const resource = useListResource("members", loader);
+  const { isLoading, loadError, refresh: loadMembers } = resource;
+  const members = resource.data?.data ?? [];
 
   const handleEdit = (member: Member) => {
     setEditingMember(member);
     setIsAddModalOpen(true);
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: string) => deleting.run(id, async () => {
     const confirmed = await confirm({
       title: "删除家庭成员",
       description: "确定要删除这个家庭成员吗？此操作无法撤销。",
@@ -104,21 +70,21 @@ export default function MembersPage() {
       }
 
       toast.success("删除成功");
-      loadMembers();
+      resource.update(current => ({ ...current, data: current.data.filter(row => row.id !== id) }));
     } catch (error) {
       console.error("删除家庭成员失败:", error);
       toast.error("删除失败");
     }
-  };
+  });
 
   const handleCloseModal = () => {
     setIsAddModalOpen(false);
     setEditingMember(null);
   };
 
-  const handleSave = () => {
+  const handleSave = (saved: Member) => {
     handleCloseModal();
-    loadMembers();
+    resource.update(current => ({ ...current, data: upsertRow(current.data, saved) }));
   };
 
   return (
@@ -140,6 +106,7 @@ export default function MembersPage() {
           </Button>
         </div>
 
+        <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
         {/* Loading State */}
         {isLoading ? (
           <Card>
@@ -164,6 +131,7 @@ export default function MembersPage() {
                   <MemberCard
                     key={member.id}
                     member={member}
+                    busy={deleting.has(member.id)}
                     onEdit={handleEdit}
                     onDelete={handleDelete}
                   />
@@ -202,10 +170,12 @@ export default function MembersPage() {
 
 function MemberCard({
   member,
+  busy,
   onEdit,
   onDelete,
 }: {
   member: Member;
+  busy: boolean;
   onEdit: (member: Member) => void;
   onDelete: (id: string) => void;
 }) {
@@ -226,6 +196,7 @@ function MemberCard({
           variant="ghost"
           size="icon"
           className="h-7 w-7 bg-background"
+          disabled={busy}
           onClick={() => onEdit(member)}
         >
           <Edit className="h-3 w-3" />
@@ -234,6 +205,7 @@ function MemberCard({
           variant="ghost"
           size="icon"
           className="h-7 w-7 bg-background text-destructive hover:text-destructive"
+          disabled={busy}
           onClick={() => onDelete(member.id)}
         >
           <Trash2 className="h-3 w-3" />
@@ -252,7 +224,7 @@ function MemberModal({
   isOpen: boolean;
   onClose: () => void;
   member: Member | null;
-  onSave: () => void;
+  onSave: (saved: Member) => void;
 }) {
   const [formData, setFormData] = useState({
     name: member?.name || "",
@@ -287,6 +259,7 @@ function MemberModal({
         }
 
         toast.success("更新成功");
+        onSave(result.data);
       } else {
         // 创建成员
         const response = await fetch("/api/members", {
@@ -303,9 +276,9 @@ function MemberModal({
         }
 
         toast.success("创建成功");
+        onSave(result.data);
       }
 
-      onSave();
     } catch (error) {
       console.error("保存家庭成员失败:", error);
       toast.error("保存失败");

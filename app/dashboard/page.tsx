@@ -1,5 +1,9 @@
 "use client";
 
+import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { updateTransactions, type TransactionList } from "@/lib/list-updates";
+
 import { useState, useEffect, useRef, Suspense } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -166,13 +170,7 @@ function DashboardContent() {
   const setFilterMemberId = (value: string) => navigation.setFilters((current) => ({ ...current, memberId: value }));
   const addCloseRef = useRef<(() => Promise<boolean>) | null>(null);
   const editCloseRef = useRef<(() => Promise<boolean>) | null>(null);
-  const [summary, setSummary] = useState<Summary>({
-    totalIncome: 0,
-    totalExpense: 0,
-    balance: 0,
-  });
   const [showIncome, setShowIncome] = useState(false);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [membersStatus, setMembersStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -182,10 +180,6 @@ function DashboardContent() {
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
-  const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
-  const [hasAnyTransactions, setHasAnyTransactions] = useState<boolean | null>(null);
-  const [loadError, setLoadError] = useState<{ key: string; message: string } | null>(null);
   const [isMobileSummaryOpen, setIsMobileSummaryOpen] = useState(false);
   const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -213,42 +207,20 @@ function DashboardContent() {
   if (endDate) params.set("endDate", endDate);
   if (searchText.trim()) params.set("q", searchText.trim());
   const query = params.toString();
-  const requestKey = navigation.ready ? `${query}:${reload}` : "";
-  const isLoading = !dateRangeError && (!requestKey || loadedQuery !== requestKey);
-  const currentError = loadError?.key === requestKey ? loadError.message : null;
-  const visibleSummary = isLoading || dateRangeError || currentError ? null : summary;
-  const loadTransactions = () => setReload((value) => value + 1);
-
-  useEffect(() => {
-    if (dateRangeError || !requestKey) return;
-    const controller = new AbortController();
-    const load = async () => {
-      try {
-        const response = await fetch(`/api/transactions?${query}`, { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        if (!response.ok) {
-          if (response.status === 401) { router.push("/login"); return; }
-          const errorBody = await response.json().catch(() => ({}));
-          throw new Error(errorBody.error || "获取交易记录失败，请重试");
-        }
-        const result = await response.json();
-        if (controller.signal.aborted) return;
-        setLoadError(null);
-        setHasAnyTransactions(typeof result.hasAnyTransactions === "boolean" ? result.hasAnyTransactions : null);
-        setTransactions(result.data || []);
-        setSummary(result.summary || { totalIncome: 0, totalExpense: 0, balance: 0 });
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          console.error("加载交易记录失败:", error);
-          setLoadError({ key: requestKey, message: error instanceof Error ? error.message : "获取交易记录失败，请重试" });
-        }
-      } finally {
-        if (!controller.signal.aborted) setLoadedQuery(requestKey);
-      }
-    };
-    void load();
-    return () => controller.abort();
-  }, [query, requestKey, router, dateRangeError]);
+  const loader = useJsonLoader<TransactionList>(`/api/transactions?${query}`);
+  const deleting = usePendingRows();
+  const resource = useListResource(navigation.ready && !dateRangeError ? query : "", loader);
+  const { isLoading, loadError: currentError, refresh: loadTransactions } = resource;
+  const transactions = resource.data?.data ?? [];
+  const hasAnyTransactions = resource.data?.hasAnyTransactions ?? null;
+  const visibleSummary = !dateRangeError ? resource.data?.summary ?? null : null;
+  const saveTransaction = (saved?: Transaction) => {
+    const row = saved ? { ...saved,
+      category: categories.find(category => category.id === saved.category_id),
+      member: members.find(member => member.id === saved.member_id),
+    } : undefined;
+    resource.update(current => row ? updateTransactions(current, navigation.filters, row) : current);
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -309,7 +281,7 @@ function DashboardContent() {
   })();
 
   // 删除交易记录
-  const handleDelete = async () => {
+  const handleDelete = async () => deleting.run(selectedTransaction?.id ?? "", async () => {
     if (!selectedTransaction) return;
 
     try {
@@ -321,14 +293,13 @@ function DashboardContent() {
         throw new Error("删除失败");
       }
 
-      await loadTransactions();
-      setIsDeleteDialogOpen(false);
-      setSelectedTransaction(null);
+      resource.update(current => updateTransactions(current, navigation.filters, undefined, selectedTransaction.id));
+      setSelectedTransaction(current => current?.id === selectedTransaction.id ? null : current);
     } catch (error) {
       console.error("删除交易记录失败:", error);
       toast.error("删除失败，请重试");
     }
-  };
+  });
 
   return (
     <DashboardLayout>
@@ -361,17 +332,17 @@ function DashboardContent() {
               key={isAddModalOpen ? 'open' : 'closed'} // 每次打开时重新挂载组件，确保表单是干净的
               mode="add"
               closeGuardRef={addCloseRef}
-              onSaved={loadTransactions}
+              onSaved={saveTransaction}
               categories={categories}
               members={members}
               membersStatus={membersStatus}
               onRetryMembers={retryMembers}
               onManageMembers={() => router.push("/dashboard/members")}
-              onClose={(shouldRefresh?: boolean) => {
+              onClose={(shouldRefresh, saved) => {
                 setIsAddModalOpen(false);
                 // 只有在成功保存时才刷新列表
                 if (shouldRefresh) {
-                  loadTransactions();
+                  saveTransaction(saved);
                 }
               }}
             />
@@ -597,6 +568,7 @@ function DashboardContent() {
             </div>
           </CardHeader>
           <CardContent className="p-0">
+            <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {dateRangeError ? (
               <div className="p-8 text-center text-destructive" role="alert">{dateRangeError}</div>
             ) : isLoading ? (
@@ -734,6 +706,7 @@ function DashboardContent() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-8 w-8"
+                                disabled={deleting.has(transaction.id)}
                                 onClick={() => {
                                   setSelectedTransaction(transaction);
                                   setIsEditModalOpen(true);
@@ -745,6 +718,7 @@ function DashboardContent() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-8 w-8 text-destructive hover:text-destructive"
+                                disabled={deleting.has(transaction.id)}
                                 onClick={() => {
                                   setSelectedTransaction(transaction);
                                   setIsDeleteDialogOpen(true);
@@ -802,6 +776,7 @@ function DashboardContent() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7"
+                                disabled={deleting.has(transaction.id)}
                                 onClick={() => {
                                   setSelectedTransaction(transaction);
                                   setIsEditModalOpen(true);
@@ -813,6 +788,7 @@ function DashboardContent() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 text-destructive hover:text-destructive"
+                                disabled={deleting.has(transaction.id)}
                                 onClick={() => {
                                   setSelectedTransaction(transaction);
                                   setIsDeleteDialogOpen(true);
@@ -900,19 +876,19 @@ function DashboardContent() {
             key={selectedTransaction.id} // 使用 key 确保每次编辑不同记录时重新挂载组件
             mode="edit"
             closeGuardRef={editCloseRef}
-            onSaved={loadTransactions}
+            onSaved={saveTransaction}
             transaction={selectedTransaction}
             categories={categories}
             members={members}
             membersStatus={membersStatus}
             onRetryMembers={retryMembers}
             onManageMembers={() => router.push("/dashboard/members")}
-            onClose={(shouldRefresh?: boolean) => {
+            onClose={(shouldRefresh, saved) => {
               setIsEditModalOpen(false);
               setSelectedTransaction(null);
               // 只有在成功保存时才刷新列表
               if (shouldRefresh) {
-                loadTransactions();
+                saveTransaction(saved);
               }
             }}
           />
@@ -930,7 +906,7 @@ function DashboardContent() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete} className="bg-destructive hover:bg-destructive/90">
+            <AlertDialogAction disabled={!!selectedTransaction && deleting.has(selectedTransaction.id)} onClick={handleDelete} className="bg-destructive hover:bg-destructive/90">
               删除
             </AlertDialogAction>
           </AlertDialogFooter>
@@ -1008,14 +984,14 @@ function TransactionModal({
 }: {
   closeGuardRef: React.MutableRefObject<(() => Promise<boolean>) | null>;
   mode: "add" | "edit";
-  onSaved: () => void;
+  onSaved: (saved?: Transaction) => void;
   transaction?: Transaction;
   categories: Category[];
   members: Member[];
   membersStatus: "loading" | "ready" | "error";
   onRetryMembers: () => void;
   onManageMembers: () => void;
-  onClose: (shouldRefresh?: boolean) => void;
+  onClose: (shouldRefresh?: boolean, saved?: Transaction) => void;
 }) {
   const idPrefix = mode === "edit" ? "edit-" : "";
 
@@ -1168,6 +1144,7 @@ function TransactionModal({
         throw new Error(error.error || (mode === "add" ? "创建失败" : "更新失败"));
       }
 
+      const saved: Transaction = (await response.json()).data;
       if (keepOpen) {
         const next = { ...formData, amount: "", description: "" };
         setFormData(next);
@@ -1175,11 +1152,11 @@ function TransactionModal({
         setRemoveExistingAttachment(false);
         setUploadProgress(0);
         if (attachmentRef.current) attachmentRef.current.value = "";
-        onSaved();
+        onSaved(saved);
         toast.success("已保存，继续记下一笔");
         amountRef.current?.focus();
       } else {
-        onClose(true);
+        onClose(true, saved);
       }
     } catch (error) {
       console.error(mode === "add" ? "创建交易记录失败:" : "更新交易记录失败:", error);

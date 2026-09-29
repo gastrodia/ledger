@@ -1,12 +1,15 @@
 "use client";
 
+import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { upsertRow } from "@/lib/list-resource";
+
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { useFormDraft } from "@/hooks/use-form-draft";
 import { DraftNotice } from "@/components/ui/draft-notice";
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -50,61 +53,24 @@ function useFormCloseBridge() {
 export default function GiftBooksPage() {
   const createClose = useFormCloseBridge();
   const editClose = useFormCloseBridge();
-  const router = useRouter();
   const { confirm } = useConfirm();
 
-  const [giftbooks, setGiftbooks] = useState<GiftBookListItem[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const loader = useJsonLoader<{ data: GiftBookListItem[] }>("/api/giftbooks");
+  const deleting = usePendingRows();
+  const resource = useListResource("giftbooks", loader);
+  const { isLoading, loadError, refresh: loadGiftBooks } = resource;
+  const giftbooks = resource.data?.data ?? [];
+  const saveGiftBook = (saved?: GiftBook) => {
+    resource.update(current => ({ ...current, data: saved ? upsertRow(current.data, {
+      ...saved, summary: current.data.find(book => book.id === saved.id)?.summary
+        ?? { cashTotal: 0, itemEstimatedTotal: 0, recordCount: 0 },
+    }) : current.data }));
+  };
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingGiftBook, setEditingGiftBook] = useState<GiftBookListItem | null>(null);
 
-  const loadGiftBooks = async () => {
-    try {
-      setIsLoading(true);
-      setLoadError(null);
-      const res = await fetch("/api/giftbooks");
-      if (!res.ok) {
-        if (res.status === 401) {
-          router.push("/login");
-          return;
-        }
-        throw new Error("获取礼簿失败");
-      }
-      const result = await res.json();
-      setGiftbooks(result.data || []);
-      setLoadError(null);
-    } catch (e) {
-      console.error("加载礼簿失败:", e);
-      setLoadError("加载礼簿失败，请检查网络后重试。");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    let active = true;
-    fetch("/api/giftbooks")
-      .then(async (res) => {
-        if (res.status === 401) {
-          if (active) router.push("/login");
-          return;
-        }
-        if (!res.ok) throw new Error("获取礼簿失败");
-        const result = await res.json();
-        if (active) { setGiftbooks(result.data || []); setLoadError(null); }
-      })
-      .catch(() => {
-        if (active) setLoadError("加载礼簿失败，请检查网络后重试。");
-      })
-      .finally(() => {
-        if (active) setIsLoading(false);
-      });
-    return () => { active = false; };
-  }, [router]);
-
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (id: string) => deleting.run(id, async () => {
     let recordCount = giftbooks.find((book) => book.id === id)?.summary?.recordCount;
     if (!Number.isSafeInteger(recordCount) || recordCount! < 0) {
       try {
@@ -133,12 +99,12 @@ export default function GiftBooksPage() {
         throw new Error(err.error || "删除失败");
       }
       toast.success("礼簿已删除");
-      await loadGiftBooks();
+      resource.update(current => ({ ...current, data: current.data.filter(book => book.id !== id) }));
     } catch (e) {
       console.error("删除礼簿失败:", e);
       toast.error(e instanceof Error ? e.message : "删除失败，请重试");
     }
-  };
+  });
 
   return (
     <DashboardLayout>
@@ -160,9 +126,9 @@ export default function GiftBooksPage() {
               enabled={isCreateOpen}
               registerCloseGuard={createClose.register}
               key={isCreateOpen ? "open" : "closed"}
-              onClose={(refresh) => {
+              onClose={(refresh, saved) => {
                 setIsCreateOpen(false);
-                if (refresh) loadGiftBooks();
+                if (refresh) saveGiftBook(saved);
               }}
             />
           </Dialog>
@@ -173,6 +139,7 @@ export default function GiftBooksPage() {
             <CardTitle>我的礼簿</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
+            <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {isLoading ? (
               <div className="text-center py-12 text-muted-foreground">加载中...</div>
             ) : loadError ? (
@@ -281,7 +248,7 @@ export default function GiftBooksPage() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-8 w-8 text-destructive hover:text-destructive"
-                                onClick={() => handleDelete(gb.id)}
+                                disabled={deleting.has(gb.id)} onClick={() => handleDelete(gb.id)}
                                 aria-label="删除礼簿"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -337,7 +304,7 @@ export default function GiftBooksPage() {
                                 variant="ghost"
                                 size="icon"
                                 className="h-8 w-8 text-destructive hover:text-destructive"
-                                onClick={() => handleDelete(gb.id)}
+                                disabled={deleting.has(gb.id)} onClick={() => handleDelete(gb.id)}
                                 aria-label="删除礼簿"
                               >
                                 <Trash2 className="h-4 w-4" />
@@ -400,9 +367,9 @@ export default function GiftBooksPage() {
           <EditGiftBookModal
             registerCloseGuard={editClose.register}
             giftbook={editingGiftBook}
-            onClose={(refresh) => {
+            onClose={(refresh, saved) => {
               setEditingGiftBook(null);
-              if (refresh) loadGiftBooks();
+              if (refresh) saveGiftBook(saved);
             }}
           />
         </Dialog>
@@ -411,7 +378,7 @@ export default function GiftBooksPage() {
   );
 }
 
-function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose: (refresh?: boolean) => void; enabled: boolean; registerCloseGuard: RegisterCloseGuard }) {
+function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose: (refresh?: boolean, saved?: GiftBook) => void; enabled: boolean; registerCloseGuard: RegisterCloseGuard }) {
   const getTodayDate = () => {
     const now = new Date();
     const year = now.getFullYear();
@@ -470,7 +437,7 @@ function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose
       }
       toast.success("礼簿创建成功");
       draft.clear();
-      onClose(true);
+      onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("创建礼簿失败:", e);
@@ -564,7 +531,7 @@ function EditGiftBookModal({
 }: {
   registerCloseGuard: RegisterCloseGuard;
   giftbook: GiftBookListItem;
-  onClose: (refresh?: boolean) => void;
+  onClose: (refresh?: boolean, saved?: GiftBook) => void;
 }) {
   const formatDateForInput = (dateString: string | null | undefined) => {
     if (!dateString) return "";
@@ -629,7 +596,7 @@ function EditGiftBookModal({
       }
       toast.success("礼簿已更新");
       draft.clear();
-      onClose(true);
+      onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
       console.error("更新礼簿失败:", e);

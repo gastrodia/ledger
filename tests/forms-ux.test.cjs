@@ -41,8 +41,14 @@ function harness(file, { fetch: fetchImpl, upload, component, props = {}, confir
       if (!(index in slots)) slots[index] = { current: initial };
       return slots[index];
     },
-    useMemo(fn) { cursor++; return fn(); },
-    useCallback(fn) { cursor++; return fn; },
+    useMemo(fn, deps) {
+      const index = cursor++;
+      const previous = slots[index];
+      if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) slots[index] = { deps, value: fn() };
+      return slots[index].value;
+    },
+    useCallback(fn, deps) { return react.useMemo(() => fn, deps); },
+    useSyncExternalStore(_subscribe, getSnapshot) { cursor++; return getSnapshot(); },
     useEffect(fn, deps) {
       const index = cursor++;
       const previous = slots[index];
@@ -71,21 +77,28 @@ function harness(file, { fetch: fetchImpl, upload, component, props = {}, confir
       return { hasDraft: false, status: 'ready', error: null, needsProtection: config.dirty, clear: () => { clears++; }, restore() {}, discard() {} };
     } },
   };
-  const evaluatedModule = { exports: {} };
-  const source = fs.readFileSync(path.join(root, file), 'utf8') + (component ? `\nexport { ${component} };` : '');
-  const compiled = ts.transpileModule(source, { compilerOptions: {
-    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
-  } }).outputText;
-  vm.runInNewContext(compiled, {
-    exports: evaluatedModule.exports, module: evaluatedModule, URLSearchParams,
-    console: { error() {}, log() {} },
-    fetch: fetchImpl || (async () => response({ data: [] })),
-    require(name) {
-      if (name in modules) return modules[name];
-      if (name.startsWith('@/components/') || name === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
-      throw new Error(`Unexpected import ${name}`);
-    },
-  });
+  function evaluate(filename, extra = '') {
+    const evaluatedModule = { exports: {} };
+    const source = fs.readFileSync(path.join(root, filename), 'utf8') + extra;
+    const compiled = ts.transpileModule(source, { compilerOptions: {
+      module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX,
+    } }).outputText;
+    vm.runInNewContext(compiled, {
+      exports: evaluatedModule.exports, module: evaluatedModule, URLSearchParams, AbortController, DOMException, Error,
+      console: { error() {}, log() {} },
+      fetch: fetchImpl || (async () => response({ data: [] })),
+      require(name) {
+        if (name in modules) return modules[name];
+        if (name.startsWith('@/components/') || name === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
+        if (name.startsWith('@/lib/') || name === '@/hooks/use-list-resource') {
+          return modules[name] = evaluate(`${name.slice(2)}.ts`);
+        }
+        throw new Error(`Unexpected import ${name}`);
+      },
+    });
+    return evaluatedModule.exports;
+  }
+  const evaluatedModule = { exports: evaluate(file, component ? `\nexport { ${component} };` : '') };
   const View = evaluatedModule.exports[component || 'default'];
   let tree;
   return {
@@ -376,3 +389,47 @@ test('form cancel uses the shared guard and selected files mark pending content'
   await h.find(node => node.props?.onClick && text(node) === '取消').props.onClick();
   assert.equal(closed, 0);
 });
+
+for (const [page, endpoint, initial, component, callback, saved] of [
+  ['app/dashboard/members/page.tsx', '/api/members', { id: 'a', name: 'original', avatar: '👨', created_at: '2026-09-01' }, 'MemberModal', 'onSave', { id: 'a', name: 'updated', avatar: '👨', created_at: '2026-09-01' }],
+  ['app/dashboard/categories/page.tsx', '/api/categories', { id: 'a', name: 'original', type: 'expense', sort_order: 0, created_at: '2026-09-01' }, 'CategoryModal', 'onSave', { id: 'a', name: 'updated', type: 'expense', sort_order: 0, created_at: '2026-09-01' }],
+  ['app/dashboard/giftbooks/page.tsx', '/api/giftbooks', { id: 'a', name: 'original', created_at: '2026-09-01', summary: { recordCount: 4, cashTotal: 100, itemEstimatedTotal: 10 } }, 'CreateGiftBookModal', 'onClose', { id: 'a', name: 'updated', created_at: '2026-09-01' }],
+  ['app/dashboard/gifts-given/page.tsx', '/api/gifts-given?', { id: 'a', recipient_name: 'original', gift_date: '2026-09-01', cash_amount: 20, items_count: 0, items_estimated_total: 0 }, 'GiftModal', 'onClose', { id: 'a', recipient_name: 'updated', gift_date: '2026-09-01', cash_amount: 30, items_count: 0, items_estimated_total: 0 }],
+]) {
+  test(`${page}: saved row remains visible during a slow refresh and its failure`, async () => {
+    let reads = 0, failRefresh;
+    const h = harness(page, { fetch: async url => {
+      assert.equal(String(url), endpoint);
+      if (++reads === 1) return response({ data: [initial] });
+      return new Promise((_, reject) => { failRefresh = reject; });
+    } });
+    h.render(); await h.flush(); h.render();
+    const modal = h.find(node => node.type?.name === component || (component === 'GiftModal' && node.props?.gift !== undefined && node.props?.onClose));
+    if (callback === 'onSave') modal.props.onSave(saved); else modal.props.onClose(true, saved);
+    h.render(); await h.flush(); h.render();
+    assert.doesNotMatch(h.text, /加载中/);
+    assert.ok(JSON.stringify(h.render()).includes('updated'));
+    failRefresh(Error('background offline')); await h.flush(); h.render();
+    assert.doesNotMatch(h.text, /加载中/);
+    assert.ok(JSON.stringify(h.render()).includes('updated'));
+    assert.equal(h.find(node => node.type === 'ListSyncFeedback').props.error, 'background offline');
+  });
+}
+
+for (const [page, endpoint] of [['app/dashboard/members/page.tsx', '/api/members'], ['app/dashboard/categories/page.tsx', '/api/categories']]) {
+ test(`${page}: first-load failure stays retryable without reporting an empty list`, async () => {
+   let fail = true;
+   const h = harness(page, { fetch: async url => {
+     assert.equal(String(url), endpoint);
+     if (fail) throw Error('offline');
+     return response({ data: [] });
+   } });
+   h.render(); await h.flush(); h.render();
+   assert.ok(h.find(node => node.props?.role === 'alert'));
+   assert.doesNotMatch(h.text, /暂无家庭成员|暂无分类/);
+   fail = false;
+   await h.find(node => text(node) === '重新加载' && node.props?.onClick).props.onClick();
+   await h.flush(); h.render();
+   assert.doesNotMatch(h.text, /重新加载|加载中/);
+ });
+}

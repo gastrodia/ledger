@@ -1,6 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useListResource, useJsonLoader } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { updateCategories } from "@/lib/list-updates";
+
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -54,12 +58,13 @@ const presetCategories = {
 export default function CategoriesPage() {
   const router = useRouter();
   const { confirm } = useConfirm();
-  const [categories, setCategories] = useState<Category[]>([]);
   const [filterType] = useState<TransactionType | "all">("all");
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const loader = useJsonLoader<{ data: Category[] }>("/api/categories");
+  const resource = useListResource("categories", loader);
+  const { isLoading, loadError, refresh: loadCategories } = resource;
+  const categories = resource.data?.data ?? [];
 
   const [isSavingOrder, setIsSavingOrder] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -71,7 +76,7 @@ export default function CategoriesPage() {
     const previous = categories;
     savingOrder.current = true;
     setIsSavingOrder(true);
-    setCategories([...categories.filter(category => category.type !== type), ...ordered]);
+    resource.update(current => ({ ...current, data: [...current.data.filter(category => category.type !== type), ...ordered] }), false);
     try {
       const response = await fetch("/api/categories/reorder", {
         method: "PATCH",
@@ -81,59 +86,19 @@ export default function CategoriesPage() {
       if (!response.ok) {
         const result = await response.json();
         if (response.status === 401) router.push("/login");
-        if (response.status === 409) loadCategories();
         throw new Error(result.error || "排序保存失败，请重试");
       }
       toast.success("分类顺序已保存");
+      void loadCategories();
     } catch (error) {
-      setCategories(previous);
+      resource.update(current => ({ ...current, data: previous }), false);
+      void loadCategories();
       toast.error(error instanceof Error ? error.message : "排序保存失败，请重试");
     } finally {
       savingOrder.current = false;
       setIsSavingOrder(false);
     }
   };
-
-  // 加载分类
-  const [reload, setReload] = useState(0);
-  const loadCategories = () => {
-    setLoadError(null);
-    setIsLoading(true);
-    setReload((value) => value + 1);
-  };
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const load = async () => {
-      try {
-        const params = new URLSearchParams();
-        if (filterType !== "all") params.append("type", filterType);
-
-        const response = await fetch(`/api/categories?${params.toString()}`, { signal: controller.signal });
-        if (controller.signal.aborted) return;
-        if (!response.ok) {
-          if (response.status === 401) {
-            router.push("/login");
-            return;
-          }
-          throw new Error("获取分类失败");
-        }
-
-        const result = await response.json();
-        if (controller.signal.aborted) return;
-        setCategories(result.data || []);
-        setLoadError(null);
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        console.error("加载分类失败:", error);
-        setLoadError("分类加载失败，请检查网络后重试");
-      } finally {
-        if (!controller.signal.aborted) setIsLoading(false);
-      }
-    };
-    void load();
-    return () => controller.abort();
-  }, [filterType, router, reload]);
 
   const filteredCategories = categories.filter((c) => filterType === "all" || c.type === filterType);
 
@@ -161,7 +126,7 @@ export default function CategoriesPage() {
         return;
       }
       toast.success("删除成功");
-      loadCategories();
+      resource.update(current => ({ ...current, data: current.data.filter(row => row.id !== id) }));
     } catch (error) {
       console.error("删除分类失败:", error);
       toast.error("删除失败");
@@ -175,9 +140,9 @@ export default function CategoriesPage() {
     setEditingCategory(null);
   };
 
-  const handleSave = () => {
+  const handleSave = (saved: Category) => {
     handleCloseModal();
-    loadCategories();
+    resource.update(current => ({ ...current, data: updateCategories(current.data, saved) }));
   };
 
   const expenseCategories = filteredCategories.filter((c) => c.type === "expense");
@@ -206,6 +171,7 @@ export default function CategoriesPage() {
           {isSavingOrder ? "正在保存分类顺序…" : ""}
         </p>
 
+        <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
         {/* Loading State */}
         {isLoading ? (
           <Card>
@@ -305,7 +271,7 @@ function CategoryModal({
   isOpen: boolean;
   onClose: () => void;
   category: Category | null;
-  onSave: () => void;
+  onSave: (saved: Category) => void;
 }) {
   const [formData, setFormData] = useState({
     name: category?.name || "",
@@ -350,6 +316,7 @@ function CategoryModal({
         }
 
         toast.success("更新成功");
+        onSave(result.data);
       } else {
         // 创建分类
         const response = await fetch("/api/categories", {
@@ -366,9 +333,9 @@ function CategoryModal({
         }
 
         toast.success("创建成功");
+        onSave(result.data);
       }
 
-      onSave();
     } catch (error) {
       console.error("保存分类失败:", error);
       toast.error("保存失败");

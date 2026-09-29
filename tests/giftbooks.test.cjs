@@ -190,7 +190,7 @@ test('editing a giftbook submits null for cleared optional fields', async () => 
   vm.runInNewContext(source, {
     exports, ...controls, DraftNotice: "DraftNotice", useFormDraft: () => ({ clear() {} }), useFormLeaveGuard: () => ({ requestClose: async close => { close(); return true; } }), useEffect() {}, require: () => ({ jsx, jsxs: jsx }),
     useState: (initial) => [initial && typeof initial === 'object' ? { name: '礼簿', event_type: '', event_date: '', location: '', description: '' } : initial, () => {}],
-    fetch: async (_url, options) => { submitted = JSON.parse(options.body); return { ok: true }; },
+    fetch: async (_url, options) => { submitted = JSON.parse(options.body); return { ok: true, json: async () => ({ data: { id: "book", ...submitted } }) }; },
     toast: { success() {}, error: assert.fail }, console,
   });
   const tree = exports.EditGiftBookModal({ giftbook: { id: 'book', name: '礼簿', event_type: '婚礼', event_date: '2026-09-07', location: '大厅', description: '备注' }, onClose() {} });

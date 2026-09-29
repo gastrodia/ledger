@@ -1,6 +1,8 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useListResource } from "@/hooks/use-list-resource";
+import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Link2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,44 +12,42 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 
 type SourceType = "given_gift" | "gift_group" | "loan" | "repayment";
 type LinkedTransaction = { id: string; type: "income" | "expense"; amount: number; description: string | null; transaction_date: string };
-type LinksState = { key: string; data: Record<string, LinkedTransaction>; error: string | null };
 const LinksContext = createContext<{
   sourceType: SourceType;
   data: Record<string, LinkedTransaction>;
   loading: boolean;
+  loadedIds: string[];
   error: string | null;
-  refresh: () => void;
+  update: (sourceId: string, transaction: LinkedTransaction | null) => void;
 } | null>(null);
 
-export function TransactionLinksProvider({ sourceType, sourceIds, children }: {
-  sourceType: SourceType; sourceIds: string[]; children: ReactNode;
+export function TransactionLinksProvider({ sourceType, sourceIds, scopeKey = "", children }: {
+  sourceType: SourceType; sourceIds: string[]; scopeKey?: string; children: ReactNode;
 }) {
   const idsKey = JSON.stringify([...new Set(sourceIds)].sort());
-  const [revision, setRevision] = useState(0);
-  const requestKey = `${sourceType}:${idsKey}:${revision}`;
-  const [state, setState] = useState<LinksState>({ key: "", data: {}, error: null });
-  useEffect(() => {
-    const controller = new AbortController();
-    async function load() {
-      const ids = JSON.parse(idsKey) as string[];
-      try {
-        const data: Record<string, LinkedTransaction> = {};
-        for (let offset = 0; offset < ids.length; offset += 100) {
-          const params = new URLSearchParams({ sourceType, sourceIds: ids.slice(offset, offset + 100).join(",") });
-          const response = await fetch(`/api/transaction-links?${params}`, { cache: "no-store", signal: controller.signal });
-          const result = await response.json();
-          if (!response.ok) throw new Error(result.error || "关联状态加载失败");
-          for (const link of result.data as { sourceId: string; transaction: LinkedTransaction }[]) data[link.sourceId] = link.transaction;
-        }
-        if (!controller.signal.aborted) setState({ key: requestKey, data, error: null });
-      } catch (error) {
-        if (!controller.signal.aborted) setState({ key: requestKey, data: {}, error: error instanceof Error ? error.message : "关联状态加载失败" });
-      }
+  const loader = useCallback(async (signal: AbortSignal) => {
+    const ids: string[] = JSON.parse(idsKey);
+    const data: Record<string, LinkedTransaction> = {};
+    for (let offset = 0; offset < ids.length; offset += 100) {
+      const params = new URLSearchParams({ sourceType, sourceIds: ids.slice(offset, offset + 100).join(",") });
+      const response = await fetch(`/api/transaction-links?${params}`, { cache: "no-store", signal });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "关联状态加载失败");
+      for (const link of result.data as { sourceId: string; transaction: LinkedTransaction }[]) data[link.sourceId] = link.transaction;
     }
-    void load();
-    return () => controller.abort();
-  }, [sourceType, idsKey, requestKey]);
-  return <LinksContext.Provider value={{ sourceType, data: state.key === requestKey ? state.data : {}, loading: state.key !== requestKey, error: state.key === requestKey ? state.error : null, refresh: () => setRevision(value => value + 1) }}>{children}</LinksContext.Provider>;
+    return { data, ids };
+  }, [sourceType, idsKey]);
+  const resource = useListResource(`${sourceType}:${scopeKey}`, loader);
+  const update = (sourceId: string, transaction: LinkedTransaction | null) => resource.update(current => {
+    const next = { ...current.data };
+    if (transaction) next[sourceId] = transaction;
+    else delete next[sourceId];
+    return { data: next, ids: [...new Set([...current.ids, sourceId])] };
+  });
+  return <LinksContext.Provider value={{ sourceType, data: resource.data?.data ?? {}, loadedIds: resource.data?.ids ?? [], loading: resource.isLoading, error: resource.loadError ?? resource.refreshError, update }}>
+    <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
+    {children}
+  </LinksContext.Provider>;
 }
 
 export function TransactionLinkButton({ sourceId, label = "这条记录" }: { sourceId: string; label?: string }) {
@@ -56,13 +56,14 @@ export function TransactionLinkButton({ sourceId, label = "这条记录" }: { so
   const busy = useRef(false);
   if (!context) throw new Error("TransactionLinkButton requires TransactionLinksProvider");
   const linked = context.data[sourceId];
+  const waiting = context.loading || !context.loadedIds.includes(sourceId);
   return <>
     <Button type="button" variant="ghost" size="sm" className="h-auto min-h-8 max-w-full whitespace-normal px-1 text-xs" onClick={() => setOpen(true)} aria-label={`${label}：${linked ? "已关联收支" : "查看收支关联"}`}>
       <Link2 className="h-3.5 w-3.5 shrink-0" />
-      {context.loading ? "读取关联…" : context.error ? "关联状态待重试" : linked ? "已关联收支" : "关联已有收支"}
+      {waiting ? (context.error ? "关联状态待重试" : "读取关联…") : linked ? "已关联收支" : "关联已有收支"}
     </Button>
     <Dialog open={open} onOpenChange={value => { if (!busy.current) setOpen(value); }}>
-      {open ? <LinkEditor sourceType={context.sourceType} sourceId={sourceId} label={label} busyRef={busy} onChanged={context.refresh} /> : null}
+      {open ? <LinkEditor sourceType={context.sourceType} sourceId={sourceId} label={label} busyRef={busy} onChanged={transaction => context.update(sourceId, transaction)} /> : null}
     </Dialog>
   </>;
 }
@@ -76,7 +77,7 @@ function TransactionSummary({ transaction }: { transaction: LinkedTransaction })
 
 function LinkEditor({ sourceType, sourceId, label, busyRef, onChanged }: {
   sourceType: SourceType; sourceId: string; label: string;
-  busyRef: { current: boolean }; onChanged: () => void;
+  busyRef: { current: boolean }; onChanged: (transaction: LinkedTransaction | null) => void;
 }) {
   const currentVersion = useRef(0);
   const [current, setCurrent] = useState<LinkedTransaction | null>(null);
@@ -136,7 +137,7 @@ function LinkEditor({ sourceType, sourceId, label, busyRef, onChanged }: {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "关联保存失败，请重试");
       currentVersion.current += 1;
-      setCurrent(transaction ? result.data : null); setSelected(null); onChanged();
+      setCurrent(transaction ? result.data : null); setSelected(null); onChanged(transaction ? result.data : null);
     } catch (error) { setSaveError(error instanceof Error ? error.message : "关联保存失败，请重试"); }
     finally { busyRef.current = false; setBusy(false); }
   };

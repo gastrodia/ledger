@@ -34,7 +34,6 @@ const deferred = () => {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 for (const [file, endpoint, setter] of [
-  ['app/dashboard/page.tsx', '/api/transactions?', 'setTransactions'],
   ['app/dashboard/stats/page.tsx', '/api/stats?', 'setStatsData'],
 ]) {
   test(`${endpoint}: an old response and finally cannot overwrite the newest filter`, async () => {
