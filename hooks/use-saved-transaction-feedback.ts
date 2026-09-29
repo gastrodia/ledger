@@ -60,7 +60,7 @@ export function useSavedTransactionFeedback({ transactions, scope, ready, dialog
           ? [{ backgroundColor: color }, { backgroundColor: color }]
           : [{ backgroundColor: "transparent" }, { backgroundColor: color, offset: 0.25 },
             { backgroundColor: color, offset: 0.6 }, { backgroundColor: "transparent" }], {
-          duration: reducedMotion ? 2200 : 1100,
+          duration: reducedMotion ? 4400 : 2200,
           iterations: reducedMotion ? 1 : 2,
           easing: "ease-in-out",
         });
