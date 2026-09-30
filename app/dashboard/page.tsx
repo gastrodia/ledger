@@ -575,7 +575,7 @@ function DashboardContent() {
               </div>
             </div>
           </CardHeader>
-          <CardContent ref={transactionListRef} className="p-0">
+          <CardContent ref={transactionListRef} className="p-0 sm:px-0">
             <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {dateRangeError ? (
               <div className="p-8 text-center text-destructive" role="alert">{dateRangeError}</div>
