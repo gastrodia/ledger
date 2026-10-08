@@ -312,6 +312,38 @@ test('assistant UI keeps the original caption and every image in its retry outbo
   h.unmount();
 });
 
+test('screenshot caveats and zero omission stay visible while choosing a member and after restoration', async () => {
+  for (const mode of ['model-skipped', 'server-skipped', 'member-specified']) {
+    const serverSkippedZero = mode === 'server-skipped';
+    const result = { ...record, reply: '已跳过零金额订单；截图年份需要核对。',
+      drafts: mode === 'member-specified' ? record.drafts.map(draft => ({ ...draft, member_id: member.id })) : record.drafts,
+      import_summary: serverSkippedZero ? { image_count: 1, extracted_count: 3, removed_duplicates: 0,
+        skipped_zero_amounts: 1, retained_count: 2, review_required: true, warnings: [] } : undefined };
+    const h = await ready({ post: async (_url, body) => body.operation === 'select_member'
+      ? response({ draft_id: body.draft_id, member }) : response(result) });
+    h.restore({ messages: [], input: '', images: [image('含零金额的截图')] });
+    h.click('发送'); await h.flush();
+    assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
+    if (mode !== 'member-specified') assert.match(h.text, /这 2 笔支出的支出人是谁/);
+    if (serverSkippedZero) assert.match(h.text, /已识别 1 张截图，跳过 1 行零金额，保留 2 笔/);
+    h.restore(h.value);
+    assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
+    if (mode !== 'member-specified') {
+      const chooser = h.control('选择记账成员');
+      nodes(chooser).find(node => node.type === 'Button' && text(node) === member.name).props.onClick();
+      await h.flush();
+    }
+    assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
+    h.all(node => node.props?.['aria-label'] === '删除这笔草稿')[0].props.onClick(); h.render();
+    assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
+    assert.ok(h.all(node => node.type === 'Button').some(node => text(node) === '确认 1 笔'));
+    h.restore(h.value);
+    assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
+    assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 0);
+    h.unmount();
+  }
+});
+
 test('clearing assistant UI aborts recognition and prevents a late response from restoring images or drafts', async () => {
   const wait = deferred();
   const h = await ready({ post: () => wait.promise });

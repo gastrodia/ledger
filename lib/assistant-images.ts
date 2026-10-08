@@ -52,9 +52,10 @@ export function appendAssistantImages(current: AssistantImage[], incoming: Assis
 export function restoreAssistantImportSummary(value: unknown): AssistantImageImportSummary | undefined {
   if (!value || typeof value !== "object") return;
   const summary = value as AssistantImageImportSummary;
-  if (![summary.image_count, summary.extracted_count, summary.removed_duplicates, summary.retained_count].every(n => Number.isSafeInteger(n) && n >= 0)
-    || summary.image_count < 2 || summary.image_count > MAX_ASSISTANT_IMAGES || summary.extracted_count > MAX_ASSISTANT_IMAGES * 20
-    || summary.removed_duplicates + summary.retained_count !== summary.extracted_count || typeof summary.review_required !== "boolean"
+  const skipped = summary.skipped_zero_amounts === undefined ? 0 : summary.skipped_zero_amounts;
+  if (![summary.image_count, summary.extracted_count, summary.removed_duplicates, summary.retained_count, skipped].every(n => Number.isSafeInteger(n) && n >= 0)
+    || summary.image_count < 1 || summary.image_count > MAX_ASSISTANT_IMAGES || summary.extracted_count > MAX_ASSISTANT_IMAGES * 20
+    || skipped + summary.removed_duplicates + summary.retained_count !== summary.extracted_count || typeof summary.review_required !== "boolean"
     || !Array.isArray(summary.warnings) || summary.warnings.length > 10 || summary.warnings.some(warning => typeof warning !== "string" || warning.length > 500)) return;
   return summary;
 }

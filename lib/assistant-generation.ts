@@ -37,7 +37,7 @@ export async function prepareAssistantGeneration(userId: string, raw: unknown) {
   bailianConfig();
   const { categories, members } = await assistantOptions(userId);
   const context = JSON.stringify({ today: body.today, categories, members, draft_batch: draftBatch, saved_batch: savedBatch });
-  const content: UserContent = images.length ? [{ type: "text", text: body.message }] : body.message;
+  const content: UserContent = images.length ? [{ type: "text", text: `${body.message}\n本次上传的截图独立识别：即使历史消息或已有草稿中有相同商户、金额，也必须提取本次图片中的交易，不能据此跳过。只跳过最终金额为0.00或-0.00的行，并说明；0.01元仍须保留。` }] : body.message;
   if (Array.isArray(content)) images.forEach((image, index) => {
     if (images.length > 1) content.push({ type: "text", text: `第 ${index + 1} 张截图（共 ${images.length} 张），请按图内顺序提取完整交易，并填写本图来源编号。` });
     content.push({ type: "file", mediaType: image.slice(5, image.indexOf(";")), data: image });

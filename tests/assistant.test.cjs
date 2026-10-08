@@ -283,6 +283,25 @@ test('multiple screenshots are sent as numbered original files in one paid reque
   assert.equal(f.transactions.length, 0);
 });
 
+test('a statement containing a zero-value refunded order retains five pending expenses without posting', async () => {
+  const drafts = [2000, 1, 0, 33150, 1000, 980].map((amount_cents, index) => ({ ...row, amount_cents,
+    description: `截图交易 ${index + 1}`, member_id: null, transaction_date: '2026-10-02',
+    note: index === 2 ? '有退款' : index === 1 ? '等待确认收货' : '' }));
+  const f = routes({ provider: JSON.stringify({ ...plan, reply: '识别到6笔支出', drafts }) });
+  const response = await f.assistant.POST(request({ message: '识别这张截图', today: '2026-10-08', image: 'data:image/jpeg;base64,YWJj' }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.action, 'record');
+  assert.deepEqual(body.drafts.map(d => d.amount_cents), [2000, 1, 33150, 1000, 980]);
+  assert.equal(body.drafts.reduce((sum, d) => sum + d.amount_cents, 0), 37131);
+  assert.ok(body.drafts.every(d => d.member_id === null));
+  assert.equal(body.import_summary.skipped_zero_amounts, 1);
+  assert.equal(body.import_summary.retained_count, 5);
+  assert.match(body.reply, /零金额/);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.transactions.length, 0);
+});
+
 test('recognition uses typed image parts, retains bounded history and propagates request cancellation', async () => {
   const f = routes();
   const image = 'data:image/png;base64,YWJj';

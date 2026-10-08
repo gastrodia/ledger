@@ -65,25 +65,65 @@ function sameTransaction(left: ImageRow, right: ImageRow, imageCount: number): b
   return samePrintedTransaction(left, right, imageCount) && !conflictingDetails(left, right);
 }
 
+function zeroAmountRow(row: ImageRow): boolean {
+  // Zero is not a cash movement. Only omit a structurally valid row: malformed
+  // fields and negative/non-integer amounts must still reach normal validation.
+  // A zero row needs no usable date because it will never become a draft.
+  return row.amount_cents === 0 && ["income", "expense"].includes(row.type as string)
+    && typeof row.transaction_date === "string" && typeof row.description === "string" && row.description.length <= 500
+    && (row.category_id === null || typeof row.category_id === "string")
+    && (row.member_id === null || typeof row.member_id === "string")
+    && (row.payment_method === null || typeof row.payment_method === "string") && typeof row.note === "string";
+}
+
 /** Only join a previous image's suffix to the next image's prefix.
  * No historical draft, saved transaction or same-image row is removed.
- * Missing, conflicting or ambiguous provenance leaves rows intact for review.
+ * Zero-amount image rows are omitted; other rows with missing, conflicting or
+ * ambiguous provenance remain intact for review.
  */
 export function mergeAssistantImageImport(raw: unknown, imageCount: number): { output: unknown; summary?: AssistantImageImportSummary } {
   const output = Array.isArray(raw) && raw.length === 1 ? raw[0] : raw;
-  if (imageCount < 2 || !output || typeof output !== "object" || Array.isArray(output)) return { output: raw };
+  if (imageCount < 1 || !output || typeof output !== "object" || Array.isArray(output)) return { output: raw };
   const plan = output as Record<string, unknown>;
   if (plan.action !== "record" || !Array.isArray(plan.drafts)) return { output: raw };
   const drafts = plan.drafts;
+  const rows: ImageRow[] = drafts.map(row => row && typeof row === "object" && !Array.isArray(row) ? row as ImageRow : {});
+  const zeroRows = rows.filter(zeroAmountRow);
+  const skipped = new Set(zeroRows);
+  const skippedCount = zeroRows.length;
+  if (imageCount === 1 && !skippedCount) return { output: raw };
+  if (skippedCount) {
+    // Replacing an all-zero record with chat must not erase malformed commands
+    // or an invalid reply that would otherwise fail validation.
+    if (typeof plan.reply !== "string" || plan.reply.length > 4000) throw new Error("AI 返回格式异常，请重试。");
+    if (plan.query !== null || (plan.update !== undefined && plan.update !== null)
+      || (plan.undo !== undefined && plan.undo !== null)) throw new Error("AI 返回的操作不一致，请重试。");
+  }
   // A bounded response is required before considering overlap. validatePlan
   // still enforces the 20 unique draft limit after every visible row is read.
   if (drafts.length > imageCount * 20) throw new Error("识别到的账目过多，一次最多生成20笔独立草稿，请分批上传。");
   const summary: AssistantImageImportSummary = {
     image_count: imageCount, extracted_count: drafts.length, removed_duplicates: 0,
     retained_count: drafts.length, review_required: false, warnings: [],
+    ...(skippedCount ? { skipped_zero_amounts: skippedCount } : {}),
   };
   const warn = (message: string) => { summary.review_required = true; if (!summary.warnings.includes(message)) summary.warnings.push(message); };
-  const rows: ImageRow[] = drafts.map(row => row && typeof row === "object" && !Array.isArray(row) ? row as ImageRow : {});
+  const removed = new Set<ImageRow>();
+  const finish = () => {
+    const retained = drafts.filter((_: unknown, index: number) => !skipped.has(rows[index]) && !removed.has(rows[index]));
+    summary.removed_duplicates = removed.size;
+    summary.retained_count = retained.length;
+    const result = { ...plan, drafts: retained };
+    if (skippedCount) {
+      const explanation = `已忽略 ${skippedCount} 条 0.00 元记录（含 -0.00 元），不生成零金额账单。`;
+      if (retained.length) {
+        return { output: { ...result, reply: `已生成 ${retained.length} 笔待确认草稿，请核对金额、日期和年份后确认入账。${explanation}` }, summary };
+      }
+      return { output: { ...result, action: "chat", reply: `${explanation}本次没有可生成的收支草稿。`, query: null, update: null, undo: null }, summary };
+    }
+    return { output: result, summary };
+  };
+  if (imageCount === 1) return finish();
   const groups: ImageRow[][] = Array.from({ length: imageCount }, () => []);
   let lastImage = 1;
   let ordered = true;
@@ -96,19 +136,22 @@ export function mergeAssistantImageImport(raw: unknown, imageCount: number): { o
     groups[source.image_index - 1].push(row);
   }
   if (!ordered) {
-    warn("部分账目的截图来源或行顺序不完整，已保留全部账目，请核对可能重复的交易。");
-    return { output, summary };
+    warn("部分账目的截图来源或行顺序不完整，已保留全部非零账目，请核对可能重复的交易。");
+    return finish();
   }
   if (groups.some(group => !group.length)) warn("有截图未识别到完整交易，请核对图片中的账目是否遗漏。");
-  if (rows.some(row => { const source = sourceOf(row, imageCount)!; return source.kind !== "statement" && !source.transaction_id; })) {
+  // Validate original provenance before filtering so genuine zero rows do not
+  // create artificial gaps, and malformed source ordering is never repaired.
+  const eligibleGroups = groups.map(group => group.filter(row => !skipped.has(row)));
+  const eligibleRows = rows.filter(row => !skipped.has(row));
+  if (eligibleRows.some(row => { const source = sourceOf(row, imageCount)!; return source.kind !== "statement" && !source.transaction_id; })) {
     warn("部分截图无法确认是连续的流水列表，且没有交易单号，已保留相似账目，请核对。");
   }
-  if (rows.some(row => { const source = sourceOf(row, imageCount)!; return !source.time && !source.transaction_id; })) {
+  if (eligibleRows.some(row => { const source = sourceOf(row, imageCount)!; return !source.time && !source.transaction_id; })) {
     warn("部分账目没有可核对的时间或交易单号，已保留，请核对可能重复的交易。");
   }
-  const removed = new Set<ImageRow>();
-  for (let index = 1; index < groups.length; index++) {
-    const previous = groups[index - 1], current = groups[index];
+  for (let index = 1; index < eligibleGroups.length; index++) {
+    const previous = eligibleGroups[index - 1], current = eligibleGroups[index];
     const limit = Math.min(previous.length, current.length);
     let overlap = 0;
     for (let length = limit; length > 0; length--) {
@@ -128,7 +171,5 @@ export function mergeAssistantImageImport(raw: unknown, imageCount: number): { o
     }
     for (const row of current.slice(0, overlap)) removed.add(row);
   }
-  summary.removed_duplicates = removed.size;
-  summary.retained_count = drafts.length - removed.size;
-  return { output: { ...plan, drafts: drafts.filter((_: unknown, index: number) => !removed.has(rows[index])) }, summary };
+  return finish();
 }

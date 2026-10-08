@@ -180,6 +180,23 @@ test('foreign update targets fail validation and never become actionable termina
   assert.equal(statements.length, 2);
 });
 
+test('streamed screenshot output discards a zero-value row only after completion and retains paid cents', async () => {
+  const output = { ...record, reply: '识别到3笔', drafts: [row, { ...row, amount_cents: 0 }, { ...row, amount_cents: 1 }] };
+  const gate = deferred();
+  const { route, statements } = fixture({ bailianObjectStream: async (_settings, partial) => {
+    partial(output); await gate.promise; return output;
+  } });
+  const watched = observe(await route.POST(request({ images: ['data:image/jpeg;base64,YWJj'] })));
+  await tick();
+  assert.deepEqual(watched.events, [{ type: 'status', phase: 'images' }]);
+  gate.resolve();
+  const events = await watched.done;
+  assert.deepEqual(events.map(event => event.type), ['status', 'result']);
+  assert.deepEqual(events[1].plan.drafts.map(d => d.amount_cents), [1200, 1]);
+  assert.equal(events[1].plan.import_summary.skipped_zero_amounts, 1);
+  assert.equal(statements.length, 2, 'generation only reads account options');
+});
+
 test('query summary starts only after user-scoped SQL facts and streams the second model response', async () => {
   const gate = deferred();
   let summarySettings;

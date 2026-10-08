@@ -506,7 +506,7 @@ export default function AssistantPage() {
         body: JSON.stringify({ operation: "select_member", draft_id: memberDraft.id, member_id: member.id }) }));
       if (!currentConversation(epoch) || controller.signal.aborted) return;
       if (result.draft_id !== memberDraft.id || result.member?.id !== member.id) throw new Error("成员选择结果无效，请重试。");
-      setMessages(current => [...current.map(m => m.id === message.id ? { ...m, text: memberBatchQuestionText(unassigned), drafts: undefined, status: undefined, error: undefined, memberFlow: undefined, memberChoice: undefined } : m.memberChoice ? { ...m, memberChoice: undefined } : m),
+      setMessages(current => [...current.map(m => m.id === message.id ? { ...m, drafts: undefined, status: undefined, error: undefined, memberFlow: undefined, memberChoice: undefined } : m.memberChoice ? { ...m, memberChoice: undefined } : m),
         { id: crypto.randomUUID(), role: "assistant", text: "成员已补充，请核对账目后确认入账。", drafts: selected, status: "pending" as const, memberFlow: true, draftSort: message.draftSort }]);
     } catch (error) {
       if (!controller.signal.aborted && currentConversation(epoch)) {
@@ -703,7 +703,8 @@ export default function AssistantPage() {
       if (m.id !== messageId || m.status !== "pending" || m.commit) return m;
       const remaining = draftId ? m.drafts?.filter(d => d.id !== draftId) || [] : [];
       const unassigned = m.memberFlow ? unassignedMemberDrafts(remaining, members) : [];
-      return remaining.length ? { ...m, drafts: remaining, ...(m.memberFlow ? { text: unassigned.length ? memberBatchQuestionText(unassigned) : "请核对账目后确认入账。" } : {}), error: undefined }
+      const imageReply = current.some(input => input.role === "user" && input.taskId === m.id && input.images?.length);
+      return remaining.length ? { ...m, drafts: remaining, ...(m.memberFlow && !imageReply ? { text: unassigned.length ? memberBatchQuestionText(unassigned) : "请核对账目后确认入账。" } : {}), error: undefined }
         : { ...m, drafts: [], status: "deleted" as const, text: "这组草稿已删除，未入账。", error: undefined };
     }));
   }
@@ -858,13 +859,14 @@ export default function AssistantPage() {
         const replacement = message.id === activeMemberChoice?.id ? memberChoiceTarget(message.memberChoice, messages) : undefined;
         const unassigned = message.memberFlow && message.status === "pending" && !message.commit && activeMemberChoice?.memberChoice?.batch_id !== message.id ? unassignedMemberDrafts(visibleDrafts, members) : [];
         const question = unassigned[0];
+        const imageReply = question && message.text !== memberBatchQuestionText(unassigned) && messages.some(input => input.role === "user" && input.taskId === message.id && input.images?.length);
         const questionTotal = unassigned.every(d => /^\d{1,10}(\.\d{1,2})?$/.test(d.amount))
           ? money(unassigned.reduce((sum, d) => sum + Math.round(Number(d.amount) * 100), 0)) : "—";
         return <div key={message.id} className={cn("mb-5 flex", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
         <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]")}>
           <div className={cn(bubbleClass, message.role === "user" ? "rounded-[17px_17px_5px_17px] bg-[color-mix(in_srgb,var(--color-primary)_9%,var(--color-background))] px-[15px] py-[11px] text-foreground" : "text-muted-foreground")}>
             {!!message.images?.length && <div className={cn("mb-2 grid gap-2", message.images.length > 1 && "grid-cols-2")} aria-label="已发送的截图">{message.images.map((image, index) => <Button key={index} type="button" variant="ghost" className={cn(buttonClass, "relative block max-w-full overflow-hidden rounded-[10px] hover:bg-transparent")} aria-label={`查看第 ${index + 1} 张图片：${image.name}`} onClick={() => setPreviewImage(image)}><NextImage src={image.data} alt={image.name} width={240} height={240} unoptimized className="h-auto max-h-[260px] w-auto max-w-full object-contain" /></Button>)}</div>}
-            <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{question ? memberBatchQuestionText(unassigned) : message.text}</ReactMarkdown>
+            <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{question ? `${imageReply ? `${message.text}\n\n` : ""}${memberBatchQuestionText(unassigned)}` : message.text}</ReactMarkdown>
           </div>
           {message.incomplete && ((message.role === "assistant") || (!message.taskId && message.role === "user") || message.taskStatus === "missing") && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
             <span>{message.error || (message.incomplete === "stopped" ? "已停止生成" : "上次处理未完成")}</span>
@@ -874,7 +876,7 @@ export default function AssistantPage() {
             <Button type="button" variant="outline" size="sm" disabled={composerDisabled} onClick={() => { const target = messages.find(item => item.id === message.undoChoice!.batch_id); void undoSaved(target, message.undoChoice!.draft_ids); patchMessage(message.id, { undoChoice: undefined }); }}>确认撤销 {message.undoChoice.draft_ids.length} 笔</Button>
             <Button type="button" variant="ghost" size="sm" disabled={composerDisabled} onClick={() => patchMessage(message.id, { undoChoice: undefined, text: "已取消本次撤销请求。" })}>取消</Button>
           </div>}
-          {message.importSummary && <div className="mt-2 max-w-[470px] text-[11px] leading-5 text-muted-foreground" aria-label="截图合并结果"><p>已联合识别 {message.importSummary.image_count} 张截图{message.importSummary.removed_duplicates > 0 ? `，衔接去重 ${message.importSummary.removed_duplicates} 笔` : ""}，保留 {message.importSummary.retained_count} 笔。</p>{message.importSummary.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div>}
+          {message.importSummary && <div className="mt-2 max-w-[470px] text-[11px] leading-5 text-muted-foreground" aria-label="截图合并结果"><p>已{message.importSummary.image_count > 1 ? "联合" : ""}识别 {message.importSummary.image_count} 张截图{message.importSummary.removed_duplicates > 0 ? `，衔接去重 ${message.importSummary.removed_duplicates} 笔` : ""}{message.importSummary.skipped_zero_amounts ? `，跳过 ${message.importSummary.skipped_zero_amounts} 行零金额` : ""}，保留 {message.importSummary.retained_count} 笔。</p>{message.importSummary.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div>}
           {replacement && <div className="mt-2.5 w-[min(400px,100%)] rounded-[16px] border border-border bg-card p-3.5" aria-label="修改记账成员">
             <p className="mb-3 flex items-baseline justify-between gap-3 text-[13px]"><span className="min-w-0 wrap-anywhere">{replacement.drafts.length === 1 ? replacement.drafts[0].description || "这笔账" : `修改这 ${replacement.drafts.length} 笔账目的人员`}</span>{replacement.drafts.length === 1 && <strong className="shrink-0 text-[16px]">¥{replacement.drafts[0].amount}</strong>}</p>
             {members.length ? <div className="flex flex-wrap gap-2">{members.map(member => <Button type="button" variant="ghost" key={member.id} className={cn(buttonClass, "flex min-h-11 max-w-full items-center gap-[7px] rounded-[12px] border border-primary/25 bg-primary/5 px-3.5 py-2.5 text-[14px] hover:border-primary hover:bg-primary/10")} disabled={composerDisabled} onClick={() => void selectReplacementMember(message, member)}><AssistantMemberLabel member={member} /></Button>)}</div>

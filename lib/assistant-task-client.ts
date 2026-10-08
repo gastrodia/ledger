@@ -72,7 +72,7 @@ export function mergeAssistantTasks(
         && previousReply.incomplete === reply.incomplete && previousReply.error === reply.error) continue;
     } else {
       const result = task.result;
-      reply = { ...reply, text: result.reply, taskApplied: true };
+      reply = { ...reply, text: result.reply, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
       if (result.action === "undo") {
         const target = next.find(message => message.id === result.undo?.batch_id);
         try {
@@ -95,9 +95,9 @@ export function mergeAssistantTasks(
         }
       } else if (result.drafts.length) {
         const unassigned = unassignedMemberDrafts(result.drafts, members);
-        reply = { ...reply, text: unassigned.length ? memberBatchQuestionText(unassigned) : result.reply,
+        reply = { ...reply, text: unassigned.length && !currentUser.images?.length ? memberBatchQuestionText(unassigned) : result.reply,
           drafts: result.drafts.map(draft => ({ ...draft, amount: (draft.amount_cents / 100).toFixed(2) })), status: "pending", memberFlow: true,
-          importSummary: restoreAssistantImportSummary(result.import_summary) };
+        };
       }
     }
     const previousIndex = next.findIndex(message => message.id === task.id);

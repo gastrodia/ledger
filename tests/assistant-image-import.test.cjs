@@ -24,6 +24,111 @@ const source = (image_index, row_index, time = '11:47', transaction_id = null) =
 const plan = drafts => ({ action: 'record', reply: '请核对后确认', drafts, query: null, update: null });
 const merge = drafts => imports.mergeAssistantImageImport(plan(drafts), 2);
 
+test('a statement containing a zero refunded row preserves five paid transactions including one cent', () => {
+  const amounts = [2000, 1, -0, 33150, 1000, 980];
+  const descriptions = ['商户甲', '家居商品甲', '退款商品乙', '火车票', '餐饮商户乙', '扫码付款商户丙'];
+  const drafts = amounts.map((amount_cents, index) => ({ ...row, amount_cents, description: descriptions[index],
+    transaction_date: index === 0 ? '2026-10-04' : index === 1 ? '2026-10-03' : '2026-10-02',
+    note: index === 1 ? '等待确认收货' : index === 2 ? '有退款' : '', source: source(1, index + 1) }));
+  const original = { ...plan(drafts), reply: '已识别 6 笔，请核对。' };
+  const result = imports.mergeAssistantImageImport(original, 1);
+  const accepted = assistant.validatePlan(result.output, [], [], crypto.randomUUID);
+  assert.equal(accepted.drafts.length, 5);
+  assert.equal(accepted.drafts.reduce((sum, draft) => sum + draft.amount_cents, 0), 37131);
+  assert.equal(accepted.drafts[1].amount_cents, 1);
+  assert.match(accepted.drafts[1].note, /等待确认收货/);
+  assert.equal(accepted.drafts.map(draft => draft.description).join(), descriptions.filter((_, index) => index !== 2).join());
+  assert.match(accepted.reply, /5 笔待确认草稿/);
+  assert.match(accepted.reply, /忽略 1 条 0\.00 元/);
+  assert.doesNotMatch(accepted.reply, /6 笔/);
+  assert.equal(result.summary.extracted_count, 6);
+  assert.equal(result.summary.skipped_zero_amounts, 1);
+  assert.equal(result.summary.removed_duplicates, 0);
+  assert.equal(result.summary.retained_count, 5);
+  assert.equal(images.restoreAssistantImportSummary(result.summary), result.summary);
+  assert.equal(original.drafts.length, 6, 'recognition output remains immutable');
+});
+
+test('all-zero images return an explanatory chat without inventing dates or drafts', () => {
+  const zero = { ...row, amount_cents: 0, transaction_date: '' };
+  const result = imports.mergeAssistantImageImport(plan([zero, zero]), 1);
+  const accepted = assistant.validatePlan(result.output, [], [], crypto.randomUUID);
+  assert.equal(accepted.action, 'chat');
+  assert.equal(accepted.drafts.length, 0);
+  assert.equal(accepted.query, null);
+  assert.equal(accepted.update, null);
+  assert.equal(accepted.undo, null);
+  assert.match(accepted.reply, /忽略 2 条/);
+  assert.match(accepted.reply, /没有可生成/);
+  assert.equal(result.summary.skipped_zero_amounts, 2);
+  assert.equal(images.restoreAssistantImportSummary(result.summary), result.summary);
+});
+
+test('zero omission never repairs invalid financial rows, replies or competing commands', () => {
+  const zero = { ...row, amount_cents: 0 };
+  for (const patch of [{ amount_cents: -1 }, { amount_cents: 1.5 }, { amount_cents: Infinity },
+    { transaction_date: '2026-02-30' }, { type: 'invalid' }]) {
+    const result = imports.mergeAssistantImageImport(plan([zero, { ...row, ...patch }]), 1);
+    assert.throws(() => assistant.validatePlan(result.output, [], [], crypto.randomUUID));
+  }
+  for (const patch of [{ reply: null }, { reply: 'x'.repeat(4001) }, { query: {} }, { update: {} }, { undo: {} }]) {
+    assert.throws(() => imports.mergeAssistantImageImport({ ...plan([zero]), ...patch }, 1));
+  }
+  for (const patch of [{ type: 'invalid' }, { description: null }, { note: null }, { payment_method: 3 }]) {
+    const invalid = imports.mergeAssistantImageImport(plan([{ ...zero, ...patch }]), 1);
+    assert.throws(() => assistant.validatePlan(invalid.output, [], [], crypto.randomUUID));
+  }
+  const text = plan([zero]);
+  assert.equal(imports.mergeAssistantImageImport(text, 0).output, text);
+  assert.throws(() => assistant.validatePlan(text, [], [], crypto.randomUUID));
+  assert.throws(() => assistant.confirmationRows([zero]));
+  assert.throws(() => imports.mergeAssistantImageImport(plan(Array(21).fill(zero)), 1), /账目过多/);
+  const oversized = plan(Array(21).fill(row));
+  assert.equal(imports.mergeAssistantImageImport(oversized, 1).output, oversized);
+  assert.throws(() => assistant.validatePlan(oversized, [], [], crypto.randomUUID), /一次最多识别20笔/);
+});
+
+test('zero boundary rows do not break valid adjacent overlap matching or provenance accounting', () => {
+  const result = merge([
+    { ...row, description: '第一笔', source: source(1, 1) },
+    { ...row, source: source(1, 2) },
+    { ...row, amount_cents: 0, source: source(1, 3) },
+    { ...row, amount_cents: 0, source: source(2, 1) },
+    { ...row, source: source(2, 2) },
+    { ...row, description: '最后一笔', source: source(2, 3) },
+  ]);
+  assert.equal(result.output.drafts.map(draft => draft.description).join(), '第一笔,好友甲,最后一笔');
+  assert.equal(result.summary.extracted_count, 6);
+  assert.equal(result.summary.skipped_zero_amounts, 2);
+  assert.equal(result.summary.removed_duplicates, 1);
+  assert.equal(result.summary.retained_count, 3);
+  assert.equal(result.summary.review_required, false);
+  assert.match(result.output.reply, /3 笔待确认草稿/);
+  assert.equal(images.restoreAssistantImportSummary(result.summary), result.summary);
+});
+
+test('zero omission still finalizes accurate counts when original image provenance is invalid', () => {
+  const result = merge([{ ...row, source: source(1, 1) }, { ...row, amount_cents: 0, source: source(1, 3) },
+    { ...row, source: source(2, 1) }]);
+  assert.equal(result.output.drafts.length, 2);
+  assert.equal(result.summary.skipped_zero_amounts, 1);
+  assert.equal(result.summary.removed_duplicates, 0);
+  assert.equal(result.summary.review_required, true);
+  assert.equal(images.restoreAssistantImportSummary(result.summary), result.summary);
+});
+
+test('restored image summaries accept legacy counts and reject invalid zero omission accounting', () => {
+  const legacy = { image_count: 2, extracted_count: 3, removed_duplicates: 1, retained_count: 2,
+    review_required: false, warnings: [] };
+  assert.equal(images.restoreAssistantImportSummary(legacy), legacy);
+  const current = { ...legacy, image_count: 1, skipped_zero_amounts: 1, removed_duplicates: 0 };
+  assert.equal(images.restoreAssistantImportSummary(current), current);
+  for (const patch of [{ skipped_zero_amounts: -1 }, { skipped_zero_amounts: 1.5 }, { skipped_zero_amounts: null },
+    { skipped_zero_amounts: '1' }, { skipped_zero_amounts: Infinity }, { skipped_zero_amounts: 2 }, { image_count: 0 }]) {
+    assert.equal(images.restoreAssistantImportSummary({ ...current, ...patch }), undefined);
+  }
+});
+
 test('multi-image request accepts the old single-image contract and bounds count, individual size and total request size', () => {
   assert.equal(imports.assistantRequestImages({ image }).join(), image);
   assert.equal(imports.assistantRequestImages({ images: [image, image] }).length, 2);
