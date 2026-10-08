@@ -3,6 +3,8 @@ const LOGOUT_KEY = "ledger:draft:logout";
 export type DraftStatus = "checking" | "ready" | "saved" | "unavailable" | "error";
 export type DraftSnapshot = { hasDraft: boolean; status: DraftStatus; error: string | null; persistedValue?: string };
 export type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
+export type DraftReplacement<T> = T | ((stored: T | undefined) => T);
+export type DraftReplacementDirty<T> = boolean | ((replacement: T) => boolean);
 
 export function draftProtection(snapshot: DraftSnapshot, value: unknown, dirty: boolean) {
   let isPersisted = false;
@@ -30,6 +32,7 @@ export function clearStoredDrafts(storage: DraftStorage) {
 export class FormDraftSession<T> {
   private pending: T | undefined;
   private stopped = false;
+  private readFailed = false;
   private suppressed: string | null = null;
   private awaitingRestore: string | null = null;
   private lastWritten: string | null = null;
@@ -49,6 +52,7 @@ export class FormDraftSession<T> {
       }
     } catch {
       this.stopped = true;
+      this.readFailed = true;
       this.snapshot = { hasDraft: false, status: "error", error: "无法读取本机草稿，仍可继续编辑并直接保存。" };
     }
   }
@@ -86,34 +90,57 @@ export class FormDraftSession<T> {
       this.publish({ hasDraft: false, status: "error", error: "本机草稿保存失败，请在离开前保存表单。" });
     }
   }
-  restore(): T | undefined {
+  restore(normalize?: (value: T) => T): T | undefined {
     if (this.stopped || !this.snapshot.hasDraft) return undefined;
     const value = this.pending;
-    this.awaitingRestore = JSON.stringify(value);
-    this.lastWritten = this.awaitingRestore;
+    if (value === undefined) return undefined;
+    const restored = normalize ? normalize(value) : value;
+    this.awaitingRestore = JSON.stringify(restored);
+    this.lastWritten = JSON.stringify(value);
     this.pending = undefined;
-    this.publish({ hasDraft: false, status: "saved", error: null, persistedValue: this.awaitingRestore });
-    return value;
+    this.publish({ hasDraft: false, status: "saved", error: null, persistedValue: this.lastWritten });
+    return restored;
   }
   discard() {
-    if (this.stopped) return;
+    if (this.stopped) return false;
     try {
       this.storage.removeItem(this.key);
       this.pending = undefined;
       this.lastWritten = null;
       this.awaitingRestore = null;
       this.publish({ hasDraft: false, status: "ready", error: null });
+      return true;
     } catch {
       this.publish({ ...this.snapshot, status: "error", error: "草稿清除失败，请检查浏览器存储权限。" });
+      return false;
     }
   }
-  clear(value: T) {
-    this.suppressed = JSON.stringify(value);
-    this.discard();
+  clear(value: T, replacement?: DraftReplacement<T>, dirty: DraftReplacementDirty<T> = false): T | undefined {
+    // Explicit clearing can repair this session's unreadable key, but must never
+    // revive a session that was stopped on unmount or revoked on logout.
+    const repairingRead = this.stopped && this.readFailed;
+    if (this.stopped && !repairingRead) return;
+    const next = typeof replacement === "function" ? (replacement as (stored: T | undefined) => T)(this.pending) : replacement;
+    const nextDirty = next !== undefined && (typeof dirty === "function" ? dirty(next) : dirty);
+    if (repairingRead) this.stopped = false;
+    this.suppressed = replacement === undefined ? JSON.stringify(value) : null;
+    if (!this.discard()) {
+      if (repairingRead) this.stopped = true;
+      return next;
+    }
+    this.readFailed = false;
+    if (next !== undefined) {
+      this.save(next, nextDirty);
+      // Persist immediately, then ignore the preceding render until the caller
+      // has acknowledged the replacement state in its next save effect.
+      this.awaitingRestore = JSON.stringify(next);
+    }
+    return next;
   }
-  stop() { this.stopped = true; }
+  stop() { this.stopped = true; this.readFailed = false; }
   revoke() {
     this.stopped = true;
+    this.readFailed = false;
     this.pending = undefined;
     this.publish({ hasDraft: false, status: "unavailable", error: "登录状态已变更，本页已停止保存本机草稿。" });
   }

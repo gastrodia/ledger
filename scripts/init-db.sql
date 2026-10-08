@@ -257,3 +257,13 @@ DROP TRIGGER IF EXISTS gift_group_transaction_link_cleanup ON gift_records;
 CREATE CONSTRAINT TRIGGER gift_group_transaction_link_cleanup
 AFTER DELETE OR UPDATE ON gift_records DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION cleanup_gift_group_transaction_link();
+
+-- AI assistant confirmation batches: the marker and its transactions commit together.
+CREATE TABLE IF NOT EXISTS assistant_batches (
+    user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id VARCHAR(36) NOT NULL,
+    payload_hash TEXT NOT NULL,
+    transaction_ids JSONB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, id)
+);

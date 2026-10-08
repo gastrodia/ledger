@@ -50,6 +50,27 @@ test('explicit restoration waits for restored form state before accepting edits'
   assert.equal(JSON.parse(storage.getItem(draftKey('alice', 'note:new'))).value.content, 'continued');
 });
 
+test('restoration can normalize legacy drafts without losing an unresolved confirmation payload', () => {
+  const { draftProtection } = load();
+  const storage = memoryStorage();
+  const commit = [{ id: 'same-batch', amount_cents: 300, member_id: 'alice' }];
+  const saved = { messages: [{ status: 'pending', commit }], input: 'continue', legacy: true };
+  new FormDraftSession(storage, 'alice', 'assistant').save(saved, true);
+  const key = draftKey('alice', 'assistant');
+  const before = storage.getItem(key);
+  const session = new FormDraftSession(storage, 'alice', 'assistant');
+  const restored = session.restore(value => ({ messages: value.messages, input: value.input, image: null }));
+  assert.deepEqual(JSON.parse(JSON.stringify(restored.messages[0].commit)), commit);
+  assert.equal(draftProtection(session.getSnapshot(), restored, true).isPersisted, false);
+  session.save({ messages: [], input: '', image: null }, false);
+  assert.equal(storage.getItem(key), before);
+  session.save(restored, true);
+  assert.equal(draftProtection(session.getSnapshot(), restored, true).isPersisted, true);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value.messages[0].commit, commit);
+  session.save({ ...restored, input: 'new input' }, true);
+  assert.equal(JSON.parse(storage.getItem(key)).value.input, 'new input');
+});
+
 test('discarding the old draft allows current new input to be protected', () => {
   const storage = memoryStorage();
   new FormDraftSession(storage, 'alice', 'note:new').save({ content: 'old' }, true);
@@ -69,6 +90,53 @@ test('successful save clears the draft and suppresses effect rewriting the same 
   assert.equal(storage.getItem(draftKey('alice', 'note:new')), null);
   session.save({ content: 'a later edit' }, true);
   assert.equal(session.getSnapshot().status, 'saved');
+});
+
+test('clearing a conversation can immediately preserve only unresolved confirmations', () => {
+  const storage = memoryStorage();
+  const key = draftKey('alice', 'assistant');
+  const session = new FormDraftSession(storage, 'alice', 'assistant');
+  const old = { messages: [{ text: 'old chat' }], input: 'old input', confirmations: [] };
+  const commit = [{ id: 'original-row', amount_cents: 300, member_id: 'alice' }];
+  const replacement = { messages: [], input: '', confirmations: [{ batch_id: 'original-batch', drafts: commit }] };
+  session.save(old, true);
+  session.clear(old, replacement, true);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value, replacement);
+  // A stale render, including its non-dirty variation, cannot overwrite or
+  // remove the already-persisted reconciliation payload.
+  session.save(old, true);
+  session.save({ messages: [], input: '', confirmations: [] }, false);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value, replacement);
+  session.stop();
+  const reopened = new FormDraftSession(storage, 'alice', 'assistant');
+  assert.deepEqual(JSON.parse(JSON.stringify(reopened.restore())), replacement);
+  reopened.save(replacement, true);
+  reopened.save({ ...replacement, input: 'new conversation' }, true);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value.confirmations, replacement.confirmations);
+  assert.equal(JSON.parse(storage.getItem(key)).value.input, 'new conversation');
+});
+
+test('explicit clear repairs malformed storage without reviving stopped or revoked sessions', () => {
+  const storage = memoryStorage();
+  const key = draftKey('alice', 'assistant');
+  const otherKey = draftKey('bob', 'assistant');
+  storage.setItem(key, '{bad-json');
+  storage.setItem(otherKey, 'untouched');
+  const session = new FormDraftSession(storage, 'alice', 'assistant');
+  assert.equal(session.getSnapshot().status, 'error');
+  session.clear({ input: '' });
+  assert.equal(storage.getItem(key), null);
+  assert.equal(storage.getItem(otherKey), 'untouched');
+  assert.equal(session.getSnapshot().status, 'ready');
+  session.save({ input: 'new draft' }, true);
+  assert.equal(JSON.parse(storage.getItem(key)).value.input, 'new draft');
+  for (const stop of ['stop', 'revoke']) {
+    storage.setItem(key, '{bad-json');
+    const inactive = new FormDraftSession(storage, 'alice', 'assistant');
+    inactive[stop]();
+    inactive.clear({ input: '' }, { input: 'must not write' }, true);
+    assert.equal(storage.getItem(key), '{bad-json');
+  }
 });
 
 test('returning edited or restored content to the original state removes the draft', () => {
@@ -167,6 +235,268 @@ test('a failed newer write and an unresolved old draft both require leave confir
   assert.equal(draftProtection(session.getSnapshot(), { content: 'new' }, true).needsProtection, true);
   session.save({ content: 'old' }, true);
   assert.equal(draftProtection(session.getSnapshot(), { content: 'old' }, true).isPersisted, true);
+});
+
+function draftHookHarness(storage) {
+  const exports = {};
+  const slots = [];
+  let index = 0;
+  let pendingEffects = [];
+  const authRequests = [];
+  const events = {};
+  const browser = { localStorage: storage, addEventListener: (name, fn) => { events[name] = fn; }, removeEventListener() {} };
+  const drafts = load({ window: browser });
+  const source = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../hooks/use-form-draft.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const react = {
+    useRef(initial) {
+      const key = index++;
+      return slots[key] ?? (slots[key] = { current: initial });
+    },
+    useState(initial) {
+      const key = index++;
+      if (!slots[key]) slots[key] = { value: initial };
+      return [slots[key].value, value => { slots[key].value = value; }];
+    },
+    useSyncExternalStore(_subscribe, getSnapshot) { index++; return getSnapshot(); },
+    useEffect(callback, deps) {
+      const key = index++;
+      const previous = slots[key];
+      if (previous && deps.every((value, i) => Object.is(value, previous.deps[i]))) return;
+      pendingEffects.push(() => {
+        previous?.cleanup?.();
+        slots[key] = { deps, cleanup: callback() };
+      });
+    },
+  };
+  vm.runInNewContext(source, {
+    exports,
+    require: key => key === 'react' ? react : drafts,
+    window: browser,
+    AbortController,
+    fetch(_url, options) {
+      return new Promise(resolve => { authRequests.push({ signal: options.signal, resolve }); });
+    },
+  });
+  return {
+    render(options) {
+      index = 0;
+      pendingEffects = [];
+      const result = exports.useFormDraft(options);
+      pendingEffects.forEach(effect => effect());
+      return result;
+    },
+    async identify(userId = 'alice', requestIndex = authRequests.length - 1) {
+      authRequests[requestIndex].resolve({ ok: true, json: async () => ({ user: { id: userId } }) });
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    unmount() { slots.forEach(slot => slot?.cleanup?.()); },
+    logout: drafts.clearDraftsOnLogout,
+    authRequests,
+  };
+}
+
+test('auto restore waits for a verified account, runs once, and protects the initial empty render', async () => {
+  const storage = memoryStorage();
+  const saved = { messages: [{ status: 'pending', commit: [{ id: 'batch', amount_cents: 300 }] }], input: 'saved text' };
+  new FormDraftSession(storage, 'alice', 'assistant').save(saved, true);
+  new FormDraftSession(storage, 'bob', 'assistant').save({ messages: [], input: 'other account' }, true);
+  const key = draftKey('alice', 'assistant');
+  const before = storage.getItem(key);
+  const harness = draftHookHarness(storage);
+  const restored = [];
+  const options = { scope: 'assistant', value: { messages: [], input: '' }, dirty: false, autoRestore: true, onRestore: value => { restored.push(value); } };
+  assert.equal(harness.render(options).status, 'checking');
+  assert.equal(restored.length, 0);
+  assert.equal(storage.getItem(key), before);
+  await harness.identify();
+  assert.equal(restored.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored[0])), saved);
+  assert.equal(harness.render(options).hasDraft, false);
+  assert.equal(storage.getItem(key), before);
+  const resumed = { ...options, value: restored[0], dirty: true };
+  harness.render(resumed);
+  harness.render({ ...resumed, value: { ...saved, input: 'continued' } });
+  assert.equal(JSON.parse(storage.getItem(key)).value.input, 'continued');
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value.messages[0].commit, saved.messages[0].commit);
+  assert.equal(restored.length, 1);
+  assert.equal(JSON.parse(storage.getItem(draftKey('bob', 'assistant'))).value.input, 'other account');
+  harness.unmount();
+});
+
+test('manual restoration remains the default for other forms', async () => {
+  const storage = memoryStorage();
+  new FormDraftSession(storage, 'alice', 'note:new').save({ content: 'saved' }, true);
+  const harness = draftHookHarness(storage);
+  const restored = [];
+  const options = { scope: 'note:new', value: { content: '' }, dirty: false, onRestore: value => { restored.push(value); } };
+  harness.render(options);
+  await harness.identify();
+  const draft = harness.render(options);
+  assert.equal(draft.hasDraft, true);
+  assert.equal(restored.length, 0);
+  draft.restore();
+  assert.equal(restored[0].content, 'saved');
+  harness.unmount();
+});
+
+test('auto restore accepts a normalized callback result and can save subsequent edits', async () => {
+  const storage = memoryStorage();
+  new FormDraftSession(storage, 'alice', 'assistant').save({ messages: [], input: 'image caption' }, true);
+  const harness = draftHookHarness(storage);
+  let restored;
+  const options = { scope: 'assistant', value: { messages: [], input: '', image: null }, dirty: false, autoRestore: true, onRestore: value => {
+    restored = { ...value, image: null };
+    return restored;
+  } };
+  harness.render(options);
+  await harness.identify();
+  harness.render(options);
+  harness.render({ ...options, value: restored, dirty: true });
+  harness.render({ ...options, value: { ...restored, input: 'continued caption' }, dirty: true });
+  assert.deepEqual(JSON.parse(storage.getItem(draftKey('alice', 'assistant'))).value, { messages: [], input: 'continued caption', image: null });
+  harness.unmount();
+});
+
+test('clear during identity checking suppresses auto restore and only clears the verified scope', async () => {
+  const storage = memoryStorage();
+  new FormDraftSession(storage, 'alice', 'assistant').save({ input: 'old chat' }, true);
+  new FormDraftSession(storage, 'alice', 'note:new').save({ input: 'note' }, true);
+  new FormDraftSession(storage, 'bob', 'assistant').save({ input: 'other account' }, true);
+  const harness = draftHookHarness(storage);
+  let restores = 0;
+  const options = { scope: 'assistant', value: { input: '' }, dirty: false, autoRestore: true, onRestore: () => { restores++; } };
+  harness.render(options).clear();
+  await harness.identify();
+  assert.equal(restores, 0);
+  assert.equal(storage.getItem(draftKey('alice', 'assistant')), null);
+  assert.equal(JSON.parse(storage.getItem(draftKey('alice', 'note:new'))).value.input, 'note');
+  assert.equal(JSON.parse(storage.getItem(draftKey('bob', 'assistant'))).value.input, 'other account');
+  assert.equal(harness.render(options).status, 'ready');
+  harness.unmount();
+});
+
+test('clear requested before an immediate unmount still finishes after identity verification', async () => {
+  for (const replacement of [undefined, { input: '', confirmations: [{ batch_id: 'same-batch', drafts: [{ amount_cents: 300 }] }] }]) {
+    const storage = memoryStorage();
+    new FormDraftSession(storage, 'alice', 'assistant').save({ input: 'old chat' }, true);
+    new FormDraftSession(storage, 'bob', 'assistant').save({ input: 'other account' }, true);
+    const harness = draftHookHarness(storage);
+    let restores = 0;
+    const options = { scope: 'assistant', value: { input: '' }, dirty: false, autoRestore: true, onRestore: () => { restores++; } };
+    const draft = harness.render(options);
+    if (replacement) draft.clear(replacement, true);
+    else draft.clear();
+    harness.unmount();
+    assert.equal(harness.authRequests[0].signal.aborted, false);
+    await harness.identify();
+    assert.equal(restores, 0);
+    const raw = storage.getItem(draftKey('alice', 'assistant'));
+    if (replacement) assert.deepEqual(JSON.parse(raw).value, replacement);
+    else assert.equal(raw, null);
+    assert.equal(JSON.parse(storage.getItem(draftKey('bob', 'assistant'))).value.input, 'other account');
+  }
+});
+
+test('logout invalidates a detached clear before its identity response can write recovery data', async () => {
+  const storage = memoryStorage();
+  new FormDraftSession(storage, 'alice', 'assistant').save({ input: 'old chat' }, true);
+  const harness = draftHookHarness(storage);
+  let restores = 0;
+  harness.render({ scope: 'assistant', value: { input: '' }, dirty: false, autoRestore: true, onRestore: () => { restores++; } })
+    .clear({ input: '', confirmations: [{ batch_id: 'old-batch' }] }, true);
+  harness.unmount();
+  harness.logout();
+  await harness.identify();
+  assert.equal(restores, 0);
+  assert.equal(storage.getItem(draftKey('alice', 'assistant')), null);
+});
+
+test('clear with a replacement persists immediately and ignores the previous hook render', async () => {
+  const storage = memoryStorage();
+  const harness = draftHookHarness(storage);
+  const old = { input: 'old chat', confirmations: [] };
+  const replacement = { input: '', confirmations: [{ batch_id: 'same-batch', drafts: [{ amount_cents: 300 }] }] };
+  const options = { scope: 'assistant', value: old, dirty: true, autoRestore: true, onRestore() {} };
+  const beforeIdentity = harness.render(options);
+  await harness.identify();
+  // This closure precedes publication of the initialized session to React state.
+  // The bridge still clears the verified session synchronously.
+  beforeIdentity.clear(replacement, true);
+  const key = draftKey('alice', 'assistant');
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value, replacement);
+  harness.render(options);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value, replacement);
+  harness.render({ ...options, value: replacement });
+  harness.render({ ...options, value: { ...replacement, input: 'new chat' } });
+  assert.equal(JSON.parse(storage.getItem(key)).value.input, 'new chat');
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value.confirmations, replacement.confirmations);
+  harness.unmount();
+});
+
+test('a checking clear updater preserves stored confirmations while restoring only the cleared snapshot', async () => {
+  for (const detached of [false, true]) {
+    const storage = memoryStorage();
+    const commit = [{ id: 'same-row', amount_cents: 300, member_id: 'alice' }];
+    const old = { messages: [{ id: 'same-batch', text: 'private old chat', status: 'pending', commit }], input: 'old text', image: { name: 'old image' } };
+    new FormDraftSession(storage, 'alice', 'assistant').save(old, true);
+    new FormDraftSession(storage, 'bob', 'assistant').save({ input: 'other account' }, true);
+    const harness = draftHookHarness(storage);
+    const restored = [];
+    const empty = { messages: [], input: '', image: null, confirmations: [] };
+    const options = { scope: 'assistant', value: empty, dirty: false, autoRestore: true, onRestore: value => { restored.push(value); return value; } };
+    harness.render(options).clear(stored => ({
+      messages: [], input: '', image: null,
+      confirmations: stored?.messages?.filter(message => message.commit).map(message => ({ batch_id: message.id, drafts: message.commit })) ?? [],
+    }), next => next.confirmations.length > 0);
+    if (detached) harness.unmount();
+    await harness.identify();
+    const expected = { messages: [], input: '', image: null, confirmations: [{ batch_id: 'same-batch', drafts: commit }] };
+    const key = draftKey('alice', 'assistant');
+    assert.deepEqual(JSON.parse(storage.getItem(key)).value, expected);
+    assert.equal(restored.length, detached ? 0 : 1);
+    if (!detached) {
+      assert.deepEqual(JSON.parse(JSON.stringify(restored[0])), expected);
+      harness.render(options);
+      assert.deepEqual(JSON.parse(storage.getItem(key)).value, expected);
+      harness.render({ ...options, value: restored[0], dirty: true });
+      harness.unmount();
+    }
+    const reopened = new FormDraftSession(storage, 'alice', 'assistant');
+    assert.deepEqual(JSON.parse(JSON.stringify(reopened.restore())), expected);
+    assert.equal(JSON.parse(storage.getItem(draftKey('bob', 'assistant'))).value.input, 'other account');
+  }
+});
+
+test('a clear updater does not retain an empty draft after checking or invoke obsolete restoration', async () => {
+  const storage = memoryStorage();
+  new FormDraftSession(storage, 'alice', 'assistant').save({ messages: [{ text: 'old chat' }], input: 'old text' }, true);
+  const harness = draftHookHarness(storage);
+  const restored = [];
+  const empty = { messages: [], input: '', confirmations: [] };
+  const options = { scope: 'assistant', value: empty, dirty: false, autoRestore: true, onRestore: value => { restored.push(value); return value; } };
+  harness.render(options).clear(() => empty, next => next.confirmations.length > 0);
+  await harness.identify();
+  assert.equal(restored.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored[0])), empty);
+  assert.equal(storage.getItem(draftKey('alice', 'assistant')), null);
+  harness.render(options);
+  assert.equal(storage.getItem(draftKey('alice', 'assistant')), null);
+  harness.unmount();
+});
+
+test('logout and unmount block late identity responses from restoring local drafts', async () => {
+  for (const stop of ['logout', 'unmount']) {
+    const storage = memoryStorage();
+    new FormDraftSession(storage, 'alice', 'assistant').save({ input: 'private text' }, true);
+    const harness = draftHookHarness(storage);
+    let restored = false;
+    harness.render({ scope: 'assistant', value: { input: '' }, dirty: false, autoRestore: true, onRestore: () => { restored = true; } });
+    harness[stop]();
+    assert.equal(harness.authRequests[0].signal.aborted, true);
+    await harness.identify();
+    assert.equal(restored, false);
+    harness.unmount();
+  }
 });
 
 function guardHarness(confirm) {

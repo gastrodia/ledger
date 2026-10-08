@@ -13,7 +13,7 @@
 - **数据库**：PostgreSQL（Neon Serverless 驱动 `@neondatabase/serverless`）
 - **鉴权**：JWT（`jose`）+ HttpOnly Cookie（`session`）
 - **附件**：Vercel Blob（`@vercel/blob` / `@vercel/blob/client`）
-- **AI（可选）**：Groq（`groq-sdk`，流式返回）
+- **AI（可选）**：Vercel AI SDK 7 + OpenAI Compatible provider，直连阿里云百炼；Zod 统一输出结构，统计总结流式返回
 - **PWA**：`public/sw.js`、`public/manifest.webmanifest`，生产环境自动注册
 
 功能概览
@@ -35,7 +35,7 @@
 
 步骤 1：安装依赖
 
-本仓库带有 `bun.lock`，推荐使用 Bun；也可以用 npm/pnpm 安装依赖（但 `db:init` 脚本默认使用 bun）。
+运行环境需要 Node.js 22 或更高版本（AI SDK 7 的要求）。本仓库带有 `bun.lock` 和 `pnpm-lock.yaml`；可使用 Bun 或 pnpm 安装依赖，`db:init` 脚本默认使用 bun。
 
 ```bash
 bun install
@@ -53,8 +53,16 @@ DATABASE_URL="postgres://USER:PASSWORD@HOST:PORT/DB?sslmode=require"
 # 使用足够长的随机值，例如 openssl rand -base64 32
 JWT_SECRET="replace-me-with-a-long-random-secret"
 
-# 可选：启用统计页“AI总结”（Groq）
-GROQ_API_KEY="..."
+# 可选：启用统计页“AI总结”（阿里云百炼）
+DASHSCOPE_API_KEY="..."
+# 可选：覆盖默认模型
+BAILIAN_SUMMARY_MODEL="qwen3.8-max"
+BAILIAN_ASSISTANT_MODEL="qwen3.7-plus"
+BAILIAN_ASR_MODEL="qwen3-asr-flash"
+# 默认北京旧域名仍可用；设置业务空间 ID 可使用专属域名
+# DASHSCOPE_WORKSPACE_ID="..."
+# 其他地域请设置与 Key 匹配的 OpenAI 兼容接口地址
+# DASHSCOPE_BASE_URL="https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
 
 # 可选：启用附件上传（Vercel Blob）
 # 本地/非 Vercel 环境通常需要手动配置
@@ -126,7 +134,7 @@ API 概览（节选）
 
 - **统计**
   - `GET /api/stats?month=YYYY-MM`：月度统计（分类/成员聚合 + 总计）
-  - `GET /api/stats/ai-summary?month=YYYY-MM`：AI 月度总结（**流式**文本返回，需要 `GROQ_API_KEY`）
+  - `GET /api/stats/ai-summary?month=YYYY-MM`：AI 月度总结（**流式**文本返回，需要 `DASHSCOPE_API_KEY`）
 
 - **便利贴**
   - `GET/POST /api/notes`，`PATCH/DELETE /api/notes/:id`
@@ -161,8 +169,10 @@ API 概览（节选）
 AI 总结说明
 ---
 
-- **接口**：`GET /api/stats/ai-summary?month=YYYY-MM`
-- **依赖**：需要设置 `GROQ_API_KEY`
+- **接口**：`GET /api/stats/ai-summary?month=YYYY-MM` 或 `?year=YYYY`，可附加 `asOf=YYYY-MM-DD` 与统计页面保持相同日期口径
+- **依赖**：需要设置 `DASHSCOPE_API_KEY`；默认模型为 `qwen3.8-max`，可用 `BAILIAN_SUMMARY_MODEL` 覆盖。采用百炼普通 API 按量计费，Key 与地域需匹配。
+- **分析口径**：分类占比、笔均金额与结余比例由服务端计算；未结束期间按已过天数对比上期，单独标明未来日期记录；年度提供逐月趋势，月度提供逐日趋势。无记录时不调用模型。
+- **错误处理**：限流、模型权限、连接超时分别返回可读提示；前端解析 JSON 错误，避免把错误对象当总结显示。
 - **返回**：`text/plain; charset=utf-8`，并以 **ReadableStream** 方式逐段返回（前端边读边渲染）
 
 数据库结构（概览）
@@ -197,7 +207,7 @@ middleware.ts       路由保护与重定向
 部署提示（Vercel 推荐）
 ---
 
-- 在部署平台配置环境变量：`DATABASE_URL`、`JWT_SECRET`，如需附件/AI 则加上 `BLOB_READ_WRITE_TOKEN`、`GROQ_API_KEY`
+- 在部署平台配置环境变量：`DATABASE_URL`、`JWT_SECRET`，如需附件/AI 则加上 `BLOB_READ_WRITE_TOKEN`、`DASHSCOPE_API_KEY`
 - 生产环境会注册 Service Worker（见 `components/pwa/register-sw.tsx`）
 
 Vercel + Neon（Postgres）部署（重要）
@@ -267,3 +277,26 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 - 分类管理中拖动卡片左上角手柄，可在收入、支出各自分组内调整顺序；松开后自动保存，记账分类选择器沿用相同顺序。支持触屏，键盘可用空格键开始/确认、方向键移动、Escape 取消。
 - 保存期间暂时禁用排序和编辑；失败恢复原顺序，列表发生变化时重新加载。
 - `sort_order` 为可空整数，旧分类在首次排序前保留创建时间倒序；已排序后新增分类放在该组末尾。首次读取会尝试增量添加该列；无 DDL 权限的部署请先执行 `scripts/categories-sort.sql`。
+
+
+对话记账与语音
+
+- 入口：侧栏「对话记账」或手机底栏「对话」，路径 `/dashboard/assistant`。
+- 文字或账单截图会生成最多20笔可编辑草稿，分类和家庭成员必填；金额、日期、收支类型和备注可修改。输入框可直接粘贴 JPG、PNG 或 WebP 图片，先显示预览，点击发送后才识别。发出的图片显示在聊天气泡内，可点击查看，并随本机对话草稿恢复。未入账草稿可直接删除单笔或整组，保存结果待核对时保持原批次锁定。支付方式保存在备注中，不代表支付账户余额。
+- 未指定成员时，助手按组询问支出人或收入所属人，显示所有成员按钮；点击一次即可自动回复并补全本组所有待选成员的草稿，确认前仍可逐笔修改。初次补充时保留明确指定的成员，后续新账不会沿用上一次选择。可发送“把这组全改成某成员”修改最近一组尚未入账草稿的人员，也可指定某一笔；只说“修改支出人”且目标明确时会展示人员按钮，选中后自动回复并原位更新；选择前保持原人员，可取消，待选择请求随对话草稿恢复。卡片原位更新，金额和日期保持不变，仍需用户确认入账。已保存或保存结果待核对的草稿不能通过聊天修改。历史聊天只用于理解上下文，不重新记账。转账、借贷和不明确的退款先澄清。
+- 语音最多60秒，通过浏览器 MediaRecorder 录制并转为16kHz单声道WAV；千问 ASR 返回文字后，用户可修改再发送。浏览器需要 HTTPS（localhost 可用）和麦克风权限；不支持录音时可选音频文件。
+- 截图在浏览器缩小到最长边1920px，仅发送本次选择的图片；语音不会存到附件服务。必要的分类、成员或查询结果会发送给百炼。
+- 对话、未发送文字和待发送图片保存在当前用户的本机草稿中；进入页面自动恢复，退出登录会清理。清空对话随时可用，会移除聊天、未提交草稿和待发送内容，停止识别、录音与转写；已发出的入账请求保留独立的原批次核对入口，结果返回不会恢复旧聊天。保存结果未确认时锁定原批次，重试不会重复记账。
+- `POST /api/assistant` 识别意图和账单，查询时由参数化 SQL 计算真实汇总后生成回答；模型不能执行SQL或写数据库。
+- `POST /api/assistant/transcribe` 语音转文字；`POST /api/assistant/confirm` 原子批量确认，按用户和批次ID幂等，拒绝不同内容复用批次。
+- `assistant_batches` 表在首次确认时按需创建；只读/无DDL部署请先执行 `scripts/init-db.sql` 中该表的建表语句。
+- 使用普通百炼 API Key。Coding Plan 等有专门用途的订阅不能直接当作本产品的通用 API 配额。
+
+### AI 调用与编排
+
+- `lib/bailian.ts` 使用 AI SDK 的 `generateText`、`Output.object` 和 `streamText`，经 `@ai-sdk/openai-compatible` 直接调用百炼。继续使用现有 `DASHSCOPE_*` 与 `BAILIAN_*_MODEL` 配置，无需 AI Gateway 凭证。
+- `lib/assistant-output.ts` 用 Zod 定义唯一的输出结构，派生提供给模型的 JSON Schema；SDK 负责解析和结构校验，`validatePlan` 继续校验当前账号的分类、成员、金额、日期和修改目标。
+- 对话保留 `record/query/update/chat` 四种动作。查询仍由固定参数化 SQL 读取真实数据，再交给总结模型；选人、删除和确认入账不调用模型。草稿与确认接口的行为不变。
+- 图片与语音使用 SDK 的多模态消息。百炼兼容钩子只处理音频 data URL、专用参数以及流结束检查；统计页对外仍返回原有纯文本流，客户端无需迁移消息协议。
+- 模型请求超时90秒，支持调用取消。明确设置 `maxRetries: 0`；错误由统一映射返回，结构化输出错误为422，截断或中断不会当作完整结果。
+- 服务端仅记录模型、调用类型、耗时和 token 用量；不记录提示词、图片、录音、模型答案或 API Key。

@@ -2,6 +2,7 @@ export const dashboardNavigationGroups = [
   {
     label: "日常账本",
     items: [
+      { href: "/dashboard/assistant", label: "AI 记账", icon: "assistant" },
       { href: "/dashboard", label: "交易记录", icon: "transactions" },
       { href: "/dashboard/stats", label: "统计分析", icon: "stats" },
       { href: "/dashboard/loans", label: "欠款/借款", icon: "loans" },
@@ -28,8 +29,9 @@ export function isDashboardRouteActive(pathname: string, href: string) {
   return pathname === href || (href !== "/dashboard" && pathname.startsWith(`${href}/`));
 }
 
-export function getMobileNavigationSection(pathname: string): "transactions" | "stats" | "more" {
+export function getMobileNavigationSection(pathname: string): "transactions" | "stats" | "assistant" | "more" {
   if (isDashboardRouteActive(pathname, "/dashboard")) return "transactions";
   if (isDashboardRouteActive(pathname, "/dashboard/stats")) return "stats";
+  if (isDashboardRouteActive(pathname, "/dashboard/assistant")) return "assistant";
   return "more";
 }

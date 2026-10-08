@@ -25,6 +25,7 @@ import {
 import { formatCurrency } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { readSummaryError } from "@/lib/stats-ai-summary";
 import { describeAmountChange, getStatsPeriod, localCalendarDate, statsDetailHref, type StatsPeriod } from "@/lib/stats-period";
 
 interface CategoryStat {
@@ -281,8 +282,8 @@ export default function StatsPage() {
 
       const query =
         viewMode === "year"
-          ? `year=${encodeURIComponent(selectedYear)}`
-          : `month=${encodeURIComponent(selectedMonth)}`;
+          ? `year=${encodeURIComponent(selectedYear)}&asOf=${asOfDate}`
+          : `month=${encodeURIComponent(selectedMonth)}&asOf=${asOfDate}`;
 
       const resp = await fetch(`/api/stats/ai-summary?${query}`, {
         method: "GET",
@@ -295,8 +296,7 @@ export default function StatsPage() {
           router.push("/login");
           return;
         }
-        const text = await resp.text().catch(() => "");
-        throw new Error(text || "AI 总结失败");
+        throw new Error(await readSummaryError(resp));
       }
 
       if (!resp.body) {
@@ -310,7 +310,11 @@ export default function StatsPage() {
       while (true) {
         const { value, done } = await reader.read();
         if (!isCurrent()) return;
-        if (done) break;
+        if (done) {
+          acc += decoder.decode();
+          if (acc) setAiSummary(acc);
+          break;
+        }
         acc += decoder.decode(value, { stream: true });
         setAiSummary(acc);
       }

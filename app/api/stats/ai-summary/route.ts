@@ -1,118 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import Groq from "groq-sdk";
+import { getStatsPeriod, localCalendarDate } from "@/lib/stats-period";
+import { buildSummaryPrompt, safeNumber, SUMMARY_SYSTEM_PROMPT, summaryComparisonEnd } from "@/lib/stats-ai-summary";
+import { bailianConfig, bailianStream, bailianFailure, BAILIAN_SUMMARY_MODEL } from "@/lib/bailian";
 
-function isValidMonth(month: string) {
-  return /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
-}
-
-function isValidYear(year: string) {
-  return /^\d{4}$/.test(year);
-}
-
-function getMonthRangeExclusive(month: string) {
-  const [y, m] = month.split("-");
-  const year = Number(y);
-  const monthNum = Number(m); // 1-12
-  const start = `${y}-${m}-01`;
-  const next = new Date(year, monthNum, 1);
-  const nextY = next.getFullYear();
-  const nextM = String(next.getMonth() + 1).padStart(2, "0");
-  const endExclusive = `${nextY}-${nextM}-01`;
-  return { start, endExclusive };
-}
-
-function getYearRangeExclusive(yearStr: string) {
-  const year = Number(yearStr);
-  const start = `${yearStr}-01-01`;
-  const endExclusive = `${year + 1}-01-01`;
-  return { start, endExclusive };
-}
-
-function formatYuan(amount: number) {
-  const n = Number.isFinite(amount) ? amount : 0;
-  return `¥${n.toFixed(2)}`;
-}
-
-function safeNumber(v: unknown): number {
-  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-  return Number.isFinite(n) ? n : 0;
-}
-
-function buildPrompt(params: {
-  period: string;
-  totalIncome: number;
-  totalExpense: number;
-  balance: number;
-  topExpenseCategories: Array<{ name: string; total: number; count: number }>;
-  topIncomeCategories: Array<{ name: string; total: number; count: number }>;
-  topExpenseMembers: Array<{ name: string; total: number; count: number }>;
-  topIncomeMembers: Array<{ name: string; total: number; count: number }>;
-}) {
-  const {
-    period,
-    totalIncome,
-    totalExpense,
-    balance,
-    topExpenseCategories,
-    topIncomeCategories,
-    topExpenseMembers,
-    topIncomeMembers,
-  } = params;
-
-  const renderList = (rows: Array<{ name: string; total: number; count: number }>) =>
-    rows.length
-      ? rows
-          .map(
-            (r, i) =>
-              `${i + 1}. ${r.name || "未分类"}：${formatYuan(r.total)}（${r.count} 笔）`
-          )
-          .join("\n")
-      : "（无）";
-
-  return [
-    "你是一个记账助手，请用简体中文对指定期间的收支做“可读、可执行”的总结。",
-    "",
-    "要求：",
-    "- 输出为纯文本，尽量使用小标题 + 要点列表。",
-    "- 不要编造不存在的数据；只基于我提供的统计数据。",
-    "- 给出 2-4 条可执行建议（控制支出、提升结余、异常波动提醒等）。",
-    "",
-    `期间：${period}`,
-    `总收入：${formatYuan(totalIncome)}`,
-    `总支出：${formatYuan(totalExpense)}`,
-    `结余：${formatYuan(balance)}`,
-    "",
-    "支出 Top 分类：",
-    renderList(topExpenseCategories),
-    "",
-    "收入 Top 分类：",
-    renderList(topIncomeCategories),
-    "",
-    "支出 Top 成员：",
-    renderList(topExpenseMembers),
-    "",
-    "收入 Top 成员：",
-    renderList(topIncomeMembers),
-    "",
-  ].join("\n");
-}
+export const maxDuration = 120;
 
 export async function GET(request: NextRequest) {
+  let cleanupUpstream: (() => void) | undefined;
   try {
     const session = await getSession();
     if (!session) {
       return NextResponse.json({ error: "未登录" }, { status: 401 });
     }
 
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "服务端未配置 GROQ_API_KEY" },
-        { status: 500 }
-      );
-    }
+    bailianConfig();
 
     const searchParams = request.nextUrl.searchParams;
     const month = searchParams.get("month"); // YYYY-MM
@@ -124,38 +27,20 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    let startDate: string;
-    let endExclusive: string;
-    let periodLabel: string;
-    if (month) {
-      if (!isValidMonth(month)) {
-        return NextResponse.json(
-          { error: "月份格式错误，应为 YYYY-MM" },
-          { status: 400 }
-        );
-      }
-      const r = getMonthRangeExclusive(month);
-      startDate = r.start;
-      endExclusive = r.endExclusive;
-      periodLabel = month;
-    } else {
-      if (!isValidYear(year as string)) {
-        return NextResponse.json(
-          { error: "年份格式错误，应为 YYYY" },
-          { status: 400 }
-        );
-      }
-      const r = getYearRangeExclusive(year as string);
-      startDate = r.start;
-      endExclusive = r.endExclusive;
-      periodLabel = `${year} 年`;
+    const period = getStatsPeriod(month ? "month" : "year", (month || year) as string,
+      searchParams.get("asOf") || localCalendarDate());
+    if (!period) {
+      return NextResponse.json({ error: "月份、年份或统计日期格式错误" }, { status: 400 });
     }
+    const { startDate, endExclusive } = period;
+    const comparisonEnd = summaryComparisonEnd(period);
+    const periodLabel = month || `${year} 年`;
 
     // 取 Top 数据（减少 prompt 体积）
-    const [categoryIncomeStats, categoryExpenseStats, memberIncomeStats, memberExpenseStats, summaryResult] =
+    const [categoryIncomeStats, categoryExpenseStats, memberIncomeStats, memberExpenseStats, summaryResult, previousResult, trendResult, expenseChanges] =
       await Promise.all([
         sql`
-          SELECT 
+          SELECT
             COALESCE(c.name, '未分类') as name,
             SUM(t.amount) as total,
             COUNT(t.id) as count
@@ -170,7 +55,7 @@ export async function GET(request: NextRequest) {
           LIMIT 5
         `,
         sql`
-          SELECT 
+          SELECT
             COALESCE(c.name, '未分类') as name,
             SUM(t.amount) as total,
             COUNT(t.id) as count
@@ -185,7 +70,7 @@ export async function GET(request: NextRequest) {
           LIMIT 5
         `,
         sql`
-          SELECT 
+          SELECT
             COALESCE(m.name, '未分配') as name,
             SUM(t.amount) as total,
             COUNT(t.id) as count
@@ -200,7 +85,7 @@ export async function GET(request: NextRequest) {
           LIMIT 5
         `,
         sql`
-          SELECT 
+          SELECT
             COALESCE(m.name, '未分配') as name,
             SUM(t.amount) as total,
             COUNT(t.id) as count
@@ -215,112 +100,138 @@ export async function GET(request: NextRequest) {
           LIMIT 5
         `,
         sql`
-          SELECT 
+          SELECT
             COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as "totalIncome",
-            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as "totalExpense"
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as "totalExpense",
+            COUNT(id) as count,
+            COALESCE(SUM(CASE WHEN type = 'income' AND transaction_date < ${period.dailyEndExclusive} THEN amount ELSE 0 END), 0) as "elapsedIncome",
+            COALESCE(SUM(CASE WHEN type = 'expense' AND transaction_date < ${period.dailyEndExclusive} THEN amount ELSE 0 END), 0) as "elapsedExpense",
+            COUNT(id) FILTER (WHERE transaction_date < ${period.dailyEndExclusive}) as "elapsedCount"
           FROM transactions
           WHERE user_id = ${session.userId}
             AND transaction_date >= ${startDate}
             AND transaction_date < ${endExclusive}
         `,
+        sql`
+          SELECT
+            COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as "totalIncome",
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as "totalExpense",
+            COUNT(id) as count
+          FROM transactions
+          WHERE user_id = ${session.userId}
+            AND transaction_date >= ${period.previousStartDate}
+            AND transaction_date < ${comparisonEnd}
+        `,
+        sql`
+          SELECT
+            TO_CHAR(transaction_date, ${month ? "YYYY-MM-DD" : "YYYY-MM"}) as date,
+            COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0) as income,
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) as expense
+          FROM transactions
+          WHERE user_id = ${session.userId}
+            AND transaction_date >= ${startDate}
+            AND transaction_date < ${endExclusive}
+          GROUP BY 1
+          ORDER BY 1
+        `,
+        sql`
+          SELECT
+            COALESCE(c.name, '未分类') as name,
+            COALESCE(SUM(CASE WHEN t.transaction_date >= ${startDate} AND t.transaction_date < ${period.dailyEndExclusive} THEN t.amount ELSE 0 END), 0) as "currentTotal",
+            COALESCE(SUM(CASE WHEN t.transaction_date < ${comparisonEnd} THEN t.amount ELSE 0 END), 0) as "previousTotal",
+            COUNT(t.id) FILTER (WHERE t.transaction_date < ${comparisonEnd}) as "previousCount"
+          FROM transactions t
+          LEFT JOIN categories c ON t.category_id = c.id
+          WHERE t.user_id = ${session.userId}
+            AND t.type = 'expense'
+            AND t.transaction_date >= ${period.previousStartDate}
+            AND t.transaction_date < ${endExclusive}
+          GROUP BY COALESCE(c.name, '未分类')
+          ORDER BY ABS(
+            COALESCE(SUM(CASE WHEN t.transaction_date >= ${startDate} AND t.transaction_date < ${period.dailyEndExclusive} THEN t.amount ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN t.transaction_date < ${comparisonEnd} THEN t.amount ELSE 0 END), 0)
+          ) DESC
+          LIMIT 5
+        `,
       ]);
 
-    const summary = (summaryResult?.[0] || { totalIncome: 0, totalExpense: 0 }) as Record<
-      string,
-      unknown
-    >;
-    const totalIncome = safeNumber(summary.totalIncome);
-    const totalExpense = safeNumber(summary.totalExpense);
-    const balance = totalIncome - totalExpense;
-
-    const prompt = buildPrompt({
-      period: periodLabel,
-      totalIncome,
-      totalExpense,
-      balance,
-      topExpenseCategories: (categoryExpenseStats || []).map((r: unknown) => {
-        const row = (r || {}) as Record<string, unknown>;
-        return {
-          name: String(row.name || "未分类"),
-          total: safeNumber(row.total),
-          count: safeNumber(row.count),
-        };
-      }),
-      topIncomeCategories: (categoryIncomeStats || []).map((r: unknown) => {
-        const row = (r || {}) as Record<string, unknown>;
-        return {
-          name: String(row.name || "未分类"),
-          total: safeNumber(row.total),
-          count: safeNumber(row.count),
-        };
-      }),
-      topExpenseMembers: (memberExpenseStats || []).map((r: unknown) => {
-        const row = (r || {}) as Record<string, unknown>;
-        return {
-          name: String(row.name || "未分配"),
-          total: safeNumber(row.total),
-          count: safeNumber(row.count),
-        };
-      }),
-      topIncomeMembers: (memberIncomeStats || []).map((r: unknown) => {
-        const row = (r || {}) as Record<string, unknown>;
-        return {
-          name: String(row.name || "未分配"),
-          total: safeNumber(row.total),
-          count: safeNumber(row.count),
-        };
-      }),
+    const summary = summaryResult[0] || {};
+    if (safeNumber(summary.count) === 0) {
+      return new Response(`所选期间（${periodLabel}）还没有收支记录，暂时无法生成分析。记录收支后再试。`, {
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+      });
+    }
+    const previous = previousResult[0] || {};
+    const rankedRows = (rows: Array<Record<string, unknown>>, fallback: string) => rows.map(row => ({
+      name: String(row.name || fallback), total: safeNumber(row.total), count: safeNumber(row.count),
+    }));
+    const prompt = buildSummaryPrompt({
+      label: periodLabel,
+      period,
+      summary: { totalIncome: safeNumber(summary.totalIncome), totalExpense: safeNumber(summary.totalExpense), count: safeNumber(summary.count) },
+      elapsed: { totalIncome: safeNumber(summary.elapsedIncome), totalExpense: safeNumber(summary.elapsedExpense), count: safeNumber(summary.elapsedCount) },
+      previous: { totalIncome: safeNumber(previous.totalIncome), totalExpense: safeNumber(previous.totalExpense), count: safeNumber(previous.count) },
+      expenseCategories: rankedRows(categoryExpenseStats, "未分类"),
+      incomeCategories: rankedRows(categoryIncomeStats, "未分类"),
+      expenseMembers: rankedRows(memberExpenseStats, "未分配"),
+      incomeMembers: rankedRows(memberIncomeStats, "未分配"),
+      trend: trendResult.map(row => ({ date: String(row.date), income: safeNumber(row.income), expense: safeNumber(row.expense) })),
+      expenseChanges: expenseChanges.map(row => ({
+        name: String(row.name || "未分类"), currentTotal: safeNumber(row.currentTotal),
+        previousTotal: safeNumber(row.previousTotal), previousCount: safeNumber(row.previousCount),
+      })),
     });
 
     const upstreamController = new AbortController();
     const abortUpstream = () => upstreamController.abort();
     if (request.signal.aborted) abortUpstream();
-    request.signal.addEventListener("abort", abortUpstream);
+    request.signal.addEventListener("abort", abortUpstream, { once: true });
+    cleanupUpstream = () => request.signal.removeEventListener("abort", abortUpstream);
 
-    const groq = new Groq({ apiKey });
-
-    const result = await groq.chat.completions.create(
-      {
-        model: "llama-3.1-8b-instant",
-        temperature: 0.2,
-        max_tokens: 1024,
-        stream: true,
-        messages: [
-          {
-            role: "system",
-            content:
-              "你是一个记账助手，请用简体中文输出。请用 Markdown（标题/列表/加粗）组织内容，以便前端渲染成正常页面；不要输出代码块；不要编造数据。",
-          },
-          { role: "user", content: prompt },
-        ],
-      },
-      { signal: upstreamController.signal }
-    );
+    const result = await bailianStream({
+      model: process.env.BAILIAN_SUMMARY_MODEL?.trim() || BAILIAN_SUMMARY_MODEL,
+      reasoningEffort: "low",
+      maxOutputTokens: 8192,
+      messages: [
+        { role: "system", content: SUMMARY_SYSTEM_PROMPT },
+        { role: "user", content: prompt },
+      ],
+    }, upstreamController.signal);
 
     const encoder = new TextEncoder();
-
+    let cancelled = false;
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
+        let hasText = false;
+        let truncated = false;
         try {
           for await (const chunk of result) {
-            const delta = chunk.choices?.[0]?.delta?.content ?? "";
-            if (delta) controller.enqueue(encoder.encode(delta));
+            if (cancelled || request.signal.aborted) break;
+            if (chunk.type === "finish" && chunk.finishReason === "length") truncated = true;
+            const delta = chunk.type === "text-delta" ? chunk.text : "";
+            if (delta) {
+              hasText = true;
+              controller.enqueue(encoder.encode(delta));
+            }
           }
-        } catch (e: unknown) {
-          // 客户端取消/网络中断等，直接结束即可；非取消则把原因写回去
-          if (!upstreamController.signal.aborted && !request.signal.aborted) {
-            const msg = e instanceof Error ? e.message : String(e);
-            controller.enqueue(
-              encoder.encode(`\n\n（AI 生成中断：${msg}）\n`)
-            );
+          if (!cancelled && !request.signal.aborted) {
+            if (!hasText) controller.enqueue(encoder.encode("AI 没有返回有效总结，请重试。"));
+            else if (truncated) controller.enqueue(encoder.encode("\n\n（本次总结未生成完整，请重试。）"));
+          }
+        } catch (error: unknown) {
+          if (!cancelled && !upstreamController.signal.aborted && !request.signal.aborted) {
+            console.error("AI 总结流中断");
+            controller.enqueue(encoder.encode(`\n\n（生成中断：${bailianFailure(error).message}）`));
           }
         } finally {
-          controller.close();
-          request.signal.removeEventListener("abort", abortUpstream);
+          if (!cancelled) controller.close();
+          cleanupUpstream?.();
         }
       },
       cancel() {
+        cancelled = true;
         abortUpstream();
+        cleanupUpstream?.();
       },
     });
 
@@ -332,8 +243,10 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
-    console.error("AI 总结失败:", error);
-    return NextResponse.json({ error: "AI 总结失败" }, { status: 500 });
+    cleanupUpstream?.();
+    if (request.signal.aborted) return new Response(null, { status: 499 });
+    console.error("AI 总结失败");
+    const failure = bailianFailure(error);
+    return NextResponse.json({ error: failure.message }, { status: failure.status });
   }
 }
-

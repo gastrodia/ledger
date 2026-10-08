@@ -77,8 +77,8 @@ export default function RegisterPage() {
         return;
       }
 
-      // 注册成功，跳转到仪表板
-      window.location.href = '/dashboard';
+      // 注册成功，跳转到 AI 记账
+      window.location.href = '/dashboard/assistant';
     } catch (error) {
       console.error('注册错误:', error);
       setErrors({ username: '网络错误，请检查连接后重试' });

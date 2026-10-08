@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
+  MessageSquare,
   FolderTree,
   Users,
   LogOut,
@@ -33,6 +34,7 @@ type BeforeInstallPromptEvent = Event & {
 
 const navigationIcons = {
   transactions: LayoutDashboard,
+  assistant: MessageSquare,
   stats: BarChart3,
   categories: FolderTree,
   members: Users,
@@ -256,10 +258,19 @@ export function DashboardNav() {
         <nav
           aria-label="主要导航"
           className={cn(
-            "fixed inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t bg-card pb-[env(safe-area-inset-bottom)] shadow-[0_-2px_8px_rgb(0_0_0/0.04)] lg:hidden",
+            "fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t bg-card pb-[env(safe-area-inset-bottom)] shadow-[0_-2px_8px_rgb(0_0_0/0.04)] lg:hidden",
             isKeyboardOpen && "hidden"
           )}
         >
+          <Link
+            href="/dashboard/assistant"
+            aria-label="AI 记账"
+            aria-current={mobileSection === "assistant" ? "page" : undefined}
+            className={cn("flex min-h-16 flex-col items-center justify-center gap-1 text-xs font-medium", mobileSection === "assistant" ? "text-primary bg-primary/5" : "text-muted-foreground hover:bg-accent")}
+          >
+            <MessageSquare className="size-5" aria-hidden="true" />
+            AI 记账
+          </Link>
           <Link
             href="/dashboard"
             aria-label="记账"

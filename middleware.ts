@@ -45,9 +45,9 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(url);
   }
 
-  // 已认证用户访问登录/注册页，重定向到仪表板
+  // 已认证用户访问登录/注册页，重定向到 AI 记账
   if (isAuthRoute && isAuthenticated) {
-    return NextResponse.redirect(new URL('/dashboard', request.url));
+    return NextResponse.redirect(new URL('/dashboard/assistant', request.url));
   }
 
   return NextResponse.next();

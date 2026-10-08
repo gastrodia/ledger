@@ -103,7 +103,7 @@ test('a cancelled AI request cannot clear the controller or loading state of its
   let calls = 0;
   const bindings = {
     aiAbortRef, AbortController, DOMException, TextDecoder, console,
-    viewMode: 'month', selectedMonth: '2026-09', selectedYear: '2026',
+    viewMode: 'month', selectedMonth: '2026-09', selectedYear: '2026', asOfDate: '2026-09-07',
     isValidYear: () => true, isValidMonth: () => true,
     setAiError: (value) => { state.error = value; },
     setAiSummary: (value) => { state.summary = value; },
