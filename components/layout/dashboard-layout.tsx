@@ -3,6 +3,7 @@
 import { ReactNode, useEffect, useRef } from "react";
 import { DashboardNav } from "./dashboard-nav";
 import { cn } from "@/lib/utils";
+import { clearLegacyFormDrafts } from "@/lib/form-drafts";
 
 interface DashboardLayoutProps {
   children: ReactNode;
@@ -12,6 +13,11 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({ children, contentClassName, viewport = false }: DashboardLayoutProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try { clearLegacyFormDrafts(window.localStorage); }
+    catch { /* Storage may be disabled; entry forms no longer use local drafts. */ }
+  }, []);
 
   useEffect(() => {
     if (!viewport) return;
@@ -52,7 +58,7 @@ export function DashboardLayout({ children, contentClassName, viewport = false }
   return (
     <div ref={viewportRef} className={cn("bg-slate-50/70", viewport ? "fixed inset-x-0 top-0 h-dvh overflow-hidden overscroll-none" : "min-h-screen")}>
       <DashboardNav />
-      <main className={cn("min-w-0 lg:ml-56", viewport && "h-full min-h-0")}>
+      <main className={cn("min-w-0 lg:ml-18 min-[90rem]:ml-56", viewport && "h-full min-h-0")}>
         <div className={cn(viewport ? "h-full min-h-0 pb-[var(--dashboard-bottom-space,calc(4rem+env(safe-area-inset-bottom)))]" : "pb-[calc(4rem+env(safe-area-inset-bottom))]", "lg:pb-0")}>
           <div className={cn("px-4 py-5 md:p-6 lg:px-8 lg:py-7 mx-auto", viewport ? "flex h-full min-h-0 flex-col overflow-hidden" : "min-h-[calc(100dvh-4rem)] lg:min-h-screen", contentClassName)}>
             {children}

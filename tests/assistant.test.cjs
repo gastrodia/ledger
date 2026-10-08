@@ -19,6 +19,7 @@ const helper = load('lib/assistant.ts');
 const output = load('lib/assistant-output.ts', { ai: require('ai'), zod: require('zod'), '@/lib/assistant': helper });
 const audio = load('lib/assistant-audio.ts');
 const images = load('lib/assistant-images.ts');
+const imageImport = load('lib/assistant-image-import.ts', { '@/lib/assistant': helper, '@/lib/assistant-images': images });
 const categoryId = '00000000-0000-4000-8000-000000000001';
 const memberId = '00000000-0000-4000-8000-000000000002';
 const batchId = '00000000-0000-4000-8000-000000000003';
@@ -35,6 +36,39 @@ test('image paste takes binary clipboard files, leaves plain text alone, and sup
   ], files: [] }), file);
   assert.equal(images.clipboardImage({ items: [{ kind: 'file', type: 'image/png', getAsFile: () => null }], files: [file] }), file);
   assert.equal(images.clipboardImage({ items: [{ kind: 'string', type: 'text/plain', getAsFile: () => assert.fail('plain text stays native') }], files: [] }), undefined);
+});
+
+test('multi-image paste preserves every binary item in order without repeating the fallback list', () => {
+  const a = { type: 'image/png', name: 'a.png' }, b = { type: 'image/jpeg', name: 'b.jpg' };
+  const items = [a, b, a].map(file => ({ kind: 'file', type: file.type, getAsFile: () => file }));
+  assert.deepEqual(Array.from(images.clipboardImages({ items, files: [a, b] })), [a, b]);
+  assert.deepEqual(Array.from(images.clipboardImages({ items: [], files: [a, { type: 'text/plain' }, b] })), [a, b]);
+});
+
+test('multi-image append and restore enforce count, aggregate size and legacy migration without dropping existing images', () => {
+  const a = { data: 'data:image/png;base64,YWJj', name: 'a' }, b = { data: 'data:image/jpeg;base64,YWJk', name: 'b' };
+  const current = [a];
+  assert.deepEqual(Array.from(images.appendAssistantImages(current, [b, a])), [a, b]);
+  assert.deepEqual(current, [a]);
+  assert.deepEqual(Array.from(images.restoreAssistantImages(undefined, a)), [a]);
+  assert.deepEqual(Array.from(images.restoreAssistantImages([a, b], a)), [a, b]);
+  assert.equal(images.restoreAssistantImages([], a).length, 0);
+  assert.equal(images.restoreAssistantImages(Array(6).fill(a)).length, 0);
+  assert.equal(images.restoreAssistantImages([a, { ...b, data: 'https://private.example/image' }]).length, 0);
+  const prefix = 'data:image/png;base64,';
+  const large = { data: prefix + 'A'.repeat(images.MAX_ASSISTANT_IMAGE_LENGTH - prefix.length), name: 'large' };
+  assert.equal(images.restoreAssistantImages([large, large, a, b]).length, 0);
+  assert.throws(() => images.appendAssistantImages([large], [{ ...large, data: large.data.replace(/A$/, 'B') }, { ...a, data: a.data + 'AAAA' }]), /总大小/);
+  const distinct = Array.from({ length: 6 }, (_, i) => ({ ...a, data: a.data + 'AAAA'.repeat(i) }));
+  assert.throws(() => images.appendAssistantImages([], distinct), /最多选择/);
+  const display = { ...a, data: 'data:image/png;base64,' + 'A'.repeat(250_000) };
+  assert.equal(images.restoreAssistantImages([display, display], undefined, true).length, 0);
+});
+
+test('malformed persisted import summaries do not crash the restored conversation', () => {
+  const summary = { image_count: 2, extracted_count: 15, removed_duplicates: 1, retained_count: 14, review_required: false, warnings: [] };
+  assert.equal(images.restoreAssistantImportSummary(summary), summary);
+  for (const invalid of [null, { ...summary, warnings: 'bad' }, { ...summary, image_count: 6 }, { ...summary, retained_count: 15 }]) assert.equal(images.restoreAssistantImportSummary(invalid), undefined);
 });
 
 test('restored screenshot previews accept bounded raster data and reject remote or executable sources', () => {
@@ -117,6 +151,22 @@ test('single-plan multimodal wrappers are normalized but multiple plans are reje
   assert.throws(() => helper.validatePlan([plan, plan], categories, members, crypto.randomUUID));
 });
 
+test('SDK schema keeps valid financial rows when optional image provenance is malformed, so merger can warn without deleting', async () => {
+  for (const source of [{ image_index: 0, row_index: 1, time: '11:47', transaction_id: null, kind: 'statement' },
+    { image_index: 1, row_index: 1.2, time: '11:47', transaction_id: null, kind: 'statement' },
+    { image_index: 1, row_index: 1, time: '11:47', transaction_id: null, kind: 'invented' }]) {
+    const parsed = await output.ASSISTANT_OUTPUT_SCHEMA.validate({ ...plan, update: null, drafts: [{ ...row, source }, { ...row, source }] });
+    assert.equal(parsed.success, true);
+    assert.equal(parsed.value.drafts[0].source, null);
+    const merged = imageImport.mergeAssistantImageImport(parsed.value, 2);
+    assert.equal(merged.summary.removed_duplicates, 0);
+    assert.equal(merged.summary.retained_count, 2);
+    assert.equal(merged.summary.review_required, true);
+  }
+  const invalidMoney = await output.ASSISTANT_OUTPUT_SCHEMA.validate({ ...plan, drafts: [{ ...row, amount_cents: 12.5, source: 'bad' }] });
+  assert.equal(invalidMoney.success, false);
+});
+
 test('draft validation preserves cents and date, and refuses malformed amounts before confirmation', () => {
   const result = helper.validatePlan({ ...plan, drafts: [row, { ...row, amount_cents: 2450 }] }, categories, members, crypto.randomUUID);
   assert.equal(result.drafts[1].amount_cents, 2450);
@@ -165,6 +215,7 @@ function routes({ session = { userId: 'owner' }, provider = JSON.stringify(plan)
     'next/server': { NextResponse }, 'node:crypto': crypto,
     '@/lib/auth': { getSession: async () => session }, '@/lib/db': { sql }, '@/lib/assistant': helper,
     '@/lib/assistant-output': output,
+    '@/lib/assistant-image-import': imageImport,
     '@/lib/assistant-schema': { ensureAssistantSchema: async () => {} }, '@/lib/assistant-audio': audio,
     '@/lib/bailian': { BAILIAN_ASSISTANT_MODEL: 'qwen3.7-plus', BAILIAN_SUMMARY_MODEL: 'qwen3.8-max', BAILIAN_ASR_MODEL: 'qwen3-asr-flash',
       bailianConfig: () => {}, bailianFailure: () => ({ status: 502, message: '服务暂不可用' }),
@@ -172,6 +223,7 @@ function routes({ session = { userId: 'owner' }, provider = JSON.stringify(plan)
       bailianText: async (...args) => { calls.push(args); if (providerError) throw providerError; return textProvider; } },
   };
   const globals = { process: { env: {} } };
+  deps['@/lib/assistant-generation'] = load('lib/assistant-generation.ts', deps, globals);
   return { assistant: load('app/api/assistant/route.ts', deps, globals), confirm: load('app/api/assistant/confirm/route.ts', deps, globals),
     transcribe: load('app/api/assistant/transcribe/route.ts', deps, globals), calls, queries, transactions };
 }
@@ -203,9 +255,32 @@ test('draft recognition leaves an unspecified member unresolved, even after earl
 });
 
 test('malformed requests and arbitrary image URLs never call a provider', async () => {
-  for (const body of [{}, { message: 'x', today: '2026-02-30' }, { message: 'x', today: '2026-09-30', image: 'https://internal/' }]) {
+  const image = 'data:image/png;base64,YWJj';
+  for (const body of [{}, { message: 'x', today: '2026-02-30' }, { message: 'x', today: '2026-09-30', image: 'https://internal/' },
+    ...[{ images: 'bad' }, { images: [null] }, { images: ['data:image/svg+xml;base64,YWJj'] }, { images: Array(6).fill(image) },
+      { image, images: [image] }, { images: ['data:image/png;base64,' + 'A'.repeat(2_000_000)] },
+      { images: Array(3).fill('data:image/png;base64,' + 'A'.repeat(1_400_000)) }].map(patch => ({ message: 'x', today: '2026-09-30', ...patch }))]) {
     const f = routes(); assert.equal((await f.assistant.POST(request(body))).status, 400); assert.equal(f.calls.length, 0);
   }
+});
+
+test('multiple screenshots are sent as numbered original files in one paid request and keep unresolved members', async () => {
+  const f = routes({ provider: JSON.stringify({ ...plan, drafts: [{ ...row, member_id: null }] }) });
+  const images = ['data:image/png;base64,YWJj', 'data:image/jpeg;base64,YWJk'];
+  const response = await f.assistant.POST(request({ message: '请合并截图', today: '2026-09-30', images }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.drafts[0].member_id, null);
+  assert.equal(body.import_summary.image_count, 2);
+  assert.equal(body.import_summary.removed_duplicates, 0);
+  assert.equal(body.import_summary.review_required, true);
+  const content = f.calls[0][0].messages.at(-1).content;
+  assert.match(content[1].text, /第 1 张截图（共 2 张）/);
+  assert.equal(content[2].data, images[0]);
+  assert.match(content[3].text, /第 2 张截图（共 2 张）/);
+  assert.equal(content[4].data, images[1]);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.transactions.length, 0);
 });
 
 test('recognition uses typed image parts, retains bounded history and propagates request cancellation', async () => {
@@ -539,6 +614,138 @@ test('invalid editable contexts and out-of-batch model updates fail without fina
   const response = await f.assistant.POST(request({ message: '全部改成本人', today: '2026-09-30', draft_batch }));
   assert.equal(response.status, 200);
   assert.equal((await response.json()).reply, '尚未修改草稿，请明确指定本组成员，或直接在卡片中选择。');
+  assert.equal(f.transactions.length, 0);
+});
+
+test('saved batch context preserves displayed row order and rejects non-saved, committed or malformed targets', () => {
+  const first = { id: crypto.randomUUID(), type: 'expense', description: '域名续费', member_id: memberId };
+  const second = { ...first, id: crypto.randomUUID(), description: '交通费' };
+  const saved = { batch_id: batchId, status: 'saved', drafts: [second, first] };
+  assert.equal(helper.validateSavedBatch(undefined), null);
+  assert.equal(helper.validateSavedBatch(null), null);
+  const result = helper.validateSavedBatch(saved);
+  assert.equal(result.status, 'saved');
+  assert.deepEqual(Array.from(result.drafts, draft => draft.id), [second.id, first.id]);
+  for (const invalid of [[], {}, { ...saved, status: 'pending' }, { ...saved, status: 'deleted' },
+    { ...saved, batch_id: 'foreign' }, { ...saved, commit: [row] }, { ...saved, drafts: [] },
+    { ...saved, drafts: [first, first] }, { ...saved, drafts: [{ ...first, id: 'invalid' }] }]) {
+    assert.throws(() => helper.validateSavedBatch(invalid), /已入账账单上下文无效/);
+  }
+});
+
+test('structured undo targets saved rows without recreating drafts or claiming the operation already completed', () => {
+  const drafts = [0, 1, 2].map(() => ({ ...row, id: crypto.randomUUID() }));
+  const saved = helper.validateSavedBatch({ batch_id: batchId, status: 'saved', drafts });
+  for (const draft_ids of [[drafts[0].id], [drafts[2].id], drafts.map(draft => draft.id)]) {
+    const undo = { batch_id: batchId, draft_ids };
+    const result = helper.validatePlan({ action: 'undo', reply: '已撤销，未入账。', drafts: [], query: null, update: null, undo },
+      categories, members, () => assert.fail('undo cannot generate new draft IDs'), null, saved);
+    assert.equal(result.action, 'undo');
+    assert.deepEqual(JSON.parse(JSON.stringify(result.undo)), undo);
+    assert.equal(result.drafts.length, 0);
+    assert.equal(result.query, null);
+    assert.equal(result.update, null);
+    assert.equal(result.reply, `正在撤销这 ${draft_ids.length} 笔入账，成功后将恢复为待确认草稿。`);
+    assert.doesNotMatch(result.reply, /已撤销|未入账/);
+  }
+});
+
+test('undo validation rejects missing context, foreign groups or rows, duplicate IDs and mixed actions', () => {
+  const draft = { ...row, id: crypto.randomUUID() };
+  const saved = helper.validateSavedBatch({ batch_id: batchId, status: 'saved', drafts: [draft] });
+  const undo = { batch_id: batchId, draft_ids: [draft.id] };
+  const candidate = { action: 'undo', reply: '', drafts: [], query: null, undo };
+  for (const context of [null, { ...saved, status: 'pending' }, { ...saved, drafts: [] }]) {
+    assert.throws(() => helper.validatePlan(candidate, categories, members, crypto.randomUUID, null, context));
+  }
+  for (const patch of [{ batch_id: crypto.randomUUID() }, { draft_ids: [] }, { draft_ids: [crypto.randomUUID()] },
+    { draft_ids: [draft.id, draft.id] }, { draft_ids: [1] }, { draft_ids: 'all' }]) {
+    assert.throws(() => helper.validatePlan({ ...candidate, undo: { ...undo, ...patch } }, categories, members, crypto.randomUUID, null, saved));
+  }
+  for (const patch of [{ undo: null }, { drafts: [row] }, { query: {} }, { query: undefined },
+    { update: { batch_id: batchId, draft_ids: [draft.id], member_id: memberId } }]) {
+    assert.throws(() => helper.validatePlan({ ...candidate, ...patch }, categories, members, crypto.randomUUID, null, saved));
+  }
+  for (const action of ['record', 'query', 'chat', 'update']) {
+    assert.throws(() => helper.validatePlan({ ...candidate, action }, categories, members, crypto.randomUUID, null, saved));
+  }
+  assert.equal(helper.validatePlan(plan, categories, members, crypto.randomUUID).undo, null);
+});
+
+test('unsupported chat cannot report that undo, cancellation or deletion succeeded', () => {
+  for (const reply of ['已撤销，未入账。', '已取消这笔账。', '已删除这笔交易。', '好的，已成功撤销。',
+    '**这笔账单已经撤销**。', '### 本组账目已全部撤销。', '撤销成功。', '已将这笔记录删除。',
+    '好的，我已经为您撤销了这笔。', '撤销操作已完成。', '这笔账已经撤销。', '系统已替你取消这笔记录。']) {
+    const result = helper.validatePlan({ action: 'chat', reply, drafts: [], query: null }, categories, members, crypto.randomUUID);
+    assert.equal(result.reply, '尚未撤销，请使用账单卡片中的撤销入账。');
+    assert.equal(result.undo, null);
+  }
+  for (const reply of ['尚未撤销，请使用卡片。', '撤销失败，请重试。', '这笔账尚未撤销。', '无法撤销这笔已修改的账。',
+    '撤销操作未完成。', '点击撤销入账，成功后会恢复草稿。', '“已撤销”是撤销完成后的提示。',
+    '使用时页面会显示“已撤销”。', '没有可撤销的已入账记录。', '如何撤销？请点击卡片上的撤销入账。']) {
+    assert.equal(helper.validatePlan({ action: 'chat', reply, drafts: [], query: null }, categories, members, crypto.randomUUID).reply, reply);
+  }
+});
+
+test('non-undo record and query plans cannot claim undo execution while their intended data stays intact', () => {
+  const recording = helper.validatePlan({ ...plan, reply: '好的，我已经为您撤销了这笔。' }, categories, members, crypto.randomUUID);
+  assert.equal(recording.action, 'record');
+  assert.equal(recording.reply, '尚未撤销，请使用账单卡片中的撤销入账。');
+  assert.equal(recording.drafts.length, 1);
+  assert.equal(recording.drafts[0].amount_cents, row.amount_cents);
+  const query = { start_date: '2026-09-01', end_date: '2026-09-30', type: null, category_id: null, member_id: null, keyword: null };
+  const querying = helper.validatePlan({ action: 'query', reply: '撤销操作已完成。', drafts: [], query }, categories, members, crypto.randomUUID);
+  assert.equal(querying.action, 'query');
+  assert.equal(querying.reply, '尚未撤销，请使用账单卡片中的撤销入账。');
+  assert.deepEqual(JSON.parse(JSON.stringify(querying.query)), query);
+  assert.equal(querying.undo, null);
+});
+
+test('undo prompt requires an explicit operation request and distinguishes capability questions from execution', () => {
+  assert.match(helper.ASSISTANT_SYSTEM_PROMPT, /用户必须明确要求现在执行撤销/);
+  assert.match(helper.ASSISTANT_SYSTEM_PROMPT, /“能撤销吗”“如何撤销”“撤销会怎样”.*应action=chat解释，不执行撤销，不生成undo目标/);
+});
+
+test('natural-language saved undo returns only a validated operation for the client to execute', async () => {
+  const draft = { ...row, id: crypto.randomUUID(), description: '.top域名续费' };
+  const saved_batch = helper.validateSavedBatch({ batch_id: batchId, status: 'saved', drafts: [draft] });
+  const undo = { batch_id: batchId, draft_ids: [draft.id] };
+  const f = routes({ provider: JSON.stringify({ action: 'undo', reply: '已撤销，未入账。', drafts: [], query: null, undo }) });
+  const response = await f.assistant.POST(request({ message: '撤销这笔', today: '2026-09-30', saved_batch }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.action, 'undo');
+  assert.deepEqual(body.undo, undo);
+  assert.equal(body.reply, '正在撤销这 1 笔入账，成功后将恢复为待确认草稿。');
+  assert.deepEqual(body.drafts, []);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.transactions.length, 0);
+  assert.ok(f.queries.every(query => query.values[0] === 'owner'));
+  assert.match(f.calls[0][0].messages[0].content, /saved_batch/);
+  assert.match(f.calls[0][0].messages[0].content, /只有一笔时“撤销这笔”选择该行/);
+  assert.match(f.calls[0][0].messages[0].content, /多笔时只说“这笔”/);
+  assert.ok(f.calls[0][0].messages[0].content.includes(draft.id));
+});
+
+test('invalid saved contexts fail before paid calls, while stale or foreign model undo targets are rejected without writes', async () => {
+  const draft = { ...row, id: crypto.randomUUID() };
+  const saved_batch = helper.validateSavedBatch({ batch_id: batchId, status: 'saved', drafts: [draft] });
+  for (const invalid of [{ ...saved_batch, status: 'pending' }, { ...saved_batch, commit: [row] },
+    { ...saved_batch, drafts: [] }, { ...saved_batch, drafts: [draft, draft] }]) {
+    const f = routes();
+    assert.equal((await f.assistant.POST(request({ message: '撤销这笔', today: '2026-09-30', saved_batch: invalid }))).status, 400);
+    assert.equal(f.calls.length + f.queries.length + f.transactions.length, 0);
+  }
+  const undo = { batch_id: batchId, draft_ids: [draft.id] };
+  for (const patch of [{ batch_id: crypto.randomUUID() }, { draft_ids: [crypto.randomUUID()] }, { draft_ids: [draft.id, draft.id] }]) {
+    const f = routes({ provider: JSON.stringify({ action: 'undo', reply: '', drafts: [], query: null, undo: { ...undo, ...patch } }) });
+    assert.equal((await f.assistant.POST(request({ message: '撤销这笔', today: '2026-09-30', saved_batch }))).status, 422);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.transactions.length, 0);
+  }
+  const f = routes({ provider: JSON.stringify({ action: 'chat', reply: '已撤销，未入账。', drafts: [], query: null }) });
+  const response = await f.assistant.POST(request({ message: '撤销这笔', today: '2026-09-30', saved_batch }));
+  assert.equal((await response.json()).reply, '尚未撤销，请使用账单卡片中的撤销入账。');
   assert.equal(f.transactions.length, 0);
 });
 

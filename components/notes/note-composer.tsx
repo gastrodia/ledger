@@ -5,8 +5,6 @@ import type { Note } from "@/types";
 import { getNoteColor, isNoteColor } from "@/lib/notes";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogBody, DialogFooter } from "@/components/ui/dialog";
-import { DraftNotice } from "@/components/ui/draft-notice";
-import { useFormDraft } from "@/hooks/use-form-draft";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
 import { toast } from "@/hooks/use-toast";
 import { NoteEditor } from "./note-editor";
@@ -23,19 +21,7 @@ export function NoteComposer({ note, initialColor = "yellow", onClose, onSaved }
   const [saveError, setSaveError] = useState<string | null>(null);
   const saving = useRef(false);
   const dirty = title !== (note?.title ?? "") || content !== (note?.content ?? "") || color !== getNoteColor(note?.color ?? initialColor).value;
-  const draft = useFormDraft({
-    scope: note ? `note:${note.id}` : "note:new",
-    value: { title, content, color }, dirty,
-    onRestore: (saved) => {
-      if (typeof saved?.title !== "string" || typeof saved?.content !== "string") {
-        toast.error("草稿格式无法识别，请放弃此草稿后继续编辑。");
-        return;
-      }
-      setTitle(saved.title); setContent(saved.content);
-      if (isNoteColor(saved.color)) setColor(saved.color);
-    },
-  });
-  const { requestClose } = useFormLeaveGuard({ draft, isBusy: isSaving || isUploading });
+  const { requestClose } = useFormLeaveGuard({ isDirty: dirty, isBusy: isSaving || isUploading });
   const paper = getNoteColor(color);
 
   const save = async () => {
@@ -48,7 +34,6 @@ export function NoteComposer({ note, initialColor = "yellow", onClose, onSaved }
       });
       const json = await res.json();
       if (!res.ok || !json.data?.id) throw new Error(json.error || "保存失败，请重试");
-      draft.clear();
       onSaved(json.data);
       toast.success(note ? "便利贴已保存" : "已贴到墙上");
     } catch (error) {
@@ -63,7 +48,6 @@ export function NoteComposer({ note, initialColor = "yellow", onClose, onSaved }
         <DialogDescription className="text-slate-600">{note?.archived_at ? "这张便利贴已收进归档，保存后仍会留在归档中。" : "记下想法、待办，或一件值得记住的小事。"}</DialogDescription>
       </DialogHeader>
       <DialogBody className="space-y-3">
-        <DraftNotice draft={draft} />
         {saveError ? <p role="alert" className="rounded-md border border-red-800/20 bg-white/50 p-3 text-sm text-red-800">{saveError}。内容仍在这里，可以重试保存。</p> : null}
         <label className="sr-only" htmlFor="sticky-title">标题（可选）</label>
         <input id="sticky-title" maxLength={255} value={title} disabled={isSaving} onChange={(e) => setTitle(e.target.value)} placeholder="标题（可选）" className="w-full bg-transparent px-1 py-2 text-xl font-semibold outline-none placeholder:text-slate-500" />

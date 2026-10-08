@@ -1,5 +1,6 @@
 "use client";
 
+import { CategoryIcon } from '@/components/icons/entity-icon';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type { Category, TransactionType } from '@/types';
@@ -14,7 +15,7 @@ export function TransactionCategoryPicker({ id, type, categories, value, onChang
     <Select value={value} onValueChange={onChange} disabled={disabled} required>
       <SelectTrigger id={id}><SelectValue placeholder="请选择分类" /></SelectTrigger>
       <SelectContent>
-        {filtered.map((category) => <SelectItem key={category.id} value={category.id}>{category.icon} {category.name}</SelectItem>)}
+        {filtered.map((category) => <SelectItem key={category.id} value={category.id}><span className="inline-flex items-center gap-2"><CategoryIcon icon={category.icon} className="size-4" />{category.name}</span></SelectItem>)}
       </SelectContent>
     </Select>
     {filtered.length === 0 ? <p className="text-xs text-muted-foreground">还没有{type === 'income' ? '收入' : '支出'}分类。请先在分类管理中添加分类。</p> : null}

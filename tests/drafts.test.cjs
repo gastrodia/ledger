@@ -16,7 +16,33 @@ function memoryStorage() {
   const map = new Map();
   return { getItem: (key) => map.get(key) ?? null, setItem: (key, value) => map.set(key, value), removeItem: (key) => map.delete(key), key: (index) => [...map.keys()][index] ?? null, get length() { return map.size; } };
 }
-const { FormDraftSession, draftKey, clearStoredDrafts } = load();
+const { FormDraftSession, draftKey, clearStoredDrafts, clearLegacyFormDrafts } = load();
+
+test('retiring entry drafts preserves every AI conversation and unrelated browser state', () => {
+  const storage = memoryStorage();
+  const accounts = ['alice', 'bob:other'];
+  const scopes = ['transaction:new', 'note:new', 'note:existing', 'giftbooks:new', 'giftbooks:existing',
+    'giftbook-records:book:new', 'gifts-given:gift', 'loans:new:lent', 'loan-repayment:loan:entry'];
+  for (const account of accounts) {
+    for (const scope of scopes) storage.setItem(draftKey(account, scope), 'obsolete');
+    storage.setItem(draftKey(account, 'assistant'), JSON.stringify({ version: 1, userId: account, value: {
+      input: 'unfinished message', messages: [{ id: 'pending', drafts: [{ amount_cents: 1250 }] }],
+      images: ['image-data'], confirmations: [{ id: 'pending-confirm' }], undos: [{ id: 'pending-undo' }],
+      outbox: { requestId: 'pending-send' }, conversationId: 'conversation',
+    } }));
+  }
+  storage.setItem('ledger:draft:logout', 'session-event');
+  storage.setItem('ledger:transactions:v1:alice', 'filters-and-scroll');
+  storage.setItem('unrelated', 'keep');
+  const retainedKeys = accounts.map(account => draftKey(account, 'assistant'))
+    .concat(['ledger:draft:logout', 'ledger:transactions:v1:alice', 'unrelated']);
+  const before = retainedKeys.map(key => [key, storage.getItem(key)]);
+  clearLegacyFormDrafts(storage);
+  assert.equal(storage.length, retainedKeys.length);
+  assert.deepEqual(retainedKeys.map(key => [key, storage.getItem(key)]), before);
+  clearLegacyFormDrafts(storage);
+  assert.deepEqual(retainedKeys.map(key => [key, storage.getItem(key)]), before);
+});
 
 test('drafts are isolated by verified account and form scope', () => {
   const storage = memoryStorage();
@@ -223,6 +249,32 @@ test('leave protection tracks the exact current snapshot, not a prior saved stat
   assert.equal(draftProtection(session.getSnapshot(), { content: 'next' }, true).isPersisted, true);
 });
 
+test('restored draft comparison ignores nested object key order but preserves content and screenshot ordering', () => {
+  const { draftProtection } = load();
+  const storage = memoryStorage();
+  const previous = { conversationId: 'conversation', messages: [{ id: 'message', text: 'previous' }],
+    images: [{ data: 'first', name: 'one' }, { data: 'second', name: 'two' }], input: '', outbox: null };
+  new FormDraftSession(storage, 'alice', 'assistant').save(previous, true);
+  const key = draftKey('alice', 'assistant');
+  const session = new FormDraftSession(storage, 'alice', 'assistant');
+  const restored = session.restore(value => ({ outbox: value.outbox, input: value.input,
+    images: value.images.map(image => ({ name: image.name, data: image.data })),
+    messages: value.messages.map(message => ({ text: message.text, id: message.id })), conversationId: value.conversationId }));
+  const persisted = storage.getItem(key);
+  session.save({ messages: [], input: '' }, true);
+  assert.equal(storage.getItem(key), persisted, 'a genuinely stale initial render must still be rejected');
+  session.save(previous, true);
+  assert.equal(draftProtection(session.getSnapshot(), restored, true).isPersisted, true);
+  const reorderedImages = { ...previous, images: [...previous.images].reverse() };
+  assert.equal(draftProtection(session.getSnapshot(), reorderedImages, true).isPersisted, false);
+  session.save(reorderedImages, true);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value.images, reorderedImages.images, 'image order changes are actual edits');
+  const sending = { ...reorderedImages, outbox: { id: 'task', message: 'new request' } };
+  session.save(sending, true);
+  assert.equal(draftProtection(session.getSnapshot(), sending, true).isPersisted, true);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value.outbox, sending.outbox, 'restoration must not silently block the next send');
+});
+
 test('a failed newer write and an unresolved old draft both require leave confirmation', () => {
   const { draftProtection } = load();
   const storage = memoryStorage();
@@ -294,6 +346,42 @@ function draftHookHarness(storage) {
     authRequests,
   };
 }
+
+test('synchronous draft persistence preserves conversation recovery when a large outbox exceeds storage quota', async () => {
+  const storage = memoryStorage();
+  const harness = draftHookHarness(storage);
+  const previous = { conversationId: 'recoverable-conversation', messages: [{ id: 'existing', text: 'already reviewed' }], outbox: null };
+  const options = { scope: 'assistant', value: previous, dirty: true, autoRestore: true, onRestore: value => value };
+  assert.equal(harness.render(options).persist(previous), false, 'identity must be verified before writing');
+  await harness.identify();
+  const hook = harness.render(options);
+  const key = draftKey('alice', 'assistant');
+  const saved = storage.getItem(key);
+  const write = storage.setItem;
+  storage.setItem = (name, value) => {
+    if (value.length > 1000) throw Error('QuotaExceededError');
+    write(name, value);
+  };
+  assert.equal(hook.persist({ ...previous, outbox: { images: ['x'.repeat(1500)] } }), false);
+  assert.equal(storage.getItem(key), saved, 'failed upload persistence must never erase the previous conversation');
+  const lightweight = { ...previous, messages: [...previous.messages, { id: 'pending', taskId: 'stable-task' }] };
+  assert.equal(hook.persist(lightweight), true);
+  assert.deepEqual(JSON.parse(storage.getItem(key)).value, lightweight, 'stable task IDs are durable before the request is dispatched');
+  harness.unmount();
+});
+
+test('synchronous draft persistence cannot write after account logout', async () => {
+  const storage = memoryStorage();
+  const harness = draftHookHarness(storage);
+  const options = { scope: 'assistant', value: { input: 'original' }, dirty: true, onRestore() {} };
+  harness.render(options);
+  await harness.identify();
+  const hook = harness.render(options);
+  harness.logout();
+  assert.equal(hook.persist({ input: 'late request' }), false);
+  assert.equal(storage.getItem(draftKey('alice', 'assistant')), null);
+  harness.unmount();
+});
 
 test('auto restore waits for a verified account, runs once, and protects the initial empty render', async () => {
   const storage = memoryStorage();
@@ -505,29 +593,33 @@ function guardHarness(confirm) {
   let index = 0;
   const cleanups = [];
   const messages = [];
+  const listeners = new Map();
   const source = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../hooks/use-form-leave-guard.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const dependencies = {
     react: {
       useRef(initial) { const key = index++; return refs[key] ?? (refs[key] = { current: initial }); },
       useLayoutEffect(callback) { const cleanup = callback(); if (cleanup) cleanups.push(cleanup); },
-      useEffect() {},
+      useEffect(callback) { const cleanup = callback(); if (cleanup) cleanups.push(cleanup); },
     },
     '@/hooks/use-confirm': { useConfirm: () => ({ confirm }) },
     '@/hooks/use-toast': { toast: { info: (message) => messages.push(message) } },
   };
-  vm.runInNewContext(source, { exports, require: (key) => dependencies[key] });
-  return { render(options) { index = 0; return exports.useFormLeaveGuard(options); }, unmount() { cleanups.forEach((cleanup) => cleanup()); }, messages };
+  vm.runInNewContext(source, { exports, require: (key) => dependencies[key], window: {
+    addEventListener: (event, listener) => listeners.set(event, listener),
+    removeEventListener: (event, listener) => { if (listeners.get(event) === listener) listeners.delete(event); },
+  } });
+  return { listeners, render(options) { index = 0; return exports.useFormLeaveGuard(options); }, unmount() { cleanups.forEach((cleanup) => cleanup()); }, messages };
 }
 
-test('persisted text closes directly; unuploaded files retain a cancel/edit option', async () => {
+test('unchanged forms close directly; unuploaded files retain a cancel/edit option', async () => {
   let prompts = 0;
   let answer = false;
   let closed = 0;
   const harness = guardHarness(async () => { prompts++; return answer; });
-  let guard = harness.render({ draft: { needsProtection: false } });
+  let guard = harness.render({ isDirty: false });
   assert.equal(await guard.requestClose(() => closed++), true);
   assert.equal(prompts, 0);
-  guard = harness.render({ draft: { needsProtection: false }, hasPendingFiles: true });
+  guard = harness.render({ isDirty: false, hasPendingFiles: true });
   assert.equal(await guard.requestClose(() => closed++), false);
   assert.equal(closed, 1);
   answer = true;
@@ -535,18 +627,36 @@ test('persisted text closes directly; unuploaded files retain a cancel/edit opti
   assert.equal(closed, 2);
 });
 
+test('unsaved input warns on closing and unloading without mentioning local drafts', async () => {
+  const prompts = [];
+  let closed = false;
+  const harness = guardHarness(async prompt => { prompts.push(prompt); return false; });
+  const guard = harness.render({ isDirty: true });
+  assert.equal(await guard.requestClose(() => { closed = true; }), false);
+  assert.equal(closed, false);
+  assert.match(prompts[0].description, /尚未保存/);
+  assert.doesNotMatch(prompts[0].description, /草稿/);
+  let prevented = false;
+  const event = { preventDefault() { prevented = true; } };
+  harness.listeners.get('beforeunload')(event);
+  assert.equal(prevented, true);
+  assert.equal(event.returnValue, '');
+  harness.unmount();
+  assert.equal(harness.listeners.has('beforeunload'), false);
+});
+
 test('an in-flight save blocks close even if it starts while confirmation is open', async () => {
   let resolve;
   let closed = 0;
   let prompts = 0;
   const harness = guardHarness(() => { prompts++; return new Promise((done) => { resolve = done; }); });
-  let guard = harness.render({ draft: { needsProtection: true }, isBusy: true });
+  let guard = harness.render({ isDirty: true, isBusy: true });
   assert.equal(await guard.requestClose(() => closed++), false);
   assert.equal(prompts, 0);
-  guard = harness.render({ draft: { needsProtection: true }, isBusy: false });
+  guard = harness.render({ isDirty: true, isBusy: false });
   const pending = guard.requestClose(() => closed++);
   assert.equal(await guard.requestClose(() => closed++), false);
-  harness.render({ draft: { needsProtection: true }, isBusy: true });
+  harness.render({ isDirty: true, isBusy: true });
   resolve(true);
   assert.equal(await pending, false);
   assert.equal(closed, 0);
@@ -556,7 +666,7 @@ test('confirmation cannot close a replacement form after the original form unmou
   let resolve;
   let closed = 0;
   const harness = guardHarness(() => new Promise((done) => { resolve = done; }));
-  const guard = harness.render({ draft: { needsProtection: true } });
+  const guard = harness.render({ isDirty: true });
   const pending = guard.requestClose(() => closed++);
   harness.unmount();
   resolve(true);

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -16,6 +17,23 @@ export default function RegisterPage() {
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const { toast } = useToast();
+
+  const focusField = (field: string) => {
+    const input = formRef.current?.elements.namedItem(field);
+    if (input instanceof HTMLInputElement) input.focus();
+  };
+
+  const updateField = (field: keyof typeof formData, value: string) => {
+    setFormData((current) => ({ ...current, [field]: value }));
+    setErrors((current) => ({
+      ...current,
+      [field]: "",
+      form: "",
+      ...(field === "password" ? { confirmPassword: "" } : {}),
+    }));
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,6 +63,7 @@ export default function RegisterPage() {
 
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);
+      focusField(Object.keys(newErrors)[0]);
       return;
     }
 
@@ -67,13 +86,17 @@ export default function RegisterPage() {
 
       if (!response.ok) {
         // 将错误信息映射到相应的字段
-        if (data.error.includes('邮箱')) {
-          setErrors({ email: data.error });
-        } else if (data.error.includes('用户名')) {
-          setErrors({ username: data.error });
+        const message = typeof data?.error === "string" && data.error
+          ? data.error
+          : "注册失败，请重试";
+        const field = message.includes("邮箱") ? "email" : message.includes("用户名") ? "username" : undefined;
+        if (field) {
+          setErrors({ [field]: message });
+          focusField(field);
         } else {
-          setErrors({ username: data.error || '注册失败，请重试' });
+          setErrors({ form: message });
         }
+        toast({ title: "注册失败", description: message, variant: "error" });
         return;
       }
 
@@ -81,7 +104,9 @@ export default function RegisterPage() {
       window.location.href = '/dashboard/assistant';
     } catch (error) {
       console.error('注册错误:', error);
-      setErrors({ username: '网络错误，请检查连接后重试' });
+      const message = "网络错误，请检查连接后重试";
+      setErrors({ form: message });
+      toast({ title: "注册失败", description: message, variant: "error" });
     } finally {
       setIsLoading(false);
     }
@@ -89,68 +114,72 @@ export default function RegisterPage() {
 
   return (
     <AuthLayout
-      title="创建账户"
+      title="创建家庭账户"
       subtitle="开始您的记账之旅"
     >
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form ref={formRef} onSubmit={handleSubmit} className="space-y-4" noValidate>
         <div className="space-y-2">
           <Label htmlFor="username">用户名</Label>
           <Input
             id="username"
+            name="username"
             type="text"
-            placeholder="请输入用户名"
+            placeholder={errors.username || "请输入用户名"}
             value={formData.username}
-            onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+            onChange={(e) => updateField("username", e.target.value)}
             autoComplete="username"
+            aria-invalid={!!errors.username}
+            aria-describedby={errors.username ? "username-error" : undefined}
+            title={errors.username || undefined}
           />
-          {errors.username && (
-            <p className="text-sm text-destructive">{errors.username}</p>
-          )}
         </div>
 
         <div className="space-y-2">
           <Label htmlFor="email">邮箱</Label>
           <Input
             id="email"
+            name="email"
             type="email"
-            placeholder="请输入邮箱地址"
+            placeholder={errors.email || "请输入邮箱地址"}
             value={formData.email}
-            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+            onChange={(e) => updateField("email", e.target.value)}
             autoComplete="email"
+            aria-invalid={!!errors.email}
+            aria-describedby={errors.email ? "email-error" : undefined}
+            title={errors.email || undefined}
           />
-          {errors.email && (
-            <p className="text-sm text-destructive">{errors.email}</p>
-          )}
         </div>
 
         <div className="space-y-2">
           <Label htmlFor="password">密码</Label>
           <Input
             id="password"
+            name="password"
             type="password"
-            placeholder="请输入密码（至少6位）"
+            placeholder={errors.password || "请输入密码（至少6位）"}
             value={formData.password}
-            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+            onChange={(e) => updateField("password", e.target.value)}
             autoComplete="new-password"
+            aria-invalid={!!errors.password}
+            aria-describedby={errors.password ? "password-error" : undefined}
+            title={errors.password || undefined}
           />
-          {errors.password && (
-            <p className="text-sm text-destructive">{errors.password}</p>
-          )}
         </div>
 
         <div className="space-y-2">
           <Label htmlFor="confirmPassword">确认密码</Label>
           <Input
             id="confirmPassword"
+            name="confirmPassword"
             type="password"
-            placeholder="请再次输入密码"
+            placeholder={errors.confirmPassword || "请再次输入密码"}
             value={formData.confirmPassword}
-            onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+            onChange={(e) => updateField("confirmPassword", e.target.value)}
             autoComplete="new-password"
+            aria-invalid={!!errors.confirmPassword}
+            aria-describedby={errors.confirmPassword ? "confirm-password-error" : undefined}
+            title={errors.confirmPassword || undefined}
           />
-          {errors.confirmPassword && (
-            <p className="text-sm text-destructive">{errors.confirmPassword}</p>
-          )}
         </div>
 
         <div className="text-xs text-muted-foreground">
@@ -172,6 +201,13 @@ export default function RegisterPage() {
           {isLoading ? "注册中..." : "注册"}
         </Button>
       </form>
+      <div className="sr-only" aria-live="polite" aria-atomic="true">
+        {errors.username && <span id="username-error">{errors.username}。</span>}
+        {errors.email && <span id="email-error">{errors.email}。</span>}
+        {errors.password && <span id="password-error">{errors.password}。</span>}
+        {errors.confirmPassword && <span id="confirm-password-error">{errors.confirmPassword}。</span>}
+        {errors.form && <span>{errors.form}</span>}
+      </div>
 
       <div className="mt-6 text-center text-sm text-muted-foreground">
         已有账户？{" "}

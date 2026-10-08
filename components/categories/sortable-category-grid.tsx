@@ -11,6 +11,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Edit, GripVertical, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CategoryIcon } from "@/components/icons/entity-icon";
 import type { Category, TransactionType } from "@/types";
 
 interface Props {
@@ -87,8 +88,8 @@ function SortableCategoryCard({ category, disabled, sortable, onEdit, onDelete }
         <GripVertical className="h-4 w-4" />
       </Button>
       <div className="flex flex-col items-center text-center space-y-2">
-        <div className="flex items-center justify-center w-10 h-10 rounded-md text-xl bg-accent">
-          {category.icon || "📁"}
+        <div className="flex items-center justify-center w-10 h-10 rounded-md text-primary bg-primary/10">
+          <CategoryIcon icon={category.icon} className="size-5" />
         </div>
         <p className="max-w-full break-words font-medium">{category.name}</p>
       </div>

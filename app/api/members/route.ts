@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
+import { isMemberAvatar } from '@/lib/entity-icon-catalog';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -54,6 +55,13 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
     const { name, avatar } = body;
+
+    if (avatar !== undefined && avatar !== null && avatar !== '' && !isMemberAvatar(avatar)) {
+      return NextResponse.json(
+        { error: '请选择有效的成员头像' },
+        { status: 400 }
+      );
+    }
 
     // 验证必填字段
     if (!name) {

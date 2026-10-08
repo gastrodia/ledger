@@ -6,10 +6,22 @@ export type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem" | 
 export type DraftReplacement<T> = T | ((stored: T | undefined) => T);
 export type DraftReplacementDirty<T> = boolean | ((replacement: T) => boolean);
 
+/** Compare JSON contents, not the insertion order of restored object fields. */
+export function serializeDraftValue(value: unknown): string {
+  const serialized = JSON.stringify(value, (_key, item: unknown) => {
+    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+      return Object.fromEntries(Object.entries(item).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+    }
+    return item;
+  });
+  if (serialized === undefined) throw new TypeError("草稿内容无法保存。");
+  return serialized;
+}
+
 export function draftProtection(snapshot: DraftSnapshot, value: unknown, dirty: boolean) {
   let isPersisted = false;
   try {
-    isPersisted = snapshot.status === "saved" && !snapshot.hasDraft && snapshot.persistedValue === JSON.stringify(value);
+    isPersisted = snapshot.status === "saved" && !snapshot.hasDraft && snapshot.persistedValue === serializeDraftValue(value);
   } catch { /* Non-serializable input must keep leave protection enabled. */ }
   return { isPersisted, needsProtection: dirty && !isPersisted };
 }
@@ -17,6 +29,16 @@ export function draftProtection(snapshot: DraftSnapshot, value: unknown, dirty: 
 
 export function draftKey(userId: string, scope: string) {
   return `${DRAFT_PREFIX}${encodeURIComponent(userId)}:${encodeURIComponent(scope)}`;
+}
+
+/** Retire entry-form drafts across accounts while preserving AI conversations verbatim. */
+export function clearLegacyFormDrafts(storage: DraftStorage) {
+  const keys: string[] = [];
+  for (let i = 0; i < storage.length; i++) {
+    const key = storage.key(i);
+    if (key?.startsWith(DRAFT_PREFIX) && !key.endsWith(":assistant")) keys.push(key);
+  }
+  keys.forEach((key) => storage.removeItem(key));
 }
 
 export function clearStoredDrafts(storage: DraftStorage) {
@@ -67,7 +89,7 @@ export class FormDraftSession<T> {
   save(value: T, dirty: boolean) {
     if (this.stopped || this.snapshot.hasDraft) return;
     try {
-      const serialized = JSON.stringify(value);
+      const serialized = serializeDraftValue(value);
       if (this.awaitingRestore !== null && this.awaitingRestore !== serialized) return;
       this.awaitingRestore = null;
       if (!dirty) {
@@ -95,8 +117,8 @@ export class FormDraftSession<T> {
     const value = this.pending;
     if (value === undefined) return undefined;
     const restored = normalize ? normalize(value) : value;
-    this.awaitingRestore = JSON.stringify(restored);
-    this.lastWritten = JSON.stringify(value);
+    this.awaitingRestore = serializeDraftValue(restored);
+    this.lastWritten = serializeDraftValue(value);
     this.pending = undefined;
     this.publish({ hasDraft: false, status: "saved", error: null, persistedValue: this.lastWritten });
     return restored;
@@ -123,7 +145,7 @@ export class FormDraftSession<T> {
     const next = typeof replacement === "function" ? (replacement as (stored: T | undefined) => T)(this.pending) : replacement;
     const nextDirty = next !== undefined && (typeof dirty === "function" ? dirty(next) : dirty);
     if (repairingRead) this.stopped = false;
-    this.suppressed = replacement === undefined ? JSON.stringify(value) : null;
+    this.suppressed = replacement === undefined ? serializeDraftValue(value) : null;
     if (!this.discard()) {
       if (repairingRead) this.stopped = true;
       return next;
@@ -133,7 +155,7 @@ export class FormDraftSession<T> {
       this.save(next, nextDirty);
       // Persist immediately, then ignore the preceding render until the caller
       // has acknowledged the replacement state in its next save effect.
-      this.awaitingRestore = JSON.stringify(next);
+      this.awaitingRestore = serializeDraftValue(next);
     }
     return next;
   }

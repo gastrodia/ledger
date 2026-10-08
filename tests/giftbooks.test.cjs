@@ -157,6 +157,7 @@ test('image completion appends to edits made while upload was pending', async ()
     'next/dynamic': { default: () => 'editor' },
     '@/lib/upload': { upload: () => pending },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/markdown-table': { markdownTableComponents: {} },
     'lucide-react': { Image: 'icon' },
     '@/hooks/use-toast': { toast: { error: assert.fail } },
     '@uiw/react-md-editor': { commands: { group: () => ({}) } },
@@ -188,7 +189,7 @@ test('editing a giftbook submits null for cleared optional fields', async () => 
   const jsx = (type, props) => ({ type, props });
   const controls = Object.fromEntries(['DialogContent', 'DialogHeader', 'DialogTitle', 'DialogDescription', 'DialogBody', 'DialogFooter', 'Label', 'Input', 'Button'].map((name) => [name, name]));
   vm.runInNewContext(source, {
-    exports, ...controls, DraftNotice: "DraftNotice", useFormDraft: () => ({ clear() {} }), useFormLeaveGuard: () => ({ requestClose: async close => { close(); return true; } }), useEffect() {}, require: () => ({ jsx, jsxs: jsx }),
+    exports, ...controls, useFormLeaveGuard: () => ({ requestClose: async close => { close(); return true; } }), useEffect() {}, require: () => ({ jsx, jsxs: jsx }),
     useState: (initial) => [initial && typeof initial === 'object' ? { name: '礼簿', event_type: '', event_date: '', location: '', description: '' } : initial, () => {}],
     fetch: async (_url, options) => { submitted = JSON.parse(options.body); return { ok: true, json: async () => ({ data: { id: "book", ...submitted } }) }; },
     toast: { success() {}, error: assert.fail }, console,
@@ -213,6 +214,7 @@ test('narrow note editor defaults to a single edit pane and offers preview; desk
     'next/dynamic': { default: () => 'editor' },
     '@/lib/upload': { upload() {} },
     '@/components/ui/button': { Button: 'button' },
+    '@/components/ui/markdown-table': { markdownTableComponents: {} },
     'lucide-react': { Image: 'icon' },
     '@/hooks/use-toast': { toast: { error: assert.fail } },
     '@uiw/react-md-editor': { commands: { group: () => ({}) } },

@@ -1,856 +1,334 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { ChevronDown, ChevronLeft, ChevronRight, Eye, EyeOff, ArrowUpRight, CalendarDays } from "lucide-react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CategoryIcon, MemberAvatar } from "@/components/icons/entity-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeSanitize from "rehype-sanitize";
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  Calendar,
-  Eye,
-  EyeOff,
-} from "lucide-react";
-import { formatCurrency } from "@/lib/utils";
-import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { readSummaryError } from "@/lib/stats-ai-summary";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton, SkeletonRegion } from "@/components/ui/loading-skeleton";
+import { AiAnalysis } from "@/components/stats/ai-analysis";
+import { PeriodTrend } from "@/components/stats/period-trend";
+import { cn, formatCurrency } from "@/lib/utils";
 import { describeAmountChange, getStatsPeriod, localCalendarDate, statsDetailHref, type StatsPeriod } from "@/lib/stats-period";
+import { isStatsMonth, readStatsNavigation, statsNavigationHref, stepStatsDate, type StatsNavigation } from "@/lib/stats-navigation";
 
-interface CategoryStat {
+interface RankedStat {
   id: string | null;
   name: string;
   icon?: string;
-  color?: string;
-  total: number;
-  count: number;
-}
-
-interface MemberStat {
-  id: string | null;
-  name: string;
   avatar?: string;
-  total: number;
-  count: number;
+  total: number | string;
+  count: number | string;
 }
-
 interface StatsData {
-  categoryStats: {
-    income: CategoryStat[];
-    expense: CategoryStat[];
-  };
-  memberStats: {
-    income: MemberStat[];
-    expense: MemberStat[];
-  };
-  summary: {
-    totalIncome: number;
-    totalExpense: number;
-    balance: number;
-  };
-  monthlyStats?: MonthlyStat[];
-  period?: StatsPeriod;
-  comparison?: { totalIncome: number; totalExpense: number };
-  dailyExpense?: number | null;
+  categoryStats: { income: RankedStat[]; expense: RankedStat[] };
+  memberStats: { income: RankedStat[]; expense: RankedStat[] };
+  summary: { totalIncome: number; totalExpense: number; balance: number; count: number; futureCount: number };
+  period: StatsPeriod;
+  comparison: {
+    totalIncome: number; totalExpense: number; currentIncome: number; currentExpense: number;
+    previousCount: number; currentCount: number; previousEndExclusive: string;
+  } | null;
+  dailyExpense: number | null;
+  monthlyStats: Array<{ month: number; income: number; expense: number }>;
+  dailyStats: Array<{ day: number; income: number; expense: number }>;
 }
 
-interface MonthlyStat {
-  month: number;
-  income: number;
-  expense: number;
+const amountColors = { expense: "text-red-600", income: "text-green-600", balance: "text-primary" };
+
+function SummaryAmount({ value, kind, prominent = false }: { value: string; kind: keyof typeof amountColors; prominent?: boolean }) {
+  return <p className={cn("mt-2 whitespace-nowrap font-semibold leading-tight tracking-tight tabular-nums sm:[--amount-size:2rem]", prominent ? "[--amount-size:1.875rem]" : "[--amount-size:1.5rem]")}
+    style={{ fontSize: `min(var(--amount-size), calc(100cqi / ${Math.max(value.length, 1) * 0.7}))` }}>
+    {value.startsWith("¥") ? <><span className="mr-0.5 text-[0.6em]">¥</span><span className={amountColors[kind]}>{value.slice(1)}</span></> : value}
+  </p>;
 }
 
-function YearlyBarChart({
-  monthlyStats,
-  showIncome,
-}: {
-  monthlyStats: MonthlyStat[];
-  showIncome: boolean;
+function BreakdownList({ title, rows, total, type, group, period, showIncome }: {
+  title: string; rows: RankedStat[]; total: number; type: "income" | "expense";
+  group: "category" | "member"; period: StatsPeriod; showIncome: boolean;
 }) {
-  const visibleValues = monthlyStats.flatMap((stat) =>
-    showIncome ? [stat.expense, stat.income] : [stat.expense]
-  );
-  const maxAmount = Math.max(...visibleValues, 0);
-  const axisMax = maxAmount > 0 ? maxAmount : 1;
-  const halfAmount = axisMax / 2;
-
-  return (
-    <Card>
-      <CardHeader className="border-b">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <CardTitle>年度收支趋势</CardTitle>
-          <div className="flex items-center gap-4 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
-              支出
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="h-2.5 w-2.5 rounded-sm bg-green-500" />
-              {showIncome ? "收入" : "收入已隐藏"}
-            </span>
+  return <Card role="region" aria-label={title} className="min-w-0">
+    <CardHeader className="flex-row items-center justify-between gap-3 space-y-0 border-b py-4 sm:py-4">
+      <CardTitle className="flex items-center gap-2"><span aria-hidden="true" className={cn("size-2 shrink-0 rounded-full", type === "expense" ? "bg-rose-400" : "bg-emerald-400")} />{title}</CardTitle>
+      <span className="shrink-0 text-xs text-muted-foreground">{rows.length} 个{group === "category" ? "分类" : "成员"}</span>
+    </CardHeader>
+    <CardContent className="pb-0 sm:pb-0">
+      {rows.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">本期暂无{type === "income" ? "收入" : "支出"}记录</p> : <ul className="divide-y divide-border/60">
+      {rows.map(row => {
+        const name = row.name || (group === "category" ? "未分类" : "未分配");
+        const percentage = total > 0 ? Number(row.total) / total * 100 : 0;
+        const displayPercentage = percentage > 0 && percentage < 0.1 ? "<0.1" : Number(percentage.toFixed(1)).toString();
+        return <li key={row.id || "none"}><Link href={statsDetailHref(period, type, group === "category" ? "categoryId" : "memberId", row.id)} aria-label={`查看${name}的${type === "expense" ? "支出" : "收入"}明细`}
+          className="-mx-2 block rounded-md px-2 py-4 transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring">
+          <div className="flex items-center gap-3">
+            {group === "member" ? <MemberAvatar avatar={row.avatar} name={name} memberId={row.id || undefined} className="size-9" /> : <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted"><CategoryIcon icon={row.icon} className="size-4" /></span>}
+            <div className="min-w-0 flex-1"><p className="break-words text-sm font-medium">{name}</p><p className="mt-0.5 text-xs text-muted-foreground">{row.count} 笔 · {displayPercentage}%</p></div>
+            <p className="max-w-[48%] break-all text-right text-sm font-semibold tabular-nums">{type === "income" && !showIncome ? "••••" : <><span className="mr-0.5 text-[0.75em]">¥</span><span className={amountColors[type]}>{formatCurrency(row.total)}</span></>}</p><ArrowUpRight aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
           </div>
+          <div aria-hidden="true" className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted"><div className={cn("h-full rounded-full", type === "expense" ? "bg-rose-400" : "bg-emerald-400")} style={{ width: `${Math.max(0, Math.min(100, percentage))}%` }} /></div>
+        </Link></li>;
+      })}
+      </ul>}
+    </CardContent>
+  </Card>;
+}
+
+function StatsSkeleton({ periodLabel = "0000年00月", mode = "month", period, showIncome = false }: {
+  periodLabel?: string; mode?: "month" | "year"; period?: StatsPeriod | null; showIncome?: boolean;
+}) {
+  return <SkeletonRegion label="正在加载统计数据…">
+    <div className="space-y-5">
+      <div className="rounded-lg border bg-card p-4 sm:p-5">
+        <div className="mb-5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          <Skeleton className="size-4" /><Skeleton className="font-medium"><span className="invisible">{periodLabel}</span></Skeleton>
+          <Skeleton className={cn("h-4", period?.state === "future" ? "w-52" : !period || period.state === "current" ? "w-44" : "w-32")} />
         </div>
-      </CardHeader>
-      <CardContent className="pt-4 sm:pt-5">
-        {maxAmount === 0 ? (
-          <div className="text-center py-8 text-muted-foreground text-sm">
-            暂无年度收支记录
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-3 sm:gap-6">
+          {[0, 1, 2].map(index => <div key={index} className="min-w-0">
+            <div className="flex h-7 items-center"><Skeleton className="h-4 w-16" /></div>
+            <Skeleton className={cn("mt-2 w-32 max-w-full sm:h-10", index === 0 ? "h-[2.34375rem]" : "h-[1.875rem]")} /><Skeleton className="mt-2 h-5 w-28 max-w-full" />
+          </div>)}
+        </div>
+      </div>
+      <Card>
+        <CardHeader className="gap-3 space-y-0 pb-3">
+          <Skeleton className="h-[22px] w-24" />
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            <Skeleton><span className="invisible">{periodLabel} · {mode === "year" ? "1—12月" : `1—${period?.totalDays ?? 31}日`}</span></Skeleton>
+            {period?.state !== "future" && <Skeleton className="h-4 w-28" />}
           </div>
-        ) : (
-          <div className="overflow-x-auto pb-2">
-            <div className="min-w-[680px]">
-              <div className="grid grid-cols-[64px_1fr] gap-3">
-                <div className="relative h-56 text-xs text-muted-foreground">
-                  <span className="absolute right-0 top-0">
-                    {formatCurrency(axisMax)}
-                  </span>
-                  <span className="absolute right-0 top-1/2 -translate-y-1/2">
-                    {formatCurrency(halfAmount)}
-                  </span>
-                  <span className="absolute right-0 bottom-0">
-                    {formatCurrency(0)}
-                  </span>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <Skeleton className="h-4 w-[38px]" />{showIncome && <Skeleton className="h-4 w-[38px]" />}
+            {(!period || period.endDate > period.asOfDate) && <Skeleton className="h-4 w-[62px]" />}
+            <Skeleton className="ml-auto h-4 w-12" />
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-[2.75rem_minmax(0,1fr)] gap-x-1.5">
+            <div className="flex h-40 flex-col items-end justify-between sm:h-44"><Skeleton className="h-3 w-8" /><Skeleton className="h-3 w-8" /><Skeleton className="h-3 w-4" /></div>
+            <Skeleton className="h-40 w-full sm:h-44" />
+            <div className="pt-2"><Skeleton className="ml-auto h-[16.5px] w-3" /></div><div className="pt-2"><Skeleton className="h-3 w-full" /></div>
+          </div>
+        </CardContent>
+      </Card>
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2"><Skeleton className="h-6 w-24" /><Skeleton className="h-4 w-52 max-w-full" /></div>
+        <div className="grid items-start gap-5 lg:grid-cols-2">
+          {[0, 1, 2, 3].map(group => <Card key={group} className="min-w-0">
+            <CardHeader className="flex-row items-center justify-between space-y-0 border-b py-4 sm:py-4"><Skeleton className="h-[22px] w-24" /><Skeleton className="h-3 w-12" /></CardHeader>
+            <CardContent className="pb-0 sm:pb-0">
+              {[0, 1].map(row => <div key={row} className="border-b py-4 last:border-0">
+                <div className="flex items-center gap-3">
+                  <Skeleton className="size-9 shrink-0" />
+                  <div className="min-w-0 flex-1 space-y-0.5"><Skeleton className="h-5 w-20 max-w-full" /><Skeleton className="h-4 w-16 max-w-full" /></div>
+                  <Skeleton className="h-4 w-16 shrink-0" />
                 </div>
-                <div className="relative h-56 border-l border-b border-border">
-                  <div className="absolute inset-x-0 top-0 border-t border-dashed border-muted" />
-                  <div className="absolute inset-x-0 top-1/2 border-t border-dashed border-muted" />
-                  <div className="absolute inset-0 grid grid-cols-12 items-end gap-3 px-3">
-                    {monthlyStats.map((stat) => {
-                      const expenseHeight = `${Math.max((stat.expense / axisMax) * 100, stat.expense > 0 ? 2 : 0)}%`;
-                      const incomeHeight = `${Math.max((stat.income / axisMax) * 100, stat.income > 0 ? 2 : 0)}%`;
-                      const title = showIncome
-                        ? `${stat.month}月：支出 ${formatCurrency(stat.expense)}，收入 ${formatCurrency(stat.income)}`
-                        : `${stat.month}月：支出 ${formatCurrency(stat.expense)}，收入已隐藏`;
+                <Skeleton className="mt-3 h-1.5 w-full" />
+              </div>)}
+            </CardContent>
+          </Card>)}
+        </div>
+      </div>
+      <div className="flex min-h-14 items-center gap-2 rounded-lg border bg-card px-4 py-3 sm:px-5"><Skeleton className="size-4" /><Skeleton className="h-4 w-16" /></div>
+      <div className="flex h-8 items-center px-1"><Skeleton className="h-3 w-36" /></div>
+    </div>
+  </SkeletonRegion>;
+}
 
-                      return (
-                        <div
-                          key={stat.month}
-                          className="flex h-full items-end justify-center gap-1"
-                          title={title}
-                          aria-label={title}
-                        >
-                          <div
-                            className="w-3 rounded-t-sm bg-red-500 transition-all"
-                            style={{ height: expenseHeight }}
-                          />
-                          {showIncome ? (
-                            <div
-                              className="w-3 rounded-t-sm bg-green-500 transition-all"
-                              style={{ height: incomeHeight }}
-                            />
-                          ) : null}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-              <div className="grid grid-cols-[64px_1fr] gap-3 pt-2">
-                <div />
-                <div className="grid grid-cols-12 gap-3 px-3 text-center text-xs text-muted-foreground">
-                  {monthlyStats.map((stat) => (
-                    <span key={stat.month}>{stat.month}月</span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
+function Segment<T extends string>({ value, options, onChange, label }: {
+  value: T; options: Array<{ value: T; label: string }>; onChange: (value: T) => void; label: string;
+}) {
+  return <div role="group" aria-label={label} className="inline-flex shrink-0 gap-0.5 rounded-md bg-muted/70 p-0.5">
+    {options.map(option => <Button key={option.value} type="button" size="sm" variant={value === option.value ? "default" : "ghost"} aria-pressed={value === option.value}
+      onClick={() => onChange(option.value)}
+      className={cn("h-8 px-3", value !== option.value && "text-muted-foreground")}>
+      {option.label}
+    </Button>)}
+  </div>;
+}
+
+function inclusiveEnd(exclusive: string) {
+  return new Date(Date.parse(`${exclusive}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+}
+
+function StatsHeader() {
+  return <header className="flex flex-wrap items-end justify-between gap-3">
+    <div><h1 className="text-2xl font-semibold tracking-tight">统计分析</h1><p className="mt-1 text-sm text-muted-foreground">看清收支变化，了解钱花在哪里。</p></div>
+    <span className="text-xs text-muted-foreground">仅统计收支记录</span>
+  </header>;
+}
+
+function StatsPageSkeleton() {
+  return <DashboardLayout>
+    <div className="space-y-5">
+      <StatsHeader />
+      <SkeletonRegion label="正在加载统计周期…">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
+          <Skeleton className="h-9 w-[6.375rem]" />
+          <div className="order-3 flex w-full items-center gap-1 sm:order-none sm:w-auto"><Skeleton className="size-8" /><Skeleton className="h-9 w-40" /><Skeleton className="size-8" /></div>
+          <Skeleton className="ml-auto h-8 w-18" />
+        </div>
+      </SkeletonRegion>
+      <StatsSkeleton />
+    </div>
+  </DashboardLayout>;
 }
 
 export default function StatsPage() {
+  return <Suspense fallback={<StatsPageSkeleton />}><StatsContent /></Suspense>;
+}
+
+function StatsContent() {
   const router = useRouter();
-  
-  // 获取当前年月 (YYYY-MM)
-  const getCurrentMonth = () => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    return `${year}-${month}`;
-  };
-
-  // 获取当前年份 (YYYY)
-  const getCurrentYear = () => {
-    return String(new Date().getFullYear());
-  };
-
-  const yearOptions = (() => {
-    const current = new Date().getFullYear();
-    // 默认提供近 20 年（含今年）
-    return Array.from({ length: 20 }, (_, i) => String(current - i));
-  })();
-
+  const params = useSearchParams();
   const [asOfDate] = useState(() => localCalendarDate());
-  const [viewMode, setViewMode] = useState<"month" | "year">("month");
-  const [selectedMonth, setSelectedMonth] = useState<string>(getCurrentMonth());
-  const [selectedYear, setSelectedYear] = useState<string>(getCurrentYear());
-  const [statsData, setStatsData] = useState<StatsData | null>(null);
-  const [loadedQuery, setLoadedQuery] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const selection = readStatsNavigation(params, asOfDate);
+  const { view, date } = selection;
+  const year = date.slice(0, 4);
+  const month = Number(date.slice(5));
+  const periodLabel = view === "month" ? `${Number(year)}年${month}月` : `${Number(year)}年`;
+  const query = `${view === "month" ? `month=${date}` : `year=${year}`}&asOf=${asOfDate}`;
   const [reload, setReload] = useState(0);
   const [showIncome, setShowIncome] = useState(false);
-  const [aiSummary, setAiSummary] = useState("");
-  const [aiError, setAiError] = useState<string | null>(null);
-  const [isAiLoading, setIsAiLoading] = useState(false);
-  const aiAbortRef = useRef<AbortController | null>(null);
+  const [resource, setResource] = useState<{ key: string; data?: StatsData; error?: string } | null>(null);
+  const requestKey = `${query}:${reload}`;
+  const data = resource?.key === requestKey ? resource.data : undefined;
+  const error = resource?.key === requestKey ? resource.error : undefined;
+  const loading = !data && !error;
 
-  const isValidYear = (y: string) => /^\d{4}$/.test(y);
-  const isValidMonth = (m: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(m);
-
-  const query = viewMode === "year"
-    ? `year=${encodeURIComponent(selectedYear)}&asOf=${asOfDate}`
-    : `month=${encodeURIComponent(selectedMonth)}&asOf=${asOfDate}`;
-  const validPeriod = viewMode === "year" ? isValidYear(selectedYear) : isValidMonth(selectedMonth);
-  const isLoading = validPeriod && loadedQuery !== query;
+  // Persist the default period too, so a later return restores exactly the viewed month.
+  useEffect(() => {
+    if (!params.has("date")) {
+      window.history.replaceState(null, "", statsNavigationHref(readStatsNavigation(params, asOfDate)));
+    }
+  }, [params, asOfDate]);
 
   useEffect(() => {
-    if (!validPeriod) return;
     const controller = new AbortController();
     const load = async () => {
       try {
         const response = await fetch(`/api/stats?${query}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
-        if (!response.ok) {
-          if (response.status === 401) { router.push("/login"); return; }
-          throw new Error("获取统计数据失败");
-        }
+        if (response.status === 401) { router.push("/login"); return; }
+        if (!response.ok) throw new Error("统计数据加载失败，请检查网络后重试");
         const result = await response.json();
-        if (!controller.signal.aborted) {
-          setStatsData(result.data);
-          setLoadError(null);
-        }
-      } catch (error) {
-        if (!controller.signal.aborted) {
-          console.error("加载统计数据失败:", error);
-          setLoadError("统计数据加载失败，请检查网络后重试");
-        }
-      } finally {
-        if (!controller.signal.aborted) setLoadedQuery(query);
+        if (!controller.signal.aborted) setResource({ key: requestKey, data: result.data });
+      } catch (cause) {
+        if (!controller.signal.aborted) setResource({ key: requestKey, error: cause instanceof Error ? cause.message : "统计数据加载失败，请重试" });
       }
     };
     void load();
     return () => controller.abort();
-  }, [query, router, validPeriod, reload]);
+  }, [query, requestKey, router]);
 
-  const stopAiSummary = () => {
-    aiAbortRef.current?.abort();
-    aiAbortRef.current = null;
-    setIsAiLoading(false);
+  const navigate = (patch: Partial<StatsNavigation> | ((current: StatsNavigation) => Partial<StatsNavigation>)) => {
+    // Read the latest URL so rapid clicks compose before React finishes rendering.
+    const current = readStatsNavigation(new URLSearchParams(window.location.search), asOfDate);
+    const next = { ...current, ...(typeof patch === "function" ? patch(current) : patch) };
+    if (statsNavigationHref(next) === statsNavigationHref(current)) return;
+    const href = statsNavigationHref(next);
+    // Next's history integration carries its own routing state and updates useSearchParams.
+    window.history.replaceState(null, "", href);
   };
-
-  const getErrorMessage = (e: unknown) => {
-    if (e instanceof Error) return e.message;
-    return "AI 总结失败";
+  const previousDate = stepStatsDate(date, view, -1);
+  const nextDate = stepStatsDate(date, view, 1);
+  const currentPeriod = view === "month" ? date === asOfDate.slice(0, 7) : year === asOfDate.slice(0, 4);
+  const years = [...new Set([Number(year), ...Array.from({ length: 21 }, (_, index) => Number(asOfDate.slice(0, 4)) + 1 - index)])].filter(value => value >= 2 && value <= 9998).sort((a, b) => b - a);
+  const money = (amount: number | string, income = false) => income && !showIncome ? "••••" : `¥${formatCurrency(amount)}`;
+  const change = (kind: "income" | "expense") => {
+    if (kind === "income" && !showIncome) return "收入金额已隐藏";
+    if (!data?.comparison) return "期间尚未开始，暂无对比";
+    const comparison = data.comparison;
+    if (comparison.previousCount === 0) return "上期无记录，暂无对比";
+    const text = describeAmountChange(kind === "income" ? comparison.currentIncome : comparison.currentExpense,
+      kind === "income" ? comparison.totalIncome : comparison.totalExpense);
+    const previousLabel = view === "month" ? "上月" : "上年";
+    return text.replaceAll("上期", `${previousLabel}${data.period.state === "current" ? "同期" : ""}`);
   };
+  const points = data ? view === "year" ? data.monthlyStats.map(stat => ({
+    key: String(stat.month), label: `${stat.month}月`, income: stat.income, expense: stat.expense,
+    future: `${year}-${String(stat.month).padStart(2, "0")}-01` > asOfDate,
+  })) : data.dailyStats.map(stat => ({
+    key: String(stat.day), label: `${month}月${stat.day}日`, income: stat.income, expense: stat.expense,
+    future: `${date}-${String(stat.day).padStart(2, "0")}` > asOfDate,
+  })) : [];
 
-  const generateAiSummary = async () => {
-    aiAbortRef.current?.abort();
-    const controller = new AbortController();
-    aiAbortRef.current = controller;
-    const isCurrent = () => aiAbortRef.current === controller && !controller.signal.aborted;
-    try {
-      if (viewMode === "year" && !isValidYear(selectedYear)) {
-        setAiError("年份格式错误，应为 YYYY");
-        setAiSummary("");
-        setIsAiLoading(false);
-        return;
-      }
-      if (viewMode === "month" && !isValidMonth(selectedMonth)) {
-        setAiError("月份格式错误，应为 YYYY-MM");
-        setAiSummary("");
-        setIsAiLoading(false);
-        return;
-      }
+  return <DashboardLayout>
+    <div className="space-y-5">
+      <StatsHeader />
 
-      setAiError(null);
-      setAiSummary("");
-      setIsAiLoading(true);
-
-      const query =
-        viewMode === "year"
-          ? `year=${encodeURIComponent(selectedYear)}&asOf=${asOfDate}`
-          : `month=${encodeURIComponent(selectedMonth)}&asOf=${asOfDate}`;
-
-      const resp = await fetch(`/api/stats/ai-summary?${query}`, {
-        method: "GET",
-        signal: controller.signal,
-      });
-
-      if (!isCurrent()) return;
-      if (!resp.ok) {
-        if (resp.status === 401) {
-          router.push("/login");
-          return;
-        }
-        throw new Error(await readSummaryError(resp));
-      }
-
-      if (!resp.body) {
-        throw new Error("浏览器不支持流式响应");
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let acc = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (!isCurrent()) return;
-        if (done) {
-          acc += decoder.decode();
-          if (acc) setAiSummary(acc);
-          break;
-        }
-        acc += decoder.decode(value, { stream: true });
-        setAiSummary(acc);
-      }
-    } catch (e: unknown) {
-      if (!isCurrent()) return;
-      if (
-        (e instanceof DOMException && e.name === "AbortError") ||
-        (e instanceof Error && e.name === "AbortError")
-      ) {
-        // 用户手动停止，不当作错误
-        return;
-      }
-      console.error("AI 总结失败:", e);
-      setAiError(getErrorMessage(e));
-    } finally {
-      if (aiAbortRef.current === controller) {
-        aiAbortRef.current = null;
-        setIsAiLoading(false);
-      }
-    }
-  };
-
-  const resetPeriod = () => {
-    setLoadError(null);
-    stopAiSummary();
-    setAiSummary("");
-    setAiError(null);
-    setStatsData(null);
-    setLoadedQuery(null);
-  };
-
-  useEffect(() => {
-    return () => {
-      aiAbortRef.current?.abort();
-      aiAbortRef.current = null;
-    };
-  }, [query]);
-
-  // 计算百分比
-  const calculatePercentage = (amount: number, total: number): number => {
-    if (total === 0) return 0;
-    return Math.round((amount / total) * 100);
-  };
-
-  const formatIncome = (value: number) => (showIncome ? formatCurrency(value) : "****");
-  const activePeriod = statsData?.period ?? getStatsPeriod(viewMode, viewMode === "month" ? selectedMonth : selectedYear, asOfDate);
-  const detailHref = (type: "income" | "expense", dimension: "categoryId" | "memberId", id: string | null) =>
-    activePeriod ? statsDetailHref(activePeriod, type, dimension, id) : "/dashboard";
-
-  return (
-    <DashboardLayout>
-      <div className="space-y-6">
-        {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              统计分析
-            </h1>
-            <p className="text-sm leading-6 text-muted-foreground mt-1">
-              统计仅包含收支记录；礼簿、送礼和借还台账保持独立，不会自动计入。
-            </p>
-          </div>
-          <div className="w-full sm:w-auto flex flex-col sm:flex-row gap-2 sm:items-center">
-            <div className="flex gap-2">
-              <Button
-                type="button"
-                variant={viewMode === "month" ? "default" : "outline"}
-                onClick={() => { if (viewMode !== "month") { resetPeriod(); setViewMode("month"); } }}
-              >
-                按月
-              </Button>
-              <Button
-                type="button"
-                variant={viewMode === "year" ? "default" : "outline"}
-                onClick={() => { if (viewMode !== "year") { resetPeriod(); setViewMode("year"); } }}
-              >
-                按年
-              </Button>
-            </div>
-
-            {viewMode === "month" ? (
-              <Input
-                id="month-picker"
-                type="month"
-                value={selectedMonth}
-                onChange={(e) => { if (selectedMonth !== e.target.value) { resetPeriod(); setSelectedMonth(e.target.value); } }}
-                className="w-full sm:w-[200px]"
-              />
-            ) : (
-              <Select value={selectedYear} onValueChange={(value) => { if (selectedYear !== value) { resetPeriod(); setSelectedYear(value); } }}>
-                <SelectTrigger className="w-full sm:w-[200px]" id="year-picker">
-                  <SelectValue placeholder="选择年份" />
-                </SelectTrigger>
-                <SelectContent>
-                  {yearOptions.map((y) => (
-                    <SelectItem key={y} value={y}>
-                      {y} 年
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
+        <Segment value={view} label="统计周期" options={[{ value: "month", label: "按月" }, { value: "year", label: "按年" }]} onChange={value => navigate({ view: value })} />
+        <div className="order-3 flex w-full min-w-0 items-center gap-1 sm:order-none sm:w-auto">
+          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label={view === "month" ? "上个月" : "上一年"} disabled={!previousDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, -1) || current.date }))}><ChevronLeft /></Button>
+          {view === "month" ? <Input type="month" aria-label="选择月份" value={date} min="0002-01" max="9998-12" className="h-9 w-40 min-w-0 text-sm" onInput={event => isStatsMonth(event.currentTarget.value) && navigate({ date: event.currentTarget.value })} onChange={event => isStatsMonth(event.target.value) && navigate({ date: event.target.value })} /> :
+            <Select value={year} onValueChange={value => navigate(current => ({ date: `${value}-${current.date.slice(5)}` }))}>
+              <SelectTrigger aria-label="选择年份" className="h-9 w-40 text-sm"><SelectValue /></SelectTrigger>
+              <SelectContent>{years.map(value => <SelectItem key={value} value={String(value).padStart(4, "0")}>{value} 年</SelectItem>)}</SelectContent>
+            </Select>}
+          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label={view === "month" ? "下个月" : "下一年"} disabled={!nextDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, 1) || current.date }))}><ChevronRight /></Button>
         </div>
-
-        {isLoading ? (
-          <div className="text-center py-12 text-muted-foreground">
-            <p>加载中...</p>
-          </div>
-        ) : loadError ? (
-          <Card>
-            <CardContent className="py-12 text-center space-y-4" role="alert">
-              <p className="font-medium">{loadError}</p>
-              <Button variant="outline" onClick={() => {
-                setLoadError(null);
-                setLoadedQuery(null);
-                setReload((value) => value + 1);
-              }}>重新加载</Button>
-            </CardContent>
-          </Card>
-        ) : !statsData ? (
-          <div className="text-center py-12 text-muted-foreground">
-            <p>{validPeriod ? "所选期间暂无收支记录" : "请选择有效的月份或年份"}</p>
-          </div>
-        ) : (
-          <>
-            {/* Summary Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <Card>
-                <CardContent className="pt-4 sm:pt-5">
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-muted-foreground">总收入</p>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => setShowIncome((v) => !v)}
-                          aria-label={showIncome ? "隐藏收入金额" : "显示收入金额"}
-                        >
-                          {showIncome ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                        </Button>
-                      </div>
-                      <p className="text-2xl font-bold text-green-600">
-                        {formatIncome(statsData.summary.totalIncome)}
-                      </p>
-                    </div>
-                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-green-100">
-                      <TrendingUp className="h-6 w-6 text-green-600" />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardContent className="pt-4 sm:pt-5">
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-muted-foreground">总支出</p>
-                      <p className="text-2xl font-bold text-red-600">
-                        {formatCurrency(statsData.summary.totalExpense)}
-                      </p>
-                    </div>
-                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-red-100">
-                      <TrendingDown className="h-6 w-6 text-red-600" />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardContent className="pt-4 sm:pt-5">
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium text-muted-foreground">结余</p>
-                      <p className="text-2xl font-bold text-primary">
-                        {showIncome ? formatCurrency(statsData.summary.balance) : "****"}
-                      </p>
-                    </div>
-                    <div className="flex items-center justify-center w-10 h-10 rounded-md bg-primary/10">
-                      <Calendar className="h-6 w-6 text-primary" />
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-
-            {activePeriod && statsData.comparison ? (
-              <Card>
-                <CardHeader className="border-b space-y-2">
-                  <CardTitle>上期对比与日均支出</CardTitle>
-                  <p className="text-sm text-muted-foreground">
-                    本期 {activePeriod.startDate} 至 {activePeriod.endDate}，上期 {activePeriod.previousStartDate} 至 {activePeriod.previousEndDate}。
-                    按两个完整日历期间内已记录的金额比较，包含未来日期记录。
-                    {activePeriod.state === "current" ? "本期尚未结束，此处不是同期进度对比。" : activePeriod.state === "future" ? "本期尚未开始，暂不计算变化或日均。" : ""}
-                  </p>
-                </CardHeader>
-                <CardContent className="pt-6 grid grid-cols-1 sm:grid-cols-3 gap-5">
-                  <div className="space-y-1">
-                    <p className="text-sm text-muted-foreground">收入对比</p>
-                    <p className="font-semibold">{!showIncome ? "****" : activePeriod.state === "future" ? "暂无对比" : describeAmountChange(statsData.summary.totalIncome, statsData.comparison.totalIncome)}</p>
-                    <p className="text-sm text-muted-foreground">上期 {formatIncome(statsData.comparison.totalIncome)}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm text-muted-foreground">支出对比</p>
-                    <p className="font-semibold">{activePeriod.state === "future" ? "暂无对比" : describeAmountChange(statsData.summary.totalExpense, statsData.comparison.totalExpense)}</p>
-                    <p className="text-sm text-muted-foreground">上期 {formatCurrency(statsData.comparison.totalExpense)}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-sm text-muted-foreground">日均支出</p>
-                    <p className="font-semibold">{statsData.dailyExpense == null ? "暂无" : formatCurrency(statsData.dailyExpense)}</p>
-                    <p className="text-sm text-muted-foreground">
-                      {activePeriod.state === "future" ? "所选期间尚未开始" : activePeriod.state === "current"
-                        ? `截至 ${activePeriod.asOfDate}，按已过 ${activePeriod.elapsedDays} 天计算；不含未来日期支出`
-                        : `按完整期间 ${activePeriod.totalDays} 天计算`}
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : null}
-
-            {viewMode === "year" ? (
-              <YearlyBarChart
-                monthlyStats={statsData.monthlyStats || []}
-                showIncome={showIncome}
-              />
-            ) : null}
-
-            {/* AI Summary */}
-            <Card>
-              <CardHeader className="border-b">
-                <div className="flex items-center justify-between gap-4">
-                  <CardTitle>AI总结</CardTitle>
-                  <div className="flex gap-2">
-                    <Button
-                      type="button"
-                      onClick={generateAiSummary}
-                      disabled={isLoading || !statsData || isAiLoading}
-                    >
-                      AI总结
-                    </Button>
-                    {isAiLoading ? (
-                      <Button type="button" variant="outline" onClick={stopAiSummary}>
-                        停止
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="pt-4 sm:pt-5">
-                {aiError ? (
-                  <div className="text-sm text-red-600 whitespace-pre-wrap">
-                    {aiError}
-                  </div>
-                ) : isAiLoading && !aiSummary ? (
-                  <div className="text-sm text-muted-foreground">AI 正在生成总结...</div>
-                ) : aiSummary ? (
-                  <div className="text-sm leading-6">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeSanitize]}
-                      components={{
-                        h1: (props) => (
-                          <h1 className="text-lg font-semibold mb-3" {...props} />
-                        ),
-                        h2: (props) => (
-                          <h2 className="text-base font-semibold mt-4 mb-2" {...props} />
-                        ),
-                        h3: (props) => (
-                          <h3 className="text-sm font-semibold mt-3 mb-2" {...props} />
-                        ),
-                        p: (props) => <p className="my-2 whitespace-pre-wrap" {...props} />,
-                        ul: (props) => <ul className="list-disc pl-5 my-2 space-y-1" {...props} />,
-                        ol: (props) => <ol className="list-decimal pl-5 my-2 space-y-1" {...props} />,
-                        li: (props) => <li className="whitespace-pre-wrap" {...props} />,
-                        strong: (props) => <strong className="font-semibold" {...props} />,
-                        a: (props) => (
-                          <a className="underline underline-offset-4" target="_blank" rel="noreferrer" {...props} />
-                        ),
-                      }}
-                    >
-                      {aiSummary}
-                    </ReactMarkdown>
-                  </div>
-                ) : (
-                  <div className="text-sm text-muted-foreground">
-                    点击右上角【AI总结】，生成当前{viewMode === "month" ? "月份" : "年份"}的收支总结。
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <p className="text-sm text-muted-foreground">点击分类或成员，可查看所选期间的对应收支明细。</p>
-            {/* 四个独立的统计卡片 */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* 按分类统计 - 支出 */}
-              <Card>
-                <CardHeader className="border-b">
-                  <div className="flex items-center justify-between">
-                    <CardTitle>支出分类</CardTitle>
-                    <span className="text-sm text-muted-foreground">
-                      {statsData.categoryStats.expense.length} 个分类
-                    </span>
-                  </div>
-                </CardHeader>
-                <CardContent className="pt-4 sm:pt-5">
-                  {statsData.categoryStats.expense.length === 0 ? (
-                    <div className="text-center py-8 text-muted-foreground text-sm">
-                      暂无支出记录
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {statsData.categoryStats.expense.map((stat) => {
-                        const percentage = calculatePercentage(
-                          stat.total,
-                          statsData.summary.totalExpense
-                        );
-                        return (
-                          <Link key={stat.id || "none"} href={detailHref("expense", "categoryId", stat.id)}
-                            aria-label={`查看${stat.name || "未分类"}的支出明细`}
-                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-xl">{stat.icon || "📂"}</span>
-                                <span className="font-medium truncate">
-                                  {stat.name || "未分类"}
-                                </span>
-                                <span className="text-xs text-muted-foreground shrink-0">
-                                  {stat.count} 笔
-                                </span>
-                              </div>
-                              <div className="text-right shrink-0 ml-2">
-                                <p className="font-bold text-red-600">
-                                  {formatCurrency(stat.total)}
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  {percentage}%
-                                </p>
-                              </div>
-                            </div>
-                            <div className="w-full bg-muted rounded-full h-2">
-                              <div
-                                className="bg-red-500 h-2 rounded-full transition-all"
-                                style={{ width: `${percentage}%` }}
-                              />
-                            </div>
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* 按分类统计 - 收入 */}
-              <Card>
-                <CardHeader className="border-b">
-                  <div className="flex items-center justify-between">
-                    <CardTitle>收入分类</CardTitle>
-                    <span className="text-sm text-muted-foreground">
-                      {statsData.categoryStats.income.length} 个分类
-                    </span>
-                  </div>
-                </CardHeader>
-                <CardContent className="pt-4 sm:pt-5">
-                  {statsData.categoryStats.income.length === 0 ? (
-                    <div className="text-center py-8 text-muted-foreground text-sm">
-                      暂无收入记录
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {statsData.categoryStats.income.map((stat) => {
-                        const percentage = calculatePercentage(
-                          stat.total,
-                          statsData.summary.totalIncome
-                        );
-                        return (
-                          <Link key={stat.id || "none"} href={detailHref("income", "categoryId", stat.id)}
-                            aria-label={`查看${stat.name || "未分类"}的收入明细`}
-                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-xl">{stat.icon || "📂"}</span>
-                                <span className="font-medium truncate">
-                                  {stat.name || "未分类"}
-                                </span>
-                                <span className="text-xs text-muted-foreground shrink-0">
-                                  {stat.count} 笔
-                                </span>
-                              </div>
-                              <div className="text-right shrink-0 ml-2">
-                                <p className="font-bold text-green-600">
-                                  {formatIncome(stat.total)}
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  {percentage}%
-                                </p>
-                              </div>
-                            </div>
-                            <div className="w-full bg-muted rounded-full h-2">
-                              <div
-                                className="bg-green-500 h-2 rounded-full transition-all"
-                                style={{ width: `${percentage}%` }}
-                              />
-                            </div>
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* 按成员统计 - 支出 */}
-              <Card>
-                <CardHeader className="border-b">
-                  <div className="flex items-center justify-between">
-                    <CardTitle>支出成员</CardTitle>
-                    <span className="text-sm text-muted-foreground">
-                      {statsData.memberStats.expense.length} 个成员
-                    </span>
-                  </div>
-                </CardHeader>
-                <CardContent className="pt-4 sm:pt-5">
-                  {statsData.memberStats.expense.length === 0 ? (
-                    <div className="text-center py-8 text-muted-foreground text-sm">
-                      暂无支出记录
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {statsData.memberStats.expense.map((stat) => {
-                        const percentage = calculatePercentage(
-                          stat.total,
-                          statsData.summary.totalExpense
-                        );
-                        return (
-                          <Link key={stat.id || "none"} href={detailHref("expense", "memberId", stat.id)}
-                            aria-label={`查看${stat.name || "未分配"}的支出明细`}
-                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-xl">{stat.avatar || "👤"}</span>
-                                <span className="font-medium truncate">
-                                  {stat.name || "未分配"}
-                                </span>
-                                <span className="text-xs text-muted-foreground shrink-0">
-                                  {stat.count} 笔
-                                </span>
-                              </div>
-                              <div className="text-right shrink-0 ml-2">
-                                <p className="font-bold text-red-600">
-                                  {formatCurrency(stat.total)}
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  {percentage}%
-                                </p>
-                              </div>
-                            </div>
-                            <div className="w-full bg-muted rounded-full h-2">
-                              <div
-                                className="bg-red-500 h-2 rounded-full transition-all"
-                                style={{ width: `${percentage}%` }}
-                              />
-                            </div>
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* 按成员统计 - 收入 */}
-              <Card>
-                <CardHeader className="border-b">
-                  <div className="flex items-center justify-between">
-                    <CardTitle>收入成员</CardTitle>
-                    <span className="text-sm text-muted-foreground">
-                      {statsData.memberStats.income.length} 个成员
-                    </span>
-                  </div>
-                </CardHeader>
-                <CardContent className="pt-4 sm:pt-5">
-                  {statsData.memberStats.income.length === 0 ? (
-                    <div className="text-center py-8 text-muted-foreground text-sm">
-                      暂无收入记录
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {statsData.memberStats.income.map((stat) => {
-                        const percentage = calculatePercentage(
-                          stat.total,
-                          statsData.summary.totalIncome
-                        );
-                        return (
-                          <Link key={stat.id || "none"} href={detailHref("income", "memberId", stat.id)}
-                            aria-label={`查看${stat.name || "未分配"}的收入明细`}
-                            className="block space-y-2 rounded-md p-2 -mx-2 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <span className="text-xl">{stat.avatar || "👤"}</span>
-                                <span className="font-medium truncate">
-                                  {stat.name || "未分配"}
-                                </span>
-                                <span className="text-xs text-muted-foreground shrink-0">
-                                  {stat.count} 笔
-                                </span>
-                              </div>
-                              <div className="text-right shrink-0 ml-2">
-                                <p className="font-bold text-green-600">
-                                  {formatIncome(stat.total)}
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  {percentage}%
-                                </p>
-                              </div>
-                            </div>
-                            <div className="w-full bg-muted rounded-full h-2">
-                              <div
-                                className="bg-green-500 h-2 rounded-full transition-all"
-                                style={{ width: `${percentage}%` }}
-                              />
-                            </div>
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-          </>
-        )}
+        <Button type="button" variant="ghost" size="sm" className="ml-auto h-8 text-muted-foreground" disabled={currentPeriod} onClick={() => navigate({ date: asOfDate.slice(0, 7) })}>{view === "month" ? "回到本月" : "回到今年"}</Button>
       </div>
-    </DashboardLayout>
-  );
+
+      {loading ? <StatsSkeleton periodLabel={periodLabel} mode={view} period={getStatsPeriod(view, view === "month" ? date : year, asOfDate)} showIncome={showIncome} /> : error ? <div role="alert" className="rounded-lg border bg-card px-4 py-12 text-center"><p className="mb-4 text-sm">{error}</p><Button variant="outline" onClick={() => setReload(value => value + 1)}>重新加载</Button></div> : data ? <>
+        <section aria-label={`${periodLabel}收支总览`} className="rounded-lg border bg-card p-4 sm:p-5">
+          <div className="mb-5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+            <CalendarDays className="size-4 text-muted-foreground" aria-hidden="true" /><h2 className="font-medium">{periodLabel}</h2>
+            <span className="text-xs text-muted-foreground">{data.period.state === "current" ? `截至 ${asOfDate}` : data.period.state === "future" ? "尚未开始 · 已录入记录" : "完整期间"} · {data.summary.count} 笔记录</span>
+          </div>
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-3 sm:gap-6">
+            <div className="min-w-0 [container-type:inline-size]">
+              <p className="flex h-7 items-center text-sm text-muted-foreground">支出</p>
+              <SummaryAmount value={money(data.summary.totalExpense)} kind="expense" prominent />
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">{change("expense")}</p>
+            </div>
+            <div className="min-w-0 [container-type:inline-size]">
+              <div className="flex h-7 items-center gap-2 text-sm text-muted-foreground">收入<Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" aria-label={showIncome ? "隐藏收入与结余" : "显示收入与结余"} onClick={() => setShowIncome(value => !value)}>{showIncome ? <Eye /> : <EyeOff />}</Button></div>
+              <SummaryAmount value={money(data.summary.totalIncome, true)} kind="income" />
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">{change("income")}</p>
+            </div>
+            <div className="min-w-0 [container-type:inline-size]">
+              <p className="flex h-7 items-center text-sm text-muted-foreground">记账结余</p>
+              <SummaryAmount value={money(data.summary.balance, true)} kind="balance" />
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">收入 − 支出</p>
+            </div>
+          </div>
+          {data.summary.futureCount > 0 && <p className="mt-5 border-t pt-3 text-xs leading-5 text-muted-foreground">期间总额含 {data.summary.futureCount} 笔未来日期记录{data.period.state === "current" ? "；同期对比与日均支出不含这些记录。" : "。"}</p>}
+        </section>
+
+        <PeriodTrend key={`trend:${query}`} mode={view} periodLabel={periodLabel} points={points} showIncome={showIncome} dailyExpense={data.dailyExpense} />
+
+        <section aria-label="收支构成" className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-semibold">收支构成</h2>
+            <p className="text-xs text-muted-foreground">{periodLabel} · 点击分类或成员查看明细</p>
+          </div>
+          <div className="grid items-start gap-5 lg:grid-cols-2">
+            <BreakdownList title="支出分类" rows={data.categoryStats.expense} total={data.summary.totalExpense} type="expense" group="category" period={data.period} showIncome={showIncome} />
+            <BreakdownList title="收入分类" rows={data.categoryStats.income} total={data.summary.totalIncome} type="income" group="category" period={data.period} showIncome={showIncome} />
+            <BreakdownList title="支出成员" rows={data.memberStats.expense} total={data.summary.totalExpense} type="expense" group="member" period={data.period} showIncome={showIncome} />
+            <BreakdownList title="收入成员" rows={data.memberStats.income} total={data.summary.totalIncome} type="income" group="member" period={data.period} showIncome={showIncome} />
+          </div>
+        </section>
+
+        <AiAnalysis key={`ai:${query}`} query={query} label={periodLabel} showIncome={showIncome} onReveal={() => setShowIncome(true)} onUnauthorized={() => router.push("/login")} empty={data.summary.count === 0} />
+
+        <details className="group px-1 text-xs leading-6 text-muted-foreground">
+          <summary className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 [&::-webkit-details-marker]:hidden">统计范围与对比口径<ChevronDown className="size-3.5 transition-transform group-open:rotate-180" aria-hidden="true" /></summary>
+          <div className="space-y-1 pb-3">
+            <p>期间总额、趋势与构成：{data.period.startDate} 至 {data.period.endDate}内全部已记录的收支，包含未来日期记录。</p>
+            {data.comparison ? <p>{data.period.state === "current" ? "同期对比" : "完整期间对比"}：{data.period.startDate} 至 {data.period.state === "current" ? asOfDate : data.period.endDate}，与 {data.period.previousStartDate} 至 {inclusiveEnd(data.comparison.previousEndExclusive)}比较{data.period.state === "current" ? "；上期较短时截至上期末" : ""}。</p> : <p>所选期间尚未开始，暂不计算变化和日均支出。</p>}
+            {data.dailyExpense !== null && <p>日均支出按{data.period.state === "current" ? `截至 ${asOfDate}已过的` : "完整期间的"} {data.period.elapsedDays} 天计算，不含未来日期支出。</p>}
+            <p>礼簿、送礼和借还台账保持独立，不会自动计入；记账结余不代表账户余额。</p>
+          </div>
+        </details>
+      </> : null}
+    </div>
+  </DashboardLayout>;
 }

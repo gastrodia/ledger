@@ -2,6 +2,7 @@
 
 import { useListResource, useJsonLoader } from "@/hooks/use-list-resource";
 import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { Skeleton, SkeletonRegion } from "@/components/ui/loading-skeleton";
 import { updateCategories } from "@/lib/list-updates";
 
 import { useState, useRef } from "react";
@@ -32,26 +33,29 @@ import type { Category, TransactionType } from "@/types";
 import { toast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/use-confirm";
 import { SortableCategoryGrid } from "@/components/categories/sortable-category-grid";
+import { CategoryIcon } from "@/components/icons/entity-icon";
+import { IconPicker } from "@/components/icons/icon-picker";
+import { DEFAULT_CATEGORY_ICON, isCategoryIcon } from "@/lib/entity-icon-catalog";
 
 // 预设分类模板
 const presetCategories = {
   expense: [
-    { name: "餐饮", icon: "🍜" },
-    { name: "交通", icon: "🚗" },
-    { name: "购物", icon: "🛒" },
-    { name: "娱乐", icon: "🎮" },
-    { name: "医疗", icon: "💊" },
-    { name: "教育", icon: "📚" },
-    { name: "住房", icon: "🏠" },
-    { name: "其他", icon: "📦" },
+    { name: "餐饮", icon: "lucide:utensils" },
+    { name: "交通", icon: "lucide:car" },
+    { name: "购物", icon: "lucide:shopping-cart" },
+    { name: "娱乐", icon: "lucide:gamepad-2" },
+    { name: "医疗", icon: "lucide:pill" },
+    { name: "教育", icon: "lucide:book-open" },
+    { name: "住房", icon: "lucide:house" },
+    { name: "其他", icon: "lucide:package" },
   ],
   income: [
-    { name: "工资", icon: "💰" },
-    { name: "投资", icon: "📈" },
-    { name: "奖金", icon: "🎁" },
-    { name: "兼职", icon: "💼" },
-    { name: "红包", icon: "🧧" },
-    { name: "其他", icon: "💵" },
+    { name: "工资", icon: "lucide:wallet" },
+    { name: "投资", icon: "lucide:trending-up" },
+    { name: "奖金", icon: "lucide:gift" },
+    { name: "兼职", icon: "lucide:briefcase" },
+    { name: "红包", icon: "lucide:mail" },
+    { name: "其他", icon: "lucide:banknote" },
   ],
 };
 
@@ -174,12 +178,7 @@ export default function CategoriesPage() {
         <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
         {/* Loading State */}
         {isLoading ? (
-          <Card>
-            <CardContent className="py-12 text-center">
-              <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
-              <p className="text-muted-foreground mt-4">加载中...</p>
-            </CardContent>
-          </Card>
+          <CategoriesSkeleton />
         ) : loadError ? (
           <Card>
             <CardContent className="py-12 text-center space-y-4" role="alert">
@@ -262,6 +261,32 @@ export default function CategoriesPage() {
   );
 }
 
+function CategoriesSkeleton() {
+  return (
+    <SkeletonRegion label="正在加载收支分类">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {["支出分类", "收入分类"].map((title) => (
+          <Card key={title}>
+            <CardHeader><CardTitle className="text-lg">{title}</CardTitle></CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {Array.from({ length: 6 }, (_, index) => (
+                  <div key={index} className="min-w-0 rounded-lg border bg-card p-4 pt-12">
+                    <div className="flex flex-col items-center space-y-2">
+                      <Skeleton className="h-10 w-10 rounded-md" />
+                      <div className="flex h-6 items-center"><Skeleton className="h-4 w-12" /></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </SkeletonRegion>
+  );
+}
+
 function CategoryModal({
   isOpen,
   onClose,
@@ -276,7 +301,7 @@ function CategoryModal({
   const [formData, setFormData] = useState({
     name: category?.name || "",
     type: category?.type || "expense" as TransactionType,
-    icon: category?.icon || "",
+    icon: category?.icon && isCategoryIcon(category.icon) ? category.icon : DEFAULT_CATEGORY_ICON,
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -355,7 +380,7 @@ function CategoryModal({
             {category ? "修改分类的信息" : "创建一个新的收支分类"}
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 gap-4">
           <DialogBody className="space-y-4 py-4">
           <div className="space-y-2">
             <Label htmlFor="type">类型</Label>
@@ -385,7 +410,7 @@ function CategoryModal({
                     onClick={() => handleSelectPreset(preset)}
                     className="flex flex-col items-center gap-1 p-3 rounded-lg border bg-card hover:bg-accent transition-colors"
                   >
-                    <span className="text-2xl">{preset.icon}</span>
+                    <CategoryIcon icon={preset.icon} className="size-6 text-primary" />
                     <span className="text-xs">{preset.name}</span>
                   </button>
                 ))}
@@ -407,14 +432,11 @@ function CategoryModal({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="icon">图标 (Emoji)</Label>
-            <Input
-              id="icon"
-              type="text"
-              placeholder="请输入图标 Emoji"
+            <Label>分类图标</Label>
+            <IconPicker
+              kind="category"
               value={formData.icon}
-              onChange={(e) => setFormData({ ...formData, icon: e.target.value })}
-              maxLength={10}
+              onChange={(icon) => setFormData({ ...formData, icon })}
             />
           </div>
           </DialogBody>

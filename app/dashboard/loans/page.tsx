@@ -2,13 +2,13 @@
 
 import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
 import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { HorizontalScroll } from "@/components/ui/horizontal-scroll";
+import { RecordListSkeleton, Skeleton, SkeletonRegion } from "@/components/ui/loading-skeleton";
 import { upsertRow } from "@/lib/list-resource";
 import { updateLoan } from "@/lib/list-updates";
 
 import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
-import { useFormDraft } from "@/hooks/use-form-draft";
-import { DraftNotice } from "@/components/ui/draft-notice";
 
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
@@ -268,20 +268,29 @@ export default function LoansPage() {
                 <HandCoins className="h-5 w-5 text-primary" />
                 {title}
               </CardTitle>
-              <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                <span>
-                  应还合计：{" "}
-                  <span className="font-semibold text-foreground">
-                    {formatCurrency(s.due)}
+              {isLoading ? (
+                <SkeletonRegion label={`正在加载${title}金额汇总…`} className="mt-2">
+                  <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+                    <div className="flex items-center gap-1">应还合计：<Skeleton className="h-5 w-20" /></div>
+                    <div className="flex items-center gap-1">未还合计：<Skeleton className="h-5 w-20" /></div>
+                  </div>
+                </SkeletonRegion>
+              ) : (
+                <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+                  <span>
+                    应还合计：{" "}
+                    <span className="font-semibold text-foreground">
+                      {resource.data ? formatCurrency(s.due) : "—"}
+                    </span>
                   </span>
-                </span>
-                <span>
-                  未还合计：{" "}
-                  <span className="font-semibold text-foreground">
-                    {formatCurrency(s.remaining)}
+                  <span>
+                    未还合计：{" "}
+                    <span className="font-semibold text-foreground">
+                      {resource.data ? formatCurrency(s.remaining) : "—"}
+                    </span>
                   </span>
-                </span>
-              </div>
+                </div>
+              )}
               <p className="mt-1 text-xs text-muted-foreground">当前显示范围汇总，仅计金额；物品不折算。</p>
             </div>
 
@@ -292,10 +301,16 @@ export default function LoansPage() {
           </div>
         </CardHeader>
 
-        <CardContent className="p-0">
+        <CardContent className="p-0 sm:px-0">
           <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
           {isLoading ? (
-            <div className="text-center py-12 text-muted-foreground">加载中...</div>
+            <RecordListSkeleton
+              label={`正在加载${title}记录…`}
+              columns={["对方", "标的", "应还", "已还", "未还", "状态", "日期", "操作"]}
+              rows={3}
+              breakpoint="md"
+              tableClassName="min-w-[960px] whitespace-nowrap"
+            />
           ) : loadError ? (
               <div role="alert" className="space-y-3 px-4 py-10 text-center">
                 <p className="text-sm text-destructive">{loadError}</p>
@@ -311,8 +326,8 @@ export default function LoansPage() {
           ) : (
             <>
               {/* PC：表格 */}
-              <div className="hidden md:block overflow-x-auto">
-                <table className="w-full">
+              <HorizontalScroll className="hidden md:block">
+                <table className="w-full min-w-[960px] whitespace-nowrap">
                   <thead>
                     <tr className="border-b bg-muted/50">
                       <th className="text-left p-4 font-semibold text-sm text-muted-foreground">
@@ -371,14 +386,14 @@ export default function LoansPage() {
                             isSettled ? "text-muted-foreground line-through" : "",
                           ].join(" ")}
                         >
-                          <td className="p-4 font-medium"><div>{l.counterparty_name}</div><div className="mt-1"><TransactionLinkButton sourceId={l.id} label={`${l.counterparty_name}的借还记录`} /></div></td>
+                          <td className="p-4 font-medium"><div className="max-w-[200px] truncate" title={l.counterparty_name}>{l.counterparty_name}</div><div className="mt-1 min-w-max"><TransactionLinkButton sourceId={l.id} sourceDate={formatDate(l.occurred_at)} label={`${l.counterparty_name}的借还记录`} /></div></td>
                           <td className="p-4">
                             <div className="flex items-center gap-2">
-                              <span className="truncate max-w-[260px]">{due}</span>
+                              <span className="min-w-0 truncate max-w-[260px]" title={due}>{due}</span>
                               {l.attachment_key ? (
                                 <button
                                   type="button"
-                                  className="text-muted-foreground hover:text-foreground"
+                                  className="shrink-0 text-muted-foreground hover:text-foreground"
                                   onClick={() =>
                                     setPreviewAttachment({
                                       url: l.attachment_key!,
@@ -393,7 +408,7 @@ export default function LoansPage() {
                               ) : null}
                             </div>
                             {l.notes ? (
-                              <div className="mt-1 text-xs text-muted-foreground truncate max-w-[360px]">
+                              <div className="mt-1 text-xs text-muted-foreground truncate max-w-[360px]" title={l.notes}>
                                 备注：{l.notes}
                               </div>
                             ) : null}
@@ -414,7 +429,7 @@ export default function LoansPage() {
                             {formatDate(l.occurred_at)}
                           </td>
                           <td className="p-4">
-                            <div className="flex justify-end gap-2">
+                            <div className="flex min-w-max justify-end gap-2">
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -453,7 +468,7 @@ export default function LoansPage() {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </HorizontalScroll>
 
               {/* Mobile：卡片 */}
               <div className="md:hidden divide-y">
@@ -480,7 +495,7 @@ export default function LoansPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{l.counterparty_name}</div>
-                          <div className="mt-1"><TransactionLinkButton sourceId={l.id} label={`${l.counterparty_name}的借还记录`} /></div>
+                          <div className="mt-1"><TransactionLinkButton sourceId={l.id} sourceDate={formatDate(l.occurred_at)} label={`${l.counterparty_name}的借还记录`} /></div>
                           <div className="text-sm leading-6 text-muted-foreground mt-1 truncate">
                             {subject}
                           </div>
@@ -568,7 +583,7 @@ export default function LoansPage() {
             {([['open', '未结清'], ['all', '全部'], ['settled', '已结清']] as const).map(([value, label]) => (
               <Button key={value} variant={statusFilter === value ? "default" : "outline"}
                 aria-pressed={statusFilter === value} onClick={() => setStatusFilter(value)}>
-                {label}（{statusCounts[value]}）
+                {label}{resource.data ? `（${statusCounts[value]}）` : ""}
               </Button>
             ))}
           </div>
@@ -673,7 +688,23 @@ export default function LoansPage() {
                 <div className="border rounded-md overflow-hidden">
                   <ListSyncFeedback error={repaymentResource.refreshError} refreshing={repaymentResource.isRefreshing} onRetry={repaymentResource.refresh} />
                   {repaymentsLoading ? (
-                    <div className="text-center py-10 text-muted-foreground">加载中...</div>
+                    <SkeletonRegion label="正在加载归还记录…">
+                      <div className="divide-y">
+                        {Array.from({ length: 3 }, (_, index) => (
+                          <div key={index} className="flex items-start justify-between gap-4 p-4">
+                            <div className="min-w-0 flex-1 space-y-2">
+                              <Skeleton className="h-5 w-40 max-w-full" />
+                              <Skeleton className="h-4 w-24 max-w-full" />
+                              <Skeleton className="h-4 w-48 max-w-full" />
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2">
+                              <Skeleton className="size-10" />
+                              <Skeleton className="size-10" />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </SkeletonRegion>
                    ) : repaymentsError ? (
                     <div role="alert" className="space-y-3 px-4 py-10 text-center">
                       <p className="text-sm text-destructive">{repaymentsError}</p>
@@ -698,7 +729,7 @@ export default function LoansPage() {
                               <div className="font-medium">
                                 {formatDate(r.repaid_at)} · {value}
                               </div>
-                              <div className="mt-1"><TransactionLinkButton sourceId={r.id} label={`${repaymentsLoan.counterparty_name}的归还记录`} /></div>
+                              <div className="mt-1"><TransactionLinkButton sourceId={r.id} sourceDate={formatDate(r.repaid_at)} label={`${repaymentsLoan.counterparty_name}的归还记录`} /></div>
                               {r.notes ? (
                                 <div className="text-sm leading-6 text-muted-foreground mt-1 break-words">
                                   {r.notes}
@@ -876,21 +907,8 @@ function LoanModal({
 
 
   const [initialSnapshot] = useState(() => JSON.stringify(formData));
-  const draft = useFormDraft({
-    scope: `loans:${mode === "edit" ? loan?.id : `new:${defaultDirection}`}`,
-    value: formData,
-    dirty: JSON.stringify(formData) !== initialSnapshot,
-    enabled: true,
-    onRestore: (restored) => {
-      setFormData(restored);
-      setSubmitError(null);
-      setAttachment(null);
-      setRemoveExistingAttachment(false);
-    },
-  });
-
   const { requestClose } = useFormLeaveGuard({
-    draft,
+    isDirty: JSON.stringify(formData) !== initialSnapshot || removeExistingAttachment,
     isBusy: isSubmitting || isUploading,
     hasPendingFiles: !!attachment,
   });
@@ -970,7 +988,6 @@ function LoanModal({
       }
 
       toast.success(mode === "add" ? "已新增" : "已更新");
-      draft.clear();
       onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
@@ -995,9 +1012,7 @@ function LoanModal({
 
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
-          <DraftNotice draft={draft} />
           {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
-          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
           {isUploading && (
             <div className="space-y-1" role="status" aria-live="polite">
               <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>
@@ -1286,21 +1301,8 @@ function RepaymentModal({
 
 
   const [initialSnapshot] = useState(() => JSON.stringify(formData));
-  const draft = useFormDraft({
-    scope: `loan-repayments:${loan.id}:${mode === "edit" ? repayment?.id : "new"}`,
-    value: formData,
-    dirty: JSON.stringify(formData) !== initialSnapshot,
-    enabled: true,
-    onRestore: (restored) => {
-      setFormData(restored);
-      setSubmitError(null);
-      setAttachment(null);
-      setRemoveExistingAttachment(false);
-    },
-  });
-
   const { requestClose } = useFormLeaveGuard({
-    draft,
+    isDirty: JSON.stringify(formData) !== initialSnapshot || removeExistingAttachment,
     isBusy: isSubmitting || isUploading,
     hasPendingFiles: !!attachment,
   });
@@ -1381,7 +1383,6 @@ function RepaymentModal({
       }
 
       toast.success(mode === "add" ? "已记录归还" : "已更新归还");
-      draft.clear();
       onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
@@ -1413,9 +1414,7 @@ function RepaymentModal({
 
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
-          <DraftNotice draft={draft} />
           {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
-          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
           {isUploading && (
             <div className="space-y-1" role="status" aria-live="polite">
               <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>

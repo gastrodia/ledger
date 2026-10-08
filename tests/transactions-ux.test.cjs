@@ -40,28 +40,6 @@
     return { queries, GET: exports.GET };
   }
 
-  test('legacy transaction drafts are removed without writing drafts or deleting other storage', () => {
-    const call = sourceNode((node, source) => ts.isCallExpression(node)
-      && node.expression.getText(source) === 'useEffect'
-      && node.arguments[0].getText(source).includes('Remove legacy transaction drafts'));
-    const data = new Map([
-      ['ledger:draft:v1:user-a:transaction%3Anew', 'old'],
-      ['ledger:draft:v1:user-b:transaction%3A123', 'old'],
-      ['ledger:draft:v1:user-a:budget%3Anew', 'keep'],
-      ['ledger:preferences', 'keep'],
-    ]);
-    evaluate(call, {
-      useEffect: (effect) => effect(),
-      window: { localStorage: {
-        get length() { return data.size; },
-        key: (index) => [...data.keys()][index],
-        removeItem: (key) => data.delete(key),
-        setItem: () => assert.fail('Transaction forms must not persist drafts'),
-      } },
-    }, 'undefined');
-    assert.deepEqual([...data.keys()], ['ledger:draft:v1:user-a:budget%3Anew', 'ledger:preferences']);
-  });
-
   test('keyword search uses the same parameterized literal matching in list and totals', async () => {
     const { GET, queries } = getRoute(true);
     const keyword = "50%_off\\cash' OR true --";

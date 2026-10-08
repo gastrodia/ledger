@@ -19,7 +19,7 @@ function load(file, dependencies = {}, globals = {}) {
   return exports;
 }
 const periods = load('lib/stats-period.ts');
-const helper = load('lib/stats-ai-summary.ts');
+const helper = load('lib/stats-ai-summary.ts', { '@/lib/stats-period': periods });
 const fixture = {
   label: '2026-09', period: periods.getStatsPeriod('month', '2026-09', '2026-09-07'),
   summary: { totalIncome: 200, totalExpense: 100, count: 5 },
@@ -67,30 +67,115 @@ test('JSON failures become readable errors and non-JSON gateway failures get a s
   assert.match(await helper.readSummaryError(Response.json({ error: { message: 'secret' } })), /稍后重试/);
 });
 
-test('stats page displays the JSON error message without braces or quotes and stops loading', async () => {
-  const source = ts.createSourceFile('page.tsx', fs.readFileSync('app/dashboard/stats/page.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let declaration;
+function analysisClient(fetch) {
+  const source = ts.createSourceFile('ai-analysis.tsx', fs.readFileSync('components/stats/ai-analysis.tsx', 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declarations = [];
+  let cleanupEffect;
   function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'generateAiSummary') declaration = node.getText(source);
+    if (ts.isVariableDeclaration(node) && ['generate', 'stop'].includes(node.name.getText(source))) declarations.push(node.getText(source));
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'useEffect') cleanupEffect = node.getText(source);
     ts.forEachChild(node, visit);
   }
   visit(source);
-  assert.ok(declaration);
-  const state = { error: null, summary: '', loading: false };
-  const code = ts.transpileModule(`const ${declaration}; generateAiSummary();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  await vm.runInNewContext(code, {
-    aiAbortRef: { current: null }, AbortController, DOMException, TextDecoder,
-    viewMode: 'month', selectedMonth: '2026-09', selectedYear: '2026', asOfDate: '2026-09-07',
-    isValidMonth: () => true, isValidYear: () => true,
-    setAiError: value => { state.error = value; }, setAiSummary: value => { state.summary = value; },
-    setIsAiLoading: value => { state.loading = value; },
-    readSummaryError: helper.readSummaryError, getErrorMessage: error => error.message,
-    console: { error() {} }, router: { push: () => assert.fail('provider failure must not redirect to login') },
-    fetch: async () => Response.json({ error: 'AI 模型暂不可用，请稍后重试。' }, { status: 503 }),
+  assert.equal(declarations.length, 2, 'exercise the actual component request and stop handlers');
+  assert.ok(cleanupEffect);
+  const state = { error: null, summary: '', loading: false, reveals: 0, unauthorized: 0 };
+  const writes = [];
+  const requests = [];
+  const controllerRef = { current: null };
+  let unmount;
+  const code = ts.transpileModule(`${declarations.map(text => `const ${text};`).join('\n')}\n${cleanupEffect};\n({ generate, stop });`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const handlers = vm.runInNewContext(code, {
+    controllerRef, AbortController, TextDecoder, Error,
+    query: 'month=2026-10&asOf=2026-10-08',
+    setError: value => { state.error = value; writes.push(['error', value]); },
+    setSummary: value => { state.summary = value; writes.push(['summary', value]); },
+    setLoading: value => { state.loading = value; writes.push(['loading', value]); },
+    onReveal: () => { state.reveals++; }, onUnauthorized: () => { state.unauthorized++; },
+    readSummaryError: helper.readSummaryError,
+    useEffect: callback => { unmount = callback(); },
+    fetch: (url, options) => { requests.push({ url, signal: options.signal }); return fetch(url, options); },
   });
-  assert.equal(state.error, 'AI 模型暂不可用，请稍后重试。');
-  assert.equal(state.summary, '');
-  assert.equal(state.loading, false);
+  return { ...handlers, state, writes, requests, controllerRef, unmount };
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('AI analysis displays readable JSON errors, preserves the requested period and stops loading', async () => {
+  const client = analysisClient(async () => Response.json({ error: 'AI 模型暂不可用，请稍后重试。' }, { status: 503 }));
+  await client.generate();
+  assert.equal(client.state.error, 'AI 模型暂不可用，请稍后重试。');
+  assert.equal(client.state.summary, '');
+  assert.equal(client.state.loading, false);
+  assert.equal(client.state.reveals, 1);
+  assert.equal(client.state.unauthorized, 0);
+  assert.equal(client.requests[0].url, '/api/stats/ai-summary?month=2026-10&asOf=2026-10-08');
+});
+
+test('AI analysis updates partial output while streaming and decodes split Chinese characters', async () => {
+  let stream;
+  const response = new Response(new ReadableStream({ start(controller) { stream = controller; } }));
+  const client = analysisClient(async () => response);
+  const pending = client.generate();
+  await settle();
+  assert.equal(client.state.loading, true);
+  const bytes = new TextEncoder().encode('餐饮支出 ¥12.50');
+  stream.enqueue(bytes.slice(0, 1));
+  await settle();
+  assert.equal(client.state.summary, '', 'incomplete UTF-8 sequences wait for their remaining bytes');
+  stream.enqueue(bytes.slice(1));
+  await settle();
+  assert.equal(client.state.summary, '餐饮支出 ¥12.50');
+  assert.equal(client.state.loading, true);
+  stream.enqueue(new TextEncoder().encode('，可查看分类明细。'));
+  stream.close();
+  await pending;
+  assert.equal(client.state.summary, '餐饮支出 ¥12.50，可查看分类明细。');
+  assert.equal(client.state.error, null);
+  assert.equal(client.state.loading, false);
+  assert.equal(client.controllerRef.current, null);
+});
+
+test('stopping AI analysis aborts work and retains accepted text without accepting late chunks', async () => {
+  let stream;
+  const client = analysisClient(async () => new Response(new ReadableStream({ start(controller) { stream = controller; } })));
+  const pending = client.generate();
+  await settle();
+  stream.enqueue(new TextEncoder().encode('已生成的分析'));
+  await settle();
+  client.stop();
+  assert.equal(client.requests[0].signal.aborted, true);
+  assert.equal(client.state.loading, false);
+  stream.enqueue(new TextEncoder().encode('不应显示的迟到内容'));
+  stream.close();
+  await pending;
+  assert.equal(client.state.summary, '已生成的分析');
+  assert.equal(client.state.error, null);
+});
+
+test('unmounting AI analysis aborts the period request and ignores a response that arrives later', async () => {
+  let respond;
+  const client = analysisClient(() => new Promise(resolve => { respond = resolve; }));
+  const pending = client.generate();
+  client.unmount();
+  const writesAtUnmount = client.writes.length;
+  assert.equal(client.requests[0].signal.aborted, true);
+  respond(new Response('旧期间的迟到分析'));
+  await pending;
+  assert.equal(client.state.summary, '');
+  assert.equal(client.state.error, null);
+  assert.equal(client.writes.length, writesAtUnmount, 'unmount must not produce state updates');
+});
+
+test('AI analysis redirects expired sessions and treats an empty stream as a retryable failure', async () => {
+  const unauthorized = analysisClient(async () => new Response('', { status: 401 }));
+  await unauthorized.generate();
+  assert.equal(unauthorized.state.unauthorized, 1);
+  assert.equal(unauthorized.state.loading, false);
+  assert.equal(unauthorized.state.error, null);
+  const empty = analysisClient(async () => new Response('  '));
+  await empty.generate();
+  assert.match(empty.state.error, /暂未生成.*重试/);
+  assert.equal(empty.state.loading, false);
 });
 
 function api({ authenticated = true, key = 'fixture-key', model, create, count = 5 } = {}) {

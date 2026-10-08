@@ -4,6 +4,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { Providers } from "@/components/providers";
 import { PwaRegister } from "@/components/pwa/register-sw";
+import { BRAND_COLOR, BRAND_DESCRIPTION, BRAND_NAME, BRAND_TAGLINE } from "@/lib/brand";
 
 const plusJakartaSans = localFont({
   src: "./fonts/plus-jakarta-sans-latin.woff2",
@@ -14,14 +15,14 @@ const plusJakartaSans = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "钱钱去哪了 - 记账助手",
-  description: "简单好用的个人记账软件，帮助您轻松管理收支",
+  title: `${BRAND_NAME} - ${BRAND_TAGLINE}`,
+  description: BRAND_DESCRIPTION,
   manifest: "/manifest.webmanifest",
-  applicationName: "钱钱去哪了",
+  applicationName: BRAND_NAME,
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "钱钱去哪了",
+    title: BRAND_NAME,
   },
   formatDetection: {
     telephone: false,
@@ -29,7 +30,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#6366f1",
+  themeColor: BRAND_COLOR,
 };
 
 export default function RootLayout({

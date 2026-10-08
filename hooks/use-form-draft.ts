@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { FormDraftSession, draftProtection, getDraftEpoch, subscribeDraftLogout, type DraftReplacement, type DraftReplacementDirty, type DraftSnapshot } from "@/lib/form-drafts";
+import { FormDraftSession, draftProtection, getDraftEpoch, serializeDraftValue, subscribeDraftLogout, type DraftReplacement, type DraftReplacementDirty, type DraftSnapshot } from "@/lib/form-drafts";
 
 const checking: DraftSnapshot = { hasDraft: false, status: "checking", error: null };
 const idle: DraftSnapshot = { hasDraft: false, status: "ready", error: null };
@@ -100,6 +100,16 @@ export function useFormDraft<T>({ scope, value, onRestore, dirty, enabled = true
     hasDraft: snapshot.hasDraft,
     status: error && !session ? "unavailable" as const : snapshot.status,
     error,
+    // setItem is atomic: unlike clear(), a failed large snapshot must preserve
+    // the previous conversation and its server recovery identifier.
+    persist: (next: T, nextDirty = true) => {
+      const currentSession = session ?? (initializedSession.current?.scope === scope ? initializedSession.current.session : undefined);
+      if (!currentSession) return false;
+      currentSession.save(next, nextDirty);
+      const saved = currentSession.getSnapshot();
+      try { return saved.status === "saved" && saved.persistedValue === serializeDraftValue(next); }
+      catch { return false; }
+    },
     restore: () => { session?.restore(saved => restoreCallback.current(saved) ?? saved); },
     discard: () => { session?.discard(); session?.save(value, dirty); },
     clear: (replacement?: DraftReplacement<T>, replacementDirty: DraftReplacementDirty<T> = false) => {

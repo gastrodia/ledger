@@ -19,20 +19,20 @@ for (const [file, endpoint] of [
   ['app/dashboard/stats/page.tsx', '/api/stats?'],
 ]) {
   test(`${endpoint}: failed reads become recoverable errors rather than empty data`, async () => {
-    const errors = [], data = [];
+    const resources = [];
     const bindings = {
-      query: 'month=2026-09', requestKey: 'month=2026-09:0', validPeriod: true, reload: 0, filterType: 'all',
+      query: 'month=2026-09', requestKey: 'month=2026-09:0',
       router: { push: () => assert.fail('unexpected redirect') }, AbortController, URLSearchParams,
       console: { error() {} }, fetch: async () => ({ ok: false, status: 500 }),
-      setLoadError: value => errors.push(value), setCategories: value => data.push(value),
-      setMembers: value => data.push(value), setStatsData: value => data.push(value),
-      setIsLoading() {}, setLoadedQuery() {},
+      setResource: value => resources.push(value),
     };
     let cleanup;
     Function(...Object.keys(bindings), 'useEffect', effect(file, endpoint))(...Object.values(bindings), callback => { cleanup = callback(); });
     await new Promise(resolve => setImmediate(resolve));
-    assert.equal(data.length, 0);
-    assert.ok(errors.some(value => typeof value === 'string' && value.includes('重试')));
+    assert.equal(resources.length, 1);
+    assert.equal(resources[0].key, 'month=2026-09:0');
+    assert.equal(resources[0].data, undefined);
+    assert.match(resources[0].error, /重试/);
     cleanup();
   });
 }

@@ -2,10 +2,13 @@
 
 import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
 import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { HorizontalScroll } from "@/components/ui/horizontal-scroll";
+import { Skeleton, SkeletonRegion, RecordListSkeleton, SummaryCardsSkeleton } from "@/components/ui/loading-skeleton";
 import { updateTransactions, type TransactionList } from "@/lib/list-updates";
 
 import { useState, useEffect, useRef, Suspense } from "react";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
+import { CategoryIcon, MemberAvatar } from "@/components/icons/entity-icon";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -79,14 +82,17 @@ function getTransactionDateRange(preset: DatePreset, now = new Date()) {
 }
 
 function SummaryCards({
+  loading,
   summary,
   showIncome,
   onToggleIncomeVisibility,
 }: {
+  loading: boolean;
   summary: Summary | null;
   showIncome: boolean;
   onToggleIncomeVisibility: () => void;
 }) {
+  if (loading) return <SummaryCardsSkeleton />;
   if (!summary) return <p className="p-4 text-sm text-muted-foreground" role="status">当前筛选暂无可用汇总</p>;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -151,8 +157,34 @@ function SummaryCards({
   );
 }
 
+function TransactionListSkeleton() {
+  return <RecordListSkeleton label="正在加载交易记录…" columns={["分类", "描述", "类型", "成员", "日期", "金额", "附件", "操作"]} breakpoint="lg" tableClassName="min-w-[960px] whitespace-nowrap" leadingIcon grouped />;
+}
+
+function TransactionPageSkeleton() {
+  return <DashboardLayout>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div><h1 className="text-2xl font-semibold tracking-tight">交易记录</h1><p className="mt-1 text-sm leading-6 text-muted-foreground">管理您的收支记录，实时统计收支情况</p></div>
+        <Button disabled className="w-full sm:w-auto"><Plus className="h-4 w-4" />添加记录</Button>
+      </div>
+      <div className="md:hidden"><Card><CardHeader className="py-4"><div className="flex items-center justify-between gap-3"><CardTitle>统计概览</CardTitle><Button variant="ghost" size="sm" className="h-8 px-2" disabled>展开<ChevronDown className="h-4 w-4" /></Button></div></CardHeader></Card></div>
+      <div className="hidden md:block"><SummaryCardsSkeleton /></div>
+      <Card>
+        <CardHeader className="border-b">
+          <div className="flex items-center justify-between gap-3"><CardTitle>交易明细</CardTitle><Skeleton className="h-8 w-28" /></div>
+          <SkeletonRegion label="正在加载筛选条件…" className="hidden md:block">
+            <div className="grid grid-cols-4 gap-3 pt-2">{["收支分类", "人员", "开始日期", "结束日期"].map(label => <div key={label} className="space-y-1"><p className="text-xs text-muted-foreground">{label}</p><Skeleton className="h-10 w-full" /></div>)}</div>
+          </SkeletonRegion>
+        </CardHeader>
+        <CardContent className="p-0 sm:px-0"><TransactionListSkeleton /></CardContent>
+      </Card>
+    </div>
+  </DashboardLayout>;
+}
+
 export default function DashboardPage() {
-  return <Suspense fallback={<DashboardLayout><p className="p-8 text-muted-foreground">正在加载交易记录…</p></DashboardLayout>}>
+  return <Suspense fallback={<TransactionPageSkeleton />}>
     <DashboardContent />
   </Suspense>;
 }
@@ -388,6 +420,7 @@ function DashboardContent() {
             {isMobileSummaryOpen ? (
               <CardContent className="pt-0">
                 <SummaryCards
+                  loading={isLoading && !dateRangeError}
                   summary={visibleSummary}
                   showIncome={showIncome}
                   onToggleIncomeVisibility={() => setShowIncome((v) => !v)}
@@ -400,6 +433,7 @@ function DashboardContent() {
         {/* 桌面端：始终显示 */}
         <div className="hidden md:block">
           <SummaryCards
+            loading={isLoading && !dateRangeError}
             summary={visibleSummary}
             showIncome={showIncome}
             onToggleIncomeVisibility={() => setShowIncome((v) => !v)}
@@ -521,14 +555,14 @@ function DashboardContent() {
                       <SelectItem value="income::none">未分类收入</SelectItem>
                       {incomeCategories.map((cat) => (
                         <SelectItem key={cat.id} value={`income::${cat.id}`}>
-                          {cat.icon} {cat.name}
+                          <span className="inline-flex items-center gap-2"><CategoryIcon icon={cat.icon} className="size-4" />{cat.name}</span>
                         </SelectItem>
                       ))}
                       <SelectItem value="expense::__all__">全部支出</SelectItem>
                       <SelectItem value="expense::none">未分类支出</SelectItem>
                       {expenseCategories.map((cat) => (
                         <SelectItem key={cat.id} value={`expense::${cat.id}`}>
-                          {cat.icon} {cat.name}
+                          <span className="inline-flex items-center gap-2"><CategoryIcon icon={cat.icon} className="size-4" />{cat.name}</span>
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -541,14 +575,14 @@ function DashboardContent() {
                     onValueChange={setFilterMemberId}
                   >
                     <SelectTrigger id="filter-member">
-                      <SelectValue placeholder={members.length === 0 ? "暂无成员" : "全部人员"} />
+                      <SelectValue placeholder={membersStatus === "loading" ? "正在加载成员…" : members.length === 0 ? "暂无成员" : "全部人员"} />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__all__">全部人员</SelectItem>
                       <SelectItem value="none">未指定成员</SelectItem>
                       {members.map((m) => (
-                        <SelectItem key={m.id} value={m.id}>
-                          {m.avatar} {m.name}
+                        <SelectItem key={m.id} value={m.id} textValue={m.name}>
+                          <span className="inline-flex items-center gap-2"><MemberAvatar avatar={m.avatar} name={m.name} memberId={m.id} className="size-5" />{m.name}</span>
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -580,9 +614,7 @@ function DashboardContent() {
             {dateRangeError ? (
               <div className="p-8 text-center text-destructive" role="alert">{dateRangeError}</div>
             ) : isLoading ? (
-              <div className="text-center py-12 text-muted-foreground">
-                <p>加载中...</p>
-              </div>
+              <TransactionListSkeleton />
             ) : currentError ? (
               <div className="space-y-3 p-8 text-center" role="alert">
                 <p className="text-destructive">{currentError}</p>
@@ -607,8 +639,8 @@ function DashboardContent() {
             ) : (
               <>
                 {/* PC端表格视图 */}
-                <div className="hidden lg:block overflow-x-auto">
-                  <table className="w-full">
+                <HorizontalScroll className="hidden lg:block">
+                  <table className="w-full min-w-[960px] whitespace-nowrap">
                     <thead>
                       <tr className="border-b bg-muted/50">
                         <th className="text-left p-4 font-semibold text-sm text-muted-foreground">分类</th>
@@ -642,7 +674,7 @@ function DashboardContent() {
                               <div
                                 className="flex items-center justify-center w-10 h-10 rounded-lg text-lg shrink-0 bg-muted"
                               >
-                                {transaction.category?.icon}
+                                <CategoryIcon icon={transaction.category?.icon} className="size-5 text-primary" />
                               </div>
                               <span className="font-medium">{transaction.category?.name || "未分类"}</span>
                             </div>
@@ -663,7 +695,7 @@ function DashboardContent() {
                           <td className="p-4">
                             {transaction.member ? (
                               <div className="flex items-center gap-2">
-                                <span>{transaction.member.avatar}</span>
+                                <MemberAvatar avatar={transaction.member.avatar} name={transaction.member.name} memberId={transaction.member.id} />
                                 <span className="text-sm">{transaction.member.name}</span>
                               </div>
                             ) : (
@@ -672,7 +704,7 @@ function DashboardContent() {
                           </td>
                           <td className="p-4">
                             <div className="flex items-center gap-2 text-sm">
-                              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                              <Calendar className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                               <span>{formatDate(transaction.transaction_date)}</span>
                             </div>
                           </td>
@@ -742,7 +774,7 @@ function DashboardContent() {
                       ))}
                     </tbody>)}
                   </table>
-                </div>
+                </HorizontalScroll>
 
                 {/* 移动端卡片视图 */}
                 <div className="lg:hidden">
@@ -764,7 +796,7 @@ function DashboardContent() {
                         <div
                           className="flex items-center justify-center w-12 h-12 rounded-xl text-2xl shrink-0 bg-muted"
                         >
-                          {transaction.category?.icon}
+                          <CategoryIcon icon={transaction.category?.icon} className="size-5 text-primary" />
                         </div>
 
                         {/* 右侧信息 */}
@@ -840,7 +872,7 @@ function DashboardContent() {
                             </span>
                             {transaction.member && (
                               <span className="flex items-center gap-1.5">
-                                <span className="text-base">{transaction.member.avatar}</span>
+                                <MemberAvatar avatar={transaction.member.avatar} name={transaction.member.name} memberId={transaction.member.id} className="size-5" />
                                 <span>{transaction.member.name}</span>
                               </span>
                             )}
@@ -1052,23 +1084,13 @@ function TransactionModal({
   const attachmentRef = useRef<HTMLInputElement>(null);
   const submittingRef = useRef(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  useEffect(() => {
-    // Remove legacy transaction drafts without touching other stored preferences.
-    try {
-      const storage = window.localStorage;
-      const keys = Array.from({ length: storage.length }, (_, index) => storage.key(index));
-      for (const key of keys) {
-        if (key && /^ledger:draft:v1:[^:]+:transaction%3A/i.test(key)) storage.removeItem(key);
-      }
-    } catch { /* Storage may be disabled; this form never saves drafts. */ }
-  }, []);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [attachment, setAttachment] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [removeExistingAttachment, setRemoveExistingAttachment] = useState(false);
 
   const { requestClose } = useFormLeaveGuard({
-    draft: { needsProtection: false },
+    isDirty: false,
     hasPendingFiles: !!attachment || removeExistingAttachment,
     isBusy: isSubmitting || isUploading,
   });
@@ -1243,8 +1265,8 @@ function TransactionModal({
             <SelectContent>
               {mode === "edit" ? <SelectItem value="__none__">不指定成员</SelectItem> : null}
               {members.map((member) => (
-                <SelectItem key={member.id} value={member.id}>
-                  {member.avatar} {member.name}
+                <SelectItem key={member.id} value={member.id} textValue={member.name}>
+                  <span className="inline-flex items-center gap-2"><MemberAvatar avatar={member.avatar} name={member.name} memberId={member.id} className="size-5" />{member.name}</span>
                 </SelectItem>
               ))}
             </SelectContent>

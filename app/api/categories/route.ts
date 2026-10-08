@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
+import { isCategoryIcon } from '@/lib/entity-icon-catalog';
 import { v4 as uuidv4 } from 'uuid';
 import { ensureCategoriesSchema } from '@/lib/categories-schema';
 
@@ -73,6 +74,13 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
     const { name, type, icon } = body;
+
+    if (icon !== undefined && icon !== null && icon !== '' && !isCategoryIcon(icon)) {
+      return NextResponse.json(
+        { error: '请选择有效的分类图标' },
+        { status: 400 }
+      );
+    }
 
     // 验证必填字段
     if (!name || !type) {

@@ -21,13 +21,11 @@ function text(tree) {
   return typeof tree === 'object' ? text(tree.props?.children) : String(tree);
 }
 // Render the real page/form functions with deterministic hook state. No DOM,
-// account, Blob or database calls are made; requests and draft storage are doubles.
+// account, Blob or database calls are made; requests and the leave guard are doubles.
 function harness(file, { fetch: fetchImpl, upload, component, props = {}, confirm, guardDecision = true } = {}) {
   const slots = [];
   let cursor = 0;
   let pending = [];
-  let draftConfig;
-  let clears = 0;
   const route = { push() {} };
   let guardConfig;
   const react = {
@@ -72,10 +70,8 @@ function harness(file, { fetch: fetchImpl, upload, component, props = {}, confir
       guardConfig = config;
       return { requestClose: async close => { if (config.isBusy || !guardDecision) return false; close(); return true; } };
     } },
-    '@/hooks/use-form-draft': { useFormDraft(config) {
-      draftConfig = config;
-      return { hasDraft: false, status: 'ready', error: null, needsProtection: config.dirty, clear: () => { clears++; }, restore() {}, discard() {} };
-    } },
+    './note-editor': { NoteEditor: 'NoteEditor' },
+    './color-picker': { ColorPicker: 'ColorPicker' },
   };
   function evaluate(filename, extra = '') {
     const evaluatedModule = { exports: {} };
@@ -110,8 +106,6 @@ function harness(file, { fetch: fetchImpl, upload, component, props = {}, confir
     },
     find(predicate) { const found = nodes(tree).find(predicate); assert.ok(found, 'Expected rendered element'); return found; },
     get text() { return text(tree); },
-    get draft() { return draftConfig; },
-    get clears() { return clears; },
     get guard() { return guardConfig; },
   };
 }
@@ -182,49 +176,52 @@ test('a stale gift search response cannot replace the current query result', asy
   assert.match(h.text, /没有符合筛选条件/);
 });
 
-test('giftbook form retains failed input, restores a draft and clears only after success', async () => {
+test('giftbook form keeps failed input in the open form and closes only after success', async () => {
   let fail = true;
   let closed = false;
   const h = harness('app/dashboard/giftbooks/page.tsx', {
-    component: 'CreateGiftBookModal', props: { enabled: true, onClose: () => { closed = true; } },
+    component: 'CreateGiftBookModal', props: { onClose: () => { closed = true; } },
     fetch: async () => fail ? response({ error: 'Please retry' }, 500) : response({ data: { id: 'new' } }),
   });
   h.render();
-  assert.equal(h.draft.scope, 'giftbooks:new');
-  assert.equal(h.draft.dirty, false);
-  h.draft.onRestore({ ...h.draft.value, name: 'Recovered wedding' });
+  assert.equal(h.guard.isDirty, false);
+  h.find(node => node.props?.id === 'gb-name').props.onChange({ target: { value: 'Wedding' } });
   h.render();
-  assert.equal(h.find(node => node.props?.id === 'gb-name').props.value, 'Recovered wedding');
-  assert.equal(h.draft.dirty, true);
+  assert.equal(h.guard.isDirty, true);
   await h.find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   h.render();
   assert.match(h.text, /Please retry/);
-  assert.equal(h.find(node => node.props?.id === 'gb-name').props.value, 'Recovered wedding');
-  assert.equal(h.clears, 0);
+  assert.equal(h.find(node => node.props?.id === 'gb-name').props.value, 'Wedding');
+  assert.equal(h.guard.isDirty, true);
   assert.equal(closed, false);
   fail = false;
   await h.find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
-  assert.equal(h.clears, 1);
   assert.equal(closed, true);
 });
 
-test('closed and loading forms disable drafts; edit scopes include their entity', () => {
+test('gift forms track unsaved changes without restoring local drafts', () => {
   const cases = [
-    ['app/dashboard/giftbooks/page.tsx', 'CreateGiftBookModal', { enabled: false }, 'giftbooks:new'],
-    ['app/dashboard/gifts-given/page.tsx', 'GiftsGivenModal', { enabled: false, mode: 'add', gift: null, loading: false }, 'gifts-given:new'],
-    ['app/dashboard/giftbooks/[id]/page.tsx', 'GiftBookRecordModal', { enabled: true, giftbookId: 'b2', mode: 'edit', group: null, loading: true }, 'giftbook-records:b2:undefined'],
+    ['app/dashboard/giftbooks/page.tsx', 'CreateGiftBookModal', {}, 'gb-name'],
+    ['app/dashboard/giftbooks/page.tsx', 'EditGiftBookModal', { giftbook: { id: 'book-1', name: 'Wedding' } }, 'gb-edit-name'],
+    ['app/dashboard/gifts-given/page.tsx', 'GiftsGivenModal', { mode: 'add', gift: null, loading: false }, 'recipient'],
+    ['app/dashboard/gifts-given/page.tsx', 'GiftsGivenModal', { mode: 'edit', gift: { id: 'gift-42', recipient_name: 'Friend', items: [] }, loading: false }, 'edit-recipient'],
+    ['app/dashboard/giftbooks/[id]/page.tsx', 'GiftBookRecordModal', { giftbookId: 'b2', mode: 'add', group: null, loading: false }, 'counterparty'],
   ];
-  for (const [page, component, props, scope] of cases) {
+  for (const [page, component, props, id] of cases) {
     const h = harness(page, { component, props: { ...props, onClose() {} } });
-    h.render(); assert.equal(h.draft.enabled, false); assert.equal(h.draft.scope, scope);
+    h.render();
+    assert.equal(h.guard.isDirty, false);
+    assert.doesNotMatch(h.text, /本机草稿|恢复草稿/);
+    const input = () => h.find(node => node.props?.id === id);
+    const initial = input().props.value;
+    input().props.onChange({ target: { value: 'Changed name' } });
+    h.render(); assert.equal(h.guard.isDirty, true);
+    input().props.onChange({ target: { value: initial } });
+    h.render(); assert.equal(h.guard.isDirty, false);
   }
-  const edit = harness('app/dashboard/gifts-given/page.tsx', {
-    component: 'GiftsGivenModal', props: { enabled: true, mode: 'edit', gift: { id: 'gift-42', recipient_name: 'Friend', items: [] }, loading: false, onClose() {} },
-  });
-  edit.render(); assert.equal(edit.draft.scope, 'gifts-given:gift-42'); assert.equal(edit.draft.enabled, true);
 });
 
-test('loan upload shows SDK progress, keeps File outside drafts, and preserves input on failure', async () => {
+test('loan upload shows SDK progress, protects pending files, and preserves input on failure', async () => {
   let finishUpload;
   const file = { name: 'receipt.pdf', type: 'application/pdf', size: 100 };
   const h = harness('app/dashboard/loans/page.tsx', {
@@ -237,22 +234,63 @@ test('loan upload shows SDK progress, keeps File outside drafts, and preserves i
     fetch: async () => response({ error: 'Could not save' }, 500),
   });
   h.render();
-  h.draft.onRestore({ ...h.draft.value, counterparty_name: 'Friend', amount: '100' });
+  assert.equal(h.guard.isDirty, false);
+  h.find(node => node.props?.id === 'counterparty').props.onChange({ target: { value: 'Friend' } });
+  h.render();
+  h.find(node => node.props?.id === 'amount').props.onChange({ target: { value: '100' } });
   h.render();
   h.find(node => node.props?.type === 'file').props.onChange({ target: { files: [file] } });
   h.render();
-  assert.ok(!Object.values(h.draft.value).includes(file));
-  assert.equal(h.draft.scope, 'loans:new:lent');
+  assert.equal(h.guard.isDirty, true);
+  assert.equal(h.guard.hasPendingFiles, true);
   const submit = h.find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
   await h.flush(); h.render();
   assert.equal(h.find(node => node.type === 'progress').props.value, 37);
+  assert.equal(h.guard.isBusy, true);
   assert.match(h.text, /附件上传\s+37\s*%/);
   finishUpload({ url: 'https://example.invalid/receipt.pdf', contentType: file.type });
   await submit; h.render();
   assert.match(h.text, /Could not save/);
   assert.equal(h.find(node => node.props?.id === 'amount').props.value, '100');
-  assert.equal(h.clears, 0);
-  assert.match(h.text, /草稿不保存附件/);
+  assert.equal(h.guard.isDirty, true);
+  assert.equal(h.guard.isBusy, false);
+  assert.doesNotMatch(h.text, /草稿/);
+});
+
+test('note composer keeps failed edits in the open form and guards unsaved changes', async () => {
+  let fail = true;
+  let saved;
+  let closed = 0;
+  const h = harness('components/notes/note-composer.tsx', {
+    component: 'NoteComposer', props: { note: null, onClose: () => { closed++; }, onSaved: note => { saved = note; } },
+    guardDecision: false,
+    fetch: async (_url, options) => fail
+      ? response({ error: 'Could not save note' }, 500)
+      : response({ data: { id: 'note-1', ...JSON.parse(options.body) } }),
+  });
+  h.render();
+  assert.equal(h.guard.isDirty, false);
+  assert.doesNotMatch(h.text, /本机草稿|恢复草稿/);
+  h.find(node => node.props?.id === 'sticky-title').props.onChange({ target: { value: 'Remember' } });
+  h.find(node => node.type === 'NoteEditor').props.onChange('Unsaved idea');
+  h.find(node => node.type === 'ColorPicker').props.onChange('pink');
+  h.render();
+  assert.equal(h.guard.isDirty, true);
+  h.find(node => node.props?.onClick && text(node) === '贴上去').props.onClick();
+  await h.flush(); h.render();
+  assert.match(h.text, /Could not save note/);
+  assert.equal(h.find(node => node.props?.id === 'sticky-title').props.value, 'Remember');
+  assert.equal(h.find(node => node.type === 'NoteEditor').props.value, 'Unsaved idea');
+  assert.equal(h.find(node => node.type === 'ColorPicker').props.value, 'pink');
+  assert.equal(h.guard.isDirty, true);
+  assert.equal(h.guard.isBusy, false);
+  h.find(node => node.props?.onClick && text(node) === '收起').props.onClick();
+  assert.equal(closed, 0);
+  assert.equal(saved, undefined);
+  fail = false;
+  h.find(node => node.props?.onClick && text(node) === '贴上去').props.onClick();
+  await h.flush(); h.render();
+  assert.deepEqual(saved, { id: 'note-1', title: 'Remember', content: 'Unsaved idea', color: 'pink' });
 });
 
 const loanFixture = {
@@ -284,16 +322,18 @@ test('money remaining shortcut uses exact cents and prevents overpayment before 
     fetch: async () => { writes++; return response({}); },
   });
   h.render();
+  assert.equal(h.guard.isDirty, false);
   const input = () => h.find(node => node.props?.id === 'repayment-repaid_value');
   assert.equal(input().props.max, 0.2);
   h.find(node => node.props?.onClick && text(node) === '填入剩余金额').props.onClick();
   h.render(); assert.equal(input().props.value, '0.2');
+  assert.equal(h.guard.isDirty, true);
   assert.match(h.text, /本次归还后剩余：\s*0 元/);
   input().props.onChange({ target: { value: '0.21' } }); h.render();
   assert.match(h.text, /超出可归还余额/);
   assert.equal(h.find(node => node.props?.type === 'submit').props.disabled, true);
   await h.find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
-  assert.equal(writes, 0); assert.equal(h.clears, 0);
+  assert.equal(writes, 0);
 });
 
 test('editing a repayment excludes its old value before calculating the allowed balance', () => {

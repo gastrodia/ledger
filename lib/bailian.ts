@@ -46,6 +46,9 @@ function providerError(error: unknown): BailianError {
       ? new BailianError(502, "empty")
       : new BailianError(422, "invalid_output");
   }
+  // The SDK can wrap a transport validation failure in an APICallError with
+  // HTTP status 200. Keep our actual terminal-stream error classification.
+  if (e.cause instanceof BailianError) return e.cause;
   const status = e.status ?? e.statusCode;
   let code = typeof e.code === "string" ? e.code : "";
   if (e.responseBody) {
@@ -146,7 +149,7 @@ function requestSettings(request: BailianRequest, externalSignal?: AbortSignal) 
     },
   });
   const startedAt = Date.now();
-  const recordUsage = (operation: "text" | "object" | "stream", usage: LanguageModelUsage) => {
+  const recordUsage = (operation: "text" | "object" | "stream" | "object-stream", usage: LanguageModelUsage) => {
     console.info("AI request completed", {
       model: request.model, operation, durationMs: Date.now() - startedAt,
       inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.totalTokens,
@@ -201,6 +204,42 @@ export async function bailianObject<T>(request: BailianRequest & { schema: Flexi
     return result.output;
   } catch (error) { throw requestFailure(error, runtime.signal); }
   finally { runtime.controller.abort(); }
+}
+
+// Partial objects are unvalidated snapshots, suitable only for provisional UI.
+// Callers must use the returned, validated object for all actions and writes.
+export async function bailianObjectStream<T>(
+  request: BailianRequest & { schema: FlexibleSchema<T>; schemaName?: string },
+  onPartial: (partial: unknown) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  const runtime = requestSettings(request, signal);
+  const result = streamText({
+    ...runtime.settings, output: Output.object({ schema: request.schema, name: request.schemaName }),
+    onFinish: ({ totalUsage }) => runtime.recordUsage("object-stream", totalUsage),
+    // Partial-output streams omit SDK error events. Abort with the original
+    // error so failures cannot be mistaken for a successfully validated object.
+    onError: ({ error }) => { runtime.controller.abort(error); },
+  });
+  const iterator = result.partialOutputStream[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      const next = await iterator.next();
+      runtime.signal.throwIfAborted();
+      if (next.done) break;
+      onPartial(next.value);
+    }
+    checkFinish(await result.finishReason, await result.text);
+    const output = await result.output;
+    runtime.signal.throwIfAborted();
+    return output;
+  } catch (error) { throw requestFailure(error, runtime.signal); }
+  finally {
+    // Abort before returning the iterator: cancelling only one SDK tee branch
+    // may otherwise wait forever for the still-open provider response.
+    runtime.controller.abort();
+    await iterator.return?.();
+  }
 }
 
 export async function bailianStream(request: BailianRequest, signal?: AbortSignal): Promise<AsyncGenerator<BailianStreamPart>> {

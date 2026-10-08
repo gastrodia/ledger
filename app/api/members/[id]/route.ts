@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
+import { isMemberAvatar } from '@/lib/entity-icon-catalog';
 
 /**
  * PATCH /api/members/[id]
@@ -23,6 +24,13 @@ export async function PATCH(
     const { id } = await context.params;
     const body = await request.json();
     const { name, avatar } = body;
+
+    if (avatar !== undefined && avatar !== null && avatar !== '' && !isMemberAvatar(avatar)) {
+      return NextResponse.json(
+        { error: '请选择有效的成员头像' },
+        { status: 400 }
+      );
+    }
 
     // 检查成员是否存在且属于当前用户
     const existingMembers = await sql`
@@ -53,7 +61,7 @@ export async function PATCH(
       UPDATE members
       SET
         name = ${newName.trim ? newName.trim() : newName},
-        avatar = ${avatar !== undefined ? avatar : existingMember.avatar}
+        avatar = ${avatar !== undefined ? (avatar || null) : existingMember.avatar}
       WHERE id = ${id} AND user_id = ${session.userId}
       RETURNING *
     `;

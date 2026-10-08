@@ -22,6 +22,7 @@ function fixture({ session = { userId: 'owner' }, result = [{ id: 'b' }, { id: '
   const deps = {
     'next/server': { NextResponse },
     '@/lib/auth': { getSession: async () => session },
+    '@/lib/entity-icon-catalog': load('lib/entity-icon-catalog.ts', {}),
     '@/lib/db': { sql: async (parts, ...values) => {
       queries.push({ text: parts.join('?'), values });
       if (fail) throw Error('offline');

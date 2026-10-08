@@ -4,6 +4,7 @@ import { useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type Se
 import dynamic from "next/dynamic";
 import { upload } from "@/lib/upload";
 import { Button } from "@/components/ui/button";
+import { markdownTableComponents } from "@/components/ui/markdown-table";
 import { Image as ImageIcon } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { commands as mdCommands, type ICommand } from "@uiw/react-md-editor";
@@ -154,6 +155,7 @@ export function NoteEditor({
           height={compact ? 300 : 520}
           hideToolbar={compact && !showFormatting}
           preview={isNarrow || compact ? mobileView : "live"}
+          previewOptions={{ components: markdownTableComponents }}
           visibleDragbar={false}
           commands={toolbar}
           extraCommands={extraCommands}

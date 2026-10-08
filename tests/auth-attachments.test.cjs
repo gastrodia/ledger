@@ -132,7 +132,7 @@ test('an in-use category cannot change transaction type', async () => {
     if (text.includes('FROM transactions')) return [{ id: 'transaction' }];
     writes++; throw new Error('Unexpected write');
   };
-  const api = load('app/api/categories/[id]/route.ts', { 'next/server': { NextResponse }, '@/lib/db': { sql }, '@/lib/auth': { getSession: async () => ({ userId: 'user-a' }) } });
+  const api = load('app/api/categories/[id]/route.ts', { 'next/server': { NextResponse }, '@/lib/db': { sql }, '@/lib/auth': { getSession: async () => ({ userId: 'user-a' }) }, '@/lib/entity-icon-catalog': load('lib/entity-icon-catalog.ts') });
   const response = await api.PATCH({ json: async () => ({ type: 'income' }) }, { params: Promise.resolve({ id: 'cat' }) });
   assert.equal(response.status, 409);
   assert.equal(writes, 0);

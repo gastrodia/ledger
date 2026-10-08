@@ -1,141 +1,133 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
+import { ArrowRight, Eye, EyeOff, Loader2 } from "lucide-react";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { useToast } from "@/hooks/use-toast";
+import styles from "@/components/layout/auth-layout.module.css";
 
 export default function LoginPage() {
-  const [formData, setFormData] = useState({
-    username: "",
-    password: "",
-  });
+  const { toast } = useToast();
+  const [formData, setFormData] = useState({ username: "", password: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const submitting = useRef(false);
+  const usernameRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+
+  const updateField = (field: "username" | "password", value: string) => {
+    setFormData((current) => ({ ...current, [field]: value }));
+    setErrors((current) => ({ ...current, [field]: "", form: "" }));
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrors({});
-
-    // Validate
+    if (submitting.current) return;
     const newErrors: Record<string, string> = {};
-    if (!formData.username) {
-      newErrors.username = "请输入用户名或邮箱";
-    }
-    if (!formData.password) {
-      newErrors.password = "请输入密码";
-    }
-
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors);
+    const username = formData.username;
+    if (!username) newErrors.username = "请输入用户名或邮箱";
+    if (!formData.password) newErrors.password = "请输入密码";
+    setErrors(newErrors);
+    if (Object.keys(newErrors).length) {
+      (newErrors.username ? usernameRef : passwordRef).current?.focus();
       return;
     }
 
+    submitting.current = true;
     setIsLoading(true);
-
     try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username: formData.username,
-          password: formData.password,
-        }),
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password: formData.password }),
       });
-
       const data = await response.json();
-
       if (!response.ok) {
-        setErrors({ username: data.error || '登录失败，请重试' });
+        const message = typeof data.error === "string" ? data.error : "登录失败，请重试";
+        setErrors({ form: message });
+        toast({ title: "登录失败", description: message, variant: "error" });
         return;
       }
-
-      // 登录成功，跳转到 AI 记账
-      window.location.href = '/dashboard/assistant';
-    } catch (error) {
-      console.error('登录错误:', error);
-      setErrors({ username: '网络错误，请检查连接后重试' });
+      window.location.href = "/dashboard/assistant";
+    } catch {
+      const message = "暂时无法连接，请检查网络后重试";
+      setErrors({ form: message });
+      toast({ title: "登录失败", description: message, variant: "error" });
     } finally {
+      submitting.current = false;
       setIsLoading(false);
     }
   };
 
   return (
-    <AuthLayout
-      title="钱钱去哪了"
-      subtitle="智能记账，轻松管理您的财务"
-    >
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="space-y-2">
+    <AuthLayout title="欢迎回来" subtitle="登录，接着记录你的生活。">
+      <form onSubmit={handleSubmit} className={styles.loginForm} noValidate aria-busy={isLoading}>
+        <div className={styles.field}>
           <Label htmlFor="username">用户名或邮箱</Label>
           <Input
+            ref={usernameRef}
             id="username"
+            name="username"
             type="text"
-            placeholder="请输入用户名或邮箱"
+            placeholder={errors.username || "输入用户名或邮箱"}
+            title={errors.username || undefined}
             value={formData.username}
-            onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+            onChange={(e) => updateField("username", e.target.value)}
             autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+            disabled={isLoading}
+            aria-invalid={!!errors.username}
+            aria-describedby={errors.username ? "username-error" : undefined}
           />
-          {errors.username && (
-            <p className="text-sm text-destructive">{errors.username}</p>
-          )}
         </div>
-
-        <div className="space-y-2">
+        <div className={styles.field}>
           <Label htmlFor="password">密码</Label>
-          <Input
-            id="password"
-            type="password"
-            placeholder="请输入密码"
-            value={formData.password}
-            onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-            autoComplete="current-password"
-          />
-          {errors.password && (
-            <p className="text-sm text-destructive">{errors.password}</p>
-          )}
-        </div>
-
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <Checkbox id="remember" />
-            <Label
-              htmlFor="remember"
-              className="text-sm font-normal cursor-pointer"
+          <div className={styles.passwordControl}>
+            <Input
+              ref={passwordRef}
+              id="password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              placeholder={errors.password || "输入你的密码"}
+              title={errors.password || undefined}
+              value={formData.password}
+              onChange={(e) => updateField("password", e.target.value)}
+              autoComplete="current-password"
+              required
+              disabled={isLoading}
+              aria-invalid={!!errors.password}
+              aria-describedby={errors.password ? "password-error" : undefined}
+            />
+            <button
+              type="button"
+              className={styles.passwordToggle}
+              aria-label={showPassword ? "隐藏密码" : "显示密码"}
+              aria-pressed={showPassword}
+              aria-controls="password"
+              onClick={() => setShowPassword((current) => !current)}
             >
-              记住我
-            </Label>
+              {showPassword ? <EyeOff size={19} aria-hidden="true" /> : <Eye size={19} aria-hidden="true" />}
+            </button>
           </div>
-          <Link 
-            href="/forgot-password" 
-            className="text-sm text-primary hover:underline"
-          >
-            忘记密码？
-          </Link>
         </div>
-
-        <Button
-          type="submit"
-          className="w-full"
-          disabled={isLoading}
-        >
-          {isLoading ? "登录中..." : "立即登录"}
+        <Button type="submit" className={styles.submitButton} disabled={isLoading}>
+          {isLoading ? <><Loader2 className="animate-spin" aria-hidden="true" />正在登录</> : <>登录<ArrowRight aria-hidden="true" /></>}
         </Button>
+        <div className="sr-only" aria-live="polite" aria-atomic="true">
+          {errors.username && <span id="username-error">{errors.username}。</span>}
+          {errors.password && <span id="password-error">{errors.password}。</span>}
+          {errors.form && <span>{errors.form}</span>}
+        </div>
       </form>
-
-      <div className="mt-6 text-center text-sm text-muted-foreground">
-        还没有账户？{" "}
-        <Link 
-          href="/register" 
-          className="text-primary hover:underline font-semibold"
-        >
-          立即注册
-        </Link>
+      <div className={styles.signup}>
+        还没有家庭账户？<Link href="/register">创建一个家庭 <ArrowRight size={14} className="ml-1" aria-hidden="true" /></Link>
       </div>
     </AuthLayout>
   );

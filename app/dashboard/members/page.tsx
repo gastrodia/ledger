@@ -2,6 +2,7 @@
 
 import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
 import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { Skeleton, SkeletonRegion } from "@/components/ui/loading-skeleton";
 import { upsertRow } from "@/lib/list-resource";
 
 import { useState } from "react";
@@ -23,12 +24,9 @@ import { Plus, Edit, Trash2, Loader2 } from "lucide-react";
 import type { Member } from "@/types";
 import { toast } from "@/hooks/use-toast";
 import { useConfirm } from "@/hooks/use-confirm";
-
-// 预设头像选项
-const avatarOptions = [
-  "👨", "👩", "👴", "👵", "👦", "👧", "🧑", "👱",
-    "👨‍🦳", "👩‍🦰", "👨‍🦱", "👩‍🦱", "🧓", "🧔", "👶", "😊"
-];
+import { MemberAvatar } from "@/components/icons/entity-icon";
+import { IconPicker } from "@/components/icons/icon-picker";
+import { DEFAULT_MEMBER_AVATAR, isMemberAvatar } from "@/lib/entity-icon-catalog";
 
 export default function MembersPage() {
   const { confirm } = useConfirm();
@@ -109,12 +107,7 @@ export default function MembersPage() {
         <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
         {/* Loading State */}
         {isLoading ? (
-          <Card>
-            <CardContent className="py-12 text-center">
-              <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
-              <p className="text-muted-foreground mt-4">加载中...</p>
-            </CardContent>
-          </Card>
+          <MembersSkeleton />
         ) : loadError ? (
           <Card>
             <CardContent className="py-12 text-center space-y-4" role="alert">
@@ -168,6 +161,23 @@ export default function MembersPage() {
   );
 }
 
+function MembersSkeleton() {
+  return (
+    <SkeletonRegion label="正在加载家庭成员">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+        {Array.from({ length: 5 }, (_, index) => (
+          <div key={index} className="rounded-lg border bg-card p-4 pt-12">
+            <div className="flex flex-col items-center space-y-3">
+              <Skeleton className="h-12 w-12 rounded-lg" />
+              <div className="flex h-6 items-center"><Skeleton className="h-4 w-16" /></div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </SkeletonRegion>
+  );
+}
+
 function MemberCard({
   member,
   busy,
@@ -183,9 +193,12 @@ function MemberCard({
     <div className="relative group">
       <div className="p-4 pt-12 rounded-lg border bg-card hover:border-primary/30 hover:shadow-sm transition-colors text-center">
         <div className="flex flex-col items-center space-y-3">
-          <div className="flex items-center justify-center w-12 h-12 rounded-lg bg-primary/10 text-3xl">
-            {member.avatar || "👤"}
-          </div>
+          <MemberAvatar
+            avatar={member.avatar}
+            name={member.name}
+            memberId={member.id}
+            className="size-12 text-xl"
+          />
           <div>
             <p className="font-medium">{member.name}</p>
           </div>
@@ -197,6 +210,8 @@ function MemberCard({
           size="icon"
           className="h-7 w-7 bg-background"
           disabled={busy}
+          aria-label={`编辑${member.name}`}
+          title={`编辑${member.name}`}
           onClick={() => onEdit(member)}
         >
           <Edit className="h-3 w-3" />
@@ -206,6 +221,8 @@ function MemberCard({
           size="icon"
           className="h-7 w-7 bg-background text-destructive hover:text-destructive"
           disabled={busy}
+          aria-label={`删除${member.name}`}
+          title={`删除${member.name}`}
           onClick={() => onDelete(member.id)}
         >
           <Trash2 className="h-3 w-3" />
@@ -228,7 +245,7 @@ function MemberModal({
 }) {
   const [formData, setFormData] = useState({
     name: member?.name || "",
-    avatar: member?.avatar || "",
+    avatar: member?.avatar && isMemberAvatar(member.avatar) ? member.avatar : DEFAULT_MEMBER_AVATAR,
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -296,7 +313,7 @@ function MemberModal({
             设置成员的姓名和头像
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 gap-4">
           <DialogBody className="space-y-4 py-4">
           <div className="space-y-2">
             <Label htmlFor="name">成员姓名</Label>
@@ -312,36 +329,14 @@ function MemberModal({
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="avatar">头像 (Emoji)</Label>
-            <Input
-              id="avatar"
-              type="text"
-              placeholder="请输入头像 Emoji"
+            <Label>成员头像</Label>
+            <IconPicker
+              kind="member"
               value={formData.avatar}
-              onChange={(e) => setFormData({ ...formData, avatar: e.target.value })}
-              maxLength={10}
+              onChange={(avatar) => setFormData({ ...formData, avatar })}
+              previewName={formData.name}
+              previewMemberId={member?.id}
             />
-          </div>
-
-          <div className="space-y-2">
-            <Label>快速选择头像</Label>
-            <div className="grid grid-cols-6 gap-2">
-              {avatarOptions.map((avatar) => (
-                <button
-                  key={avatar}
-                  type="button"
-                  onClick={() => setFormData({ ...formData, avatar: avatar })}
-                  className={`p-3 rounded-lg text-3xl transition-all ${
-                    formData.avatar === avatar
-                      ? "bg-primary/20 border-2 border-primary"
-                      : "bg-accent border-2 border-transparent hover:bg-accent/80"
-                  }`}
-                  title={avatar}
-                >
-                  {avatar}
-                </button>
-              ))}
-            </div>
           </div>
           </DialogBody>
 

@@ -64,6 +64,14 @@ export function getStatsPeriod(mode: "month" | "year", value: string, asOf = loc
   };
 }
 
+/** Compare elapsed calendar days, capped at the end of a shorter previous period. */
+export function getComparisonEnd(period: StatsPeriod) {
+  if (period.state === "past") return period.previousEndExclusive;
+  const previousStart = Date.parse(`${period.previousStartDate}T00:00:00Z`);
+  const previousEnd = Date.parse(`${period.previousEndExclusive}T00:00:00Z`);
+  return isoDate(new Date(Math.min(previousEnd, previousStart + period.elapsedDays * DAY_MS)));
+}
+
 export function statsDetailHref(period: Pick<StatsPeriod, "startDate" | "endDate">, type: "income" | "expense", dimension: "categoryId" | "memberId", id: string | null) {
   const params = new URLSearchParams({ startDate: period.startDate, endDate: period.endDate, type, [dimension]: id || "none" });
   return `/dashboard?${params.toString()}`;

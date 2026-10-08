@@ -1,9 +1,9 @@
-# Ledger（账本 / 礼簿 / 借还）
+# AI记账
 
 
-一个基于 **Next.js 16 + React 19** 的个人/家庭账本 Web 应用，包含交易记账、分类与成员管理、统计分析（含可选 AI 月度总结）、便利贴（Markdown）、礼簿、送礼台账、欠款/借款（支持部分归还）以及附件上传能力，并内置 PWA（离线页 + Service Worker）。
+让每一笔，都心里有数。AI记账是一个基于 **Next.js 16 + React 19** 的个人/家庭账本 Web 应用，包含 AI 对话记账、交易记录、分类与成员管理、统计分析（含可选 AI 月度总结）、便利贴（Markdown）、礼簿、送礼台账、欠款/借款（支持部分归还）以及附件上传能力，并内置 PWA（离线页 + Service Worker）。
 
-![](cover.png)
+![AI记账登录页](cover.png)
 
 技术栈
 ---
@@ -24,7 +24,7 @@
 - **成员管理**：家庭成员（用于交易归属统计）
 - **统计分析**：按月份聚合统计（分类/成员 Top、收入/支出/结余）；支持隐藏收入金额
 - **AI 总结（可选）**：基于当月统计数据生成“可读、可执行”的月度总结（流式输出）
-- **便利贴**：五色纸张贴墙，快速新建/原地编辑、颜色与内容筛选、置顶分区、归档收纳；保留 Markdown、图片上传和账户隔离的本机草稿
+- **便利贴**：五色纸张贴墙，快速新建/原地编辑、颜色与内容筛选、置顶分区、归档收纳；支持 Markdown 和图片上传
 - **礼簿**：按“事件/礼簿”管理礼金/礼品（含估值）汇总
 - **送礼**：记录“我送给别人”的现金 + 多行物品组合礼（含估值），支持筛选与附件
 - **欠款/借款（借还）**：欠款/借款分组展示；支持部分归还、归还列表、附件与状态（未还/部分/结清）
@@ -59,6 +59,7 @@ DASHSCOPE_API_KEY="..."
 BAILIAN_SUMMARY_MODEL="qwen3.8-max"
 BAILIAN_ASSISTANT_MODEL="qwen3.7-plus"
 BAILIAN_ASR_MODEL="qwen3-asr-flash"
+BAILIAN_REALTIME_ASR_MODEL="qwen3-asr-flash-realtime"
 # 默认北京旧域名仍可用；设置业务空间 ID 可使用专属域名
 # DASHSCOPE_WORKSPACE_ID="..."
 # 其他地域请设置与 Key 匹配的 OpenAI 兼容接口地址
@@ -270,7 +271,7 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 - `/dashboard/notes` 为便利贴墙；原有 `/new` 与 `/:id` 链接继续可用，打开相同的便利贴编辑面板。
 - 旧笔记保持原始标题、Markdown 和图片内容，默认显示为奶油黄色。颜色保存在数据库中，可跨设备同步。
 - 新库使用 `scripts/init-db.sql`；旧库首次访问时仅在缺少 `notes.color` 时尝试追加字段。运行账户没有 DDL 权限时，请由管理员执行 `scripts/notes-sticky.sql` 后重试；不需要清空或重建 notes 表。
-- 编辑时输入自动保存在本机草稿，点击“保存”或“贴上去”才提交服务器；未完成上传或保存时禁止关闭面板。
+- 编辑内容仅在当前面板保留，点击“保存”或“贴上去”才提交服务器；关闭前提醒放弃未保存内容，未完成上传或保存时禁止关闭面板。普通录入表单不再保存或恢复本机草稿，进入任一账本页面会清理旧录入草稿；AI 对话相关本机存储继续保留。
 
 ### 分类拖动排序
 
@@ -281,22 +282,40 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 
 对话记账与语音
 
-- 入口：侧栏「对话记账」或手机底栏「对话」，路径 `/dashboard/assistant`。
-- 文字或账单截图会生成最多20笔可编辑草稿，分类和家庭成员必填；金额、日期、收支类型和备注可修改。输入框可直接粘贴 JPG、PNG 或 WebP 图片，先显示预览，点击发送后才识别。发出的图片显示在聊天气泡内，可点击查看，并随本机对话草稿恢复。未入账草稿可直接删除单笔或整组，保存结果待核对时保持原批次锁定。支付方式保存在备注中，不代表支付账户余额。
+- 入口：侧栏或手机底栏「AI 记账」，路径 `/dashboard/assistant`。
+- 文字或账单截图会生成最多20笔可编辑草稿，分类和家庭成员必填；金额、日期、收支类型和备注可修改。一次可选择或粘贴最多5张 JPG、PNG 或 WebP 图片，追加选择不会覆盖已有截图；支持逐张预览、删除和调整顺序，点击发送后才识别。发出的全部图片显示在聊天气泡内，可点击查看，并随本机对话草稿恢复。未入账草稿可直接删除单笔或整组，保存结果待核对时保持原批次锁定。支付方式保存在备注中，不代表支付账户余额。
 - 未指定成员时，助手按组询问支出人或收入所属人，显示所有成员按钮；点击一次即可自动回复并补全本组所有待选成员的草稿，确认前仍可逐笔修改。初次补充时保留明确指定的成员，后续新账不会沿用上一次选择。可发送“把这组全改成某成员”修改最近一组尚未入账草稿的人员，也可指定某一笔；只说“修改支出人”且目标明确时会展示人员按钮，选中后自动回复并原位更新；选择前保持原人员，可取消，待选择请求随对话草稿恢复。卡片原位更新，金额和日期保持不变，仍需用户确认入账。已保存或保存结果待核对的草稿不能通过聊天修改。历史聊天只用于理解上下文，不重新记账。转账、借贷和不明确的退款先澄清。
-- 语音最多60秒，通过浏览器 MediaRecorder 录制并转为16kHz单声道WAV；千问 ASR 返回文字后，用户可修改再发送。浏览器需要 HTTPS（localhost 可用）和麦克风权限；不支持录音时可选音频文件。
-- 截图在浏览器缩小到最长边1920px，仅发送本次选择的图片；语音不会存到附件服务。必要的分类、成员或查询结果会发送给百炼。
+- 语音最多60秒，通过 AudioWorklet 实时采集并重采样为16kHz单声道 PCM16，每100毫秒经 WebSocket 网关发送给千问实时 ASR；识别中的文字动态显示在输入框中，同一句临时结果会被最终文字替换。点击停止后等待最后一段识别完成，再核对、编辑和发送。保留录音前已有文字，断线保留已显示文字；清空对话、退出登录或离开页面会停止录音并丢弃旧会话结果。浏览器需要 HTTPS（localhost 可用）、AudioWorklet 和麦克风权限；不支持实时录音时可选音频文件走原有整段转写。
+- 多图按顺序联合识别，保持原图可读性，不合成长图后再压缩。模型逐图提取完整可见交易，服务端仅衔接相邻流水截图中有相同日期、金额、商户及明示时间或交易单号的重叠边界；同图的多笔真实交易、证据缺失或不明确的疑似重复都会保留并提示核对。页面展示合并图片数、去重数和保留数；不对历史对话或已入账交易自动删重。截图中的月份汇总、划线原价、优惠金额不生成交易。合并后仍最多20笔，超限须分批，不能悄悄截断。
+- 「核对账目」旁的排序按钮依次切换原顺序、日期正序、日期倒序；同日账目保留识别时的顺序，未填写或无效的日期放在末尾。每组单独记住排序，刷新自动恢复；聊天中的“第三笔”等序号以当前显示顺序为准。排序不修改账目内容，也不改变确认入账及失败重试的原始批次。
+- 已入账卡片提供「撤销入账」，也可在对话中说“撤销这笔”“撤销第三笔”或“撤销整组”；目标不明确时先澄清。撤销成功会删除对应入账记录并自动恢复可编辑草稿，保留金额、日期、分类、成员和支付方式，重新确认使用新批次。旧版已入账卡片支持整组撤销；已在交易记录中修改、删除或添加附件的账目会拒绝撤销并提示核对。撤销结果未知时保留原操作核对入口，清空对话不会丢失进行中的撤销；成功后只恢复草稿，不恢复旧聊天。
+- 截图在浏览器缩小到最长边1920px，仅发送本次选择的图片，单张 data URL 最多2,000,000字符，总计最多4,000,000字符；聊天展示副本每组总计最多400,000字符，保持完整图片比例。语音不会存到附件服务。必要的分类、成员或查询结果会发送给百炼。
 - 对话、未发送文字和待发送图片保存在当前用户的本机草稿中；进入页面自动恢复，退出登录会清理。清空对话随时可用，会移除聊天、未提交草稿和待发送内容，停止识别、录音与转写；已发出的入账请求保留独立的原批次核对入口，结果返回不会恢复旧聊天。保存结果未确认时锁定原批次，重试不会重复记账。
-- `POST /api/assistant` 识别意图和账单，查询时由参数化 SQL 计算真实汇总后生成回答；模型不能执行SQL或写数据库。
-- `POST /api/assistant/transcribe` 语音转文字；`POST /api/assistant/confirm` 原子批量确认，按用户和批次ID幂等，拒绝不同内容复用批次。
-- `assistant_batches` 表在首次确认时按需创建；只读/无DDL部署请先执行 `scripts/init-db.sql` 中该表的建表语句。
+- 聊天及账本分析文字随任务进度逐步显示；记账卡片、修改成员和撤销目标仍在完整结果校验后处理，确认入账仍由用户点击。服务器接收任务后，切页、刷新或关闭页面只断开进度读取，不停止后台生成；回到同一本机会话后自动读取进度和最终结果。失败或停止的任务可使用服务器保留的原始截图重试，无需再次上传；任务与回复使用稳定 ID，刷新不会重复追加卡片，也不会覆盖已经核对编辑或删除的草稿。恢复的撤销意图不会自动执行账本删除，需通过原账单卡片操作。
+- 已发送的识别任务及原始识别输入按账户保存在数据库，本机草稿保存会话 ID、消息和待确认卡片。清空对话会切换会话并取消旧会话未完成的任务；点击停止会主动取消当前任务。网络故障导致无法确认任务是否被接收时，页面保留恢复入口，不把未知状态当成识别成功。未完成轮次不进入后续模型上下文。
+- `POST /api/assistant/tasks` 创建幂等任务，`GET /api/assistant/tasks?conversation_id=…` 恢复会话任务，`GET /api/assistant/tasks/[id]` 获取进度和结果；`PATCH` 支持 `retry`（带观察到的 `attempt`）和 `cancel`，`DELETE /api/assistant/tasks?conversation_id=…` 取消会话未完成任务。所有接口校验登录账户，同任务 ID 不能用于不同输入；后台只生成并保存计划，不调用确认入账或撤销接口。
+- 任务通过 Next.js 的 [`after`](https://nextjs.org/docs/app/api-reference/functions/after) 在响应结束后执行，任务接口声明 `maxDuration = 300`；部署平台必须支持 `after`/`waitUntil` 并允许足够的函数执行时间。数据库任务状态、执行租约和条件更新可防止并发重复执行及取消后的旧结果覆写。它不是跨服务器宕机自动续跑的外部队列：未启动任务可在返回查询时重新调度；执行进程被终止或超时的任务会转为可重试失败，不会永久显示处理中。任务表首次访问时自动创建；无 DDL 权限时先执行 `scripts/assistant-tasks.sql`。本地验证不能代替部署后的关闭页面恢复验收。
+- `POST /api/assistant` 可传 `stream: true` 获取 `application/x-ndjson` 事件流：`status` 为处理阶段，`delta` 仅含回复文字，`result` 携带完整校验后的计划，`error` 表示失败；没有 `result` 不能视为完成。不传 `stream` 保留原 JSON 响应。
+- `POST /api/assistant` 识别意图和账单（支持 `images` 数组，兼容原有 `image` 单图字段，二者不能同时传入），查询时由参数化 SQL 计算真实汇总后生成回答；模型不能执行SQL或写数据库。
+- `POST /api/assistant/transcribe/session` 签发60秒有效、仅用于语音网关的一次性授权票据；`WS /api/assistant/transcribe/realtime` 双向传输音频块与识别文字。`POST /api/assistant/transcribe` 保留音频文件转文字；`POST /api/assistant/confirm` 原子批量确认，按用户和批次ID幂等，拒绝不同内容复用批次。
+- `POST /api/assistant/undo` 按用户、确认批次及撤销请求ID执行原子撤销，校验原始入账快照与当前记录；重复核对返回相同的恢复草稿，撤销后的原批次不能再次确认。`assistant_batches` 与 `assistant_undos` 在首次确认或撤销时按需创建和补齐字段；无DDL权限的部署请先执行 `scripts/init-db.sql` 中相关建表及迁移语句。
 - 使用普通百炼 API Key。Coding Plan 等有专门用途的订阅不能直接当作本产品的通用 API 配额。
+
+### 实时语音运行与部署
+
+- `pnpm dev` 同时提供 Next.js 页面与语音 WebSocket，默认 `http://localhost:3000`；`pnpm build && pnpm start` 以同样方式启动 Node 生产服务。升级后需要重启旧的 `next dev` 进程，页面热更新不会给旧进程增加 WebSocket 路由。
+- 网关默认读取现有 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL` / `DASHSCOPE_WORKSPACE_ID`；实时模型独立使用 `BAILIAN_REALTIME_ASR_MODEL`，默认 `qwen3-asr-flash-realtime`。必要时用 `DASHSCOPE_REALTIME_URL` 配置同地域的百炼 `wss://…/api-ws/v1/realtime` 地址（不带查询参数）。
+- 自建 Node 服务的反向代理需转发 WebSocket Upgrade，并允许至少90秒连接；在服务端配置 `SPEECH_ALLOWED_ORIGINS=https://你的账本域名`，多个来源用逗号分隔。本地默认只允许 localhost/127.0.0.1。
+- **Vercel 可直接使用同域实时语音接口。** 在项目设置中开启 Fluid Compute，并重新部署包含本次语音接口的版本；实现使用 Vercel WebSocket Public Beta 的 `experimental_upgradeWebSocket`，单次函数最长120秒。沿用现有 `DASHSCOPE_API_KEY` 和 `JWT_SECRET`；可设置 `BAILIAN_REALTIME_ASR_MODEL=qwen3-asr-flash-realtime`（默认值）及 `SPEECH_ALLOWED_ORIGINS=https://ledger.jiajiwei.top`（不设置时只允许当前请求的同域网页）。生产网页自动连接 `wss://ledger.jiajiwei.top/api/assistant/transcribe/realtime`，无需配置 `SPEECH_GATEWAY_URL` 或另备语音域名。Fluid Compute 是平台设置，不是环境变量；仅本地测试通过不代表 Vercel 已启用或线上已验收。参见 [Vercel WebSocket 文档](https://vercel.com/docs/functions/websockets)。
+- 如果选择独立语音服务，可在支持 WebSocket 的主机部署本仓库并执行 `pnpm speech`（默认3001端口，可用 `SPEECH_PORT` 修改），以 HTTPS/WSS 反向代理暴露 `/api/assistant/transcribe/realtime`。网关配置与账本相同的 `JWT_SECRET`、百炼配置和 `SPEECH_ALLOWED_ORIGINS`；此时才在页面服务配置 `SPEECH_GATEWAY_URL=wss://语音服务域名/api/assistant/transcribe/realtime`。
+- 授权票据通过第一条 WebSocket 消息发送，地址中不携带密钥。网关限制每用户两条连接、每次60秒音频、连接时长及缓冲大小，不存储录音或识别文字。票据防重放与并发限制保存在单个网关进程中；部署多实例时应使用共享存储实现这两项限制。
+- 协议依据：[百炼实时 ASR 客户端事件](https://help.aliyun.com/zh/model-studio/qwen-asr-realtime-client-events)、[服务端事件](https://help.aliyun.com/zh/model-studio/qwen-asr-realtime-server-events)。
 
 ### AI 调用与编排
 
 - `lib/bailian.ts` 使用 AI SDK 的 `generateText`、`Output.object` 和 `streamText`，经 `@ai-sdk/openai-compatible` 直接调用百炼。继续使用现有 `DASHSCOPE_*` 与 `BAILIAN_*_MODEL` 配置，无需 AI Gateway 凭证。
 - `lib/assistant-output.ts` 用 Zod 定义唯一的输出结构，派生提供给模型的 JSON Schema；SDK 负责解析和结构校验，`validatePlan` 继续校验当前账号的分类、成员、金额、日期和修改目标。
-- 对话保留 `record/query/update/chat` 四种动作。查询仍由固定参数化 SQL 读取真实数据，再交给总结模型；选人、删除和确认入账不调用模型。草稿与确认接口的行为不变。
-- 图片与语音使用 SDK 的多模态消息。百炼兼容钩子只处理音频 data URL、专用参数以及流结束检查；统计页对外仍返回原有纯文本流，客户端无需迁移消息协议。
+- 对话支持 `record/query/update/undo/chat` 五种动作。查询由固定参数化 SQL 读取真实数据，再交给总结模型；撤销意图只能指定当前已入账卡片中的目标，由页面调用独立撤销接口，模型回复本身不能代表执行成功。选人、卡片删除、确认及卡片撤销不调用模型。
+- 图片与音频文件转写使用 SDK 的多模态消息；实时麦克风走百炼 ASR WebSocket，由服务端保管 API Key。百炼兼容钩子只处理音频 data URL、专用参数以及流结束检查；统计页对外仍返回原有纯文本流，客户端无需迁移消息协议。
 - 模型请求超时90秒，支持调用取消。明确设置 `maxRetries: 0`；错误由统一映射返回，结构化输出错误为422，截断或中断不会当作完整结果。
 - 服务端仅记录模型、调用类型、耗时和 token 用量；不记录提示词、图片、录音、模型答案或 API Key。

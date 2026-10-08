@@ -18,7 +18,7 @@ function worker({ offline = false } = {}) {
       clients: { claim: async () => {} },
     },
     caches: {
-      keys: async () => ['ledger-pwa-v1', 'ledger-pwa-v2', 'ledger-pwa-v3', 'other-app'],
+      keys: async () => ['ledger-pwa-v1', 'ledger-pwa-v2', 'ledger-pwa-v3', 'ledger-pwa-v4', 'other-app'],
       delete: async (key) => { deleted.push(key); },
       open: async () => ({
         addAll: async (urls) => { urls.forEach(url => cached.set(url, fallback)); },
@@ -57,7 +57,7 @@ test('activation removes previous ledger caches but preserves unrelated caches',
   let pending;
   handlers.activate({ waitUntil: promise => { pending = promise; } });
   await pending;
-  assert.deepEqual(deleted, ['ledger-pwa-v1', 'ledger-pwa-v2']);
+  assert.deepEqual(deleted, ['ledger-pwa-v1', 'ledger-pwa-v2', 'ledger-pwa-v3']);
 });
 
 for (const offline of [false, true]) {

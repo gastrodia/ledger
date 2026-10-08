@@ -3,7 +3,7 @@
 import { Button } from "@/components/ui/button";
 import type { DraftStatus } from "@/lib/form-drafts";
 
-export function DraftNotice({ draft, hideSaved = false }: { hideSaved?: boolean; draft: {
+export function DraftNotice({ draft, hideSaved = false, hidePending = false }: { hideSaved?: boolean; hidePending?: boolean; draft: {
   hasDraft: boolean;
   status: DraftStatus;
   error: string | null;
@@ -24,7 +24,7 @@ export function DraftNotice({ draft, hideSaved = false }: { hideSaved?: boolean;
     </div>
   );
   if (draft.error) return <p role="status" className="text-sm text-amber-700">{draft.error}</p>;
-  if (draft.needsProtection) return <p role="status" className="text-xs text-muted-foreground">当前输入尚未保存为本机草稿，离开前会提醒你确认。</p>;
+  if (!hidePending && draft.needsProtection) return <p role="status" className="text-xs text-muted-foreground">当前输入尚未保存为本机草稿，离开前会提醒你确认。</p>;
   if (!hideSaved && draft.status === "saved" && draft.isPersisted !== false) return <p role="status" className="text-xs text-muted-foreground">草稿已保存在本机，尚未提交。退出登录会清除草稿。</p>;
   return null;
 }

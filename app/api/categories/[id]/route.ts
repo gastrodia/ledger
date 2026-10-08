@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
 import { getSession } from '@/lib/auth';
+import { isCategoryIcon } from '@/lib/entity-icon-catalog';
 
 /**
  * PATCH /api/categories/[id]
@@ -23,6 +24,13 @@ export async function PATCH(
     const { id } = await context.params;
     const body = await request.json();
     const { name, type, icon } = body;
+
+    if (icon !== undefined && icon !== null && icon !== '' && !isCategoryIcon(icon)) {
+      return NextResponse.json(
+        { error: '请选择有效的分类图标' },
+        { status: 400 }
+      );
+    }
 
     // 检查分类是否存在且属于当前用户
     const existingCategories = await sql`
@@ -76,7 +84,7 @@ export async function PATCH(
       SET
         name = ${newName.trim ? newName.trim() : newName},
         type = ${newType},
-        icon = ${icon !== undefined ? icon : existingCategory.icon}
+        icon = ${icon !== undefined ? (icon || null) : existingCategory.icon}
       WHERE id = ${id} AND user_id = ${session.userId}
         AND (type = ${newType} OR NOT EXISTS (
           SELECT 1 FROM transactions WHERE category_id = ${id} AND user_id = ${session.userId}

@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -12,6 +11,7 @@ import {
   Menu,
   BarChart3,
   Gift,
+  BookHeart,
   StickyNote,
   HandCoins,
   Download,
@@ -23,6 +23,8 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { dashboardNavigationGroups, getMobileNavigationSection, isDashboardRouteActive } from "@/lib/dashboard-navigation";
 import { toast } from "@/hooks/use-toast";
 import { clearDraftsOnLogout } from "@/lib/form-drafts";
+import { BrandLogo, BrandMark } from "@/components/brand/brand-logo";
+import { BRAND_NAME, BRAND_TAGLINE } from "@/lib/brand";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -39,7 +41,7 @@ const navigationIcons = {
   categories: FolderTree,
   members: Users,
   loans: HandCoins,
-  giftbooks: Gift,
+  giftbooks: BookHeart,
   gifts: Gift,
   notes: StickyNote,
 };
@@ -182,11 +184,17 @@ export function DashboardNav() {
     }
   };
 
-  const navigation = (
-    <nav aria-label="全部功能" className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 space-y-5">
+  const renderNavigation = (compactOnDesktop = false) => (
+    <nav
+      aria-label="全部功能"
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto overscroll-contain space-y-5",
+        compactOnDesktop ? "p-3 min-[90rem]:p-4" : "p-4"
+      )}
+    >
       {dashboardNavigationGroups.map((group) => (
         <div key={group.label}>
-          <p className="mb-2 px-3 text-xs font-medium text-muted-foreground">{group.label}</p>
+          <p className={cn("mb-2 px-3 text-xs font-medium text-muted-foreground", compactOnDesktop && "hidden min-[90rem]:block")}>{group.label}</p>
           <div className="space-y-1">
             {group.items.map((item) => {
               const isActive = isDashboardRouteActive(pathname, item.href);
@@ -196,16 +204,21 @@ export function DashboardNav() {
                   key={item.href}
                   href={item.href}
                   onClick={() => setMobileMenuPath(null)}
+                  aria-label={item.label}
+                  title={item.label}
                   aria-current={isActive ? "page" : undefined}
                   className={cn(
-                    "flex min-h-11 items-center gap-3 px-3 py-2 rounded-md transition-colors",
+                    "flex min-h-11 items-center py-2 rounded-md transition-colors",
+                    compactOnDesktop
+                      ? "justify-center gap-0 px-0 min-[90rem]:justify-start min-[90rem]:gap-3 min-[90rem]:px-3"
+                      : "gap-3 px-3",
                     isActive
                       ? "bg-primary/10 text-primary font-semibold hover:bg-primary/15"
                       : "text-muted-foreground hover:bg-accent hover:text-foreground"
                   )}
                 >
                   <Icon className="h-5 w-5 shrink-0" aria-hidden="true" />
-                  <span className="text-sm">{item.label}</span>
+                  <span className={cn("text-sm", compactOnDesktop && "hidden min-[90rem]:inline")}>{item.label}</span>
                 </Link>
               );
             })}
@@ -215,43 +228,65 @@ export function DashboardNav() {
     </nav>
   );
 
-  const branding = (
-    <div className="flex shrink-0 items-center gap-3 h-18 px-5 border-b">
-      <Image src="/icons/icon-maskable.svg" alt="" width={40} height={40} className="size-10" priority />
-      <div>
-        <p className="font-bold text-lg">钱钱去哪了</p>
-        <p className="text-xs text-muted-foreground">智能记账助手</p>
-      </div>
+  const renderBranding = (compactOnDesktop = false) => (
+    <div className={cn(
+      "flex h-20 shrink-0 flex-col justify-center gap-2 border-b",
+      compactOnDesktop ? "items-center px-3 min-[90rem]:items-start min-[90rem]:px-5" : "items-start px-5"
+    )}>
+      {compactOnDesktop && (
+        <span role="img" aria-label={BRAND_NAME} title={BRAND_NAME} className="inline-flex min-[90rem]:hidden">
+          <BrandMark className="h-6 w-auto text-[#6257e8]" />
+        </span>
+      )}
+      <BrandLogo className={cn("text-2xl leading-none", compactOnDesktop && "hidden min-[90rem]:inline-flex")} />
+      <p className={cn("text-[11px] leading-4 text-muted-foreground", compactOnDesktop && "hidden min-[90rem]:block")}>{BRAND_TAGLINE}</p>
     </div>
   );
 
-  const accountActions = (
-    <div className="shrink-0 border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))] space-y-2">
+  const renderAccountActions = (compactOnDesktop = false) => (
+    <div className={cn(
+      "shrink-0 border-t pb-[max(1rem,env(safe-area-inset-bottom))] space-y-2",
+      compactOnDesktop ? "px-3 pt-3 min-[90rem]:px-4 min-[90rem]:pt-4" : "px-4 pt-4"
+    )}>
       <button
         onClick={handleInstall}
         disabled={isInstalling}
-        className="flex min-h-11 items-center gap-3 px-3 py-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed"
+        aria-label={isInstalling ? "安装中..." : "安装"}
+        title={isInstalling ? "安装中..." : "安装"}
+        className={cn(
+          "flex min-h-11 items-center py-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed",
+          compactOnDesktop
+            ? "justify-center gap-0 px-0 min-[90rem]:justify-start min-[90rem]:gap-3 min-[90rem]:px-3"
+            : "gap-3 px-3"
+        )}
       >
         <Download className="h-5 w-5 shrink-0" aria-hidden="true" />
-        <span className="text-sm font-medium">{isInstalling ? "安装中..." : "安装"}</span>
+        <span className={cn("text-sm font-medium", compactOnDesktop && "hidden min-[90rem]:inline")}>{isInstalling ? "安装中..." : "安装"}</span>
       </button>
       <button
         onClick={handleLogout}
         disabled={isLoggingOut}
-        className="flex min-h-11 items-center gap-3 px-3 py-2 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed"
+        aria-label={isLoggingOut ? "退出中..." : "退出登录"}
+        title={isLoggingOut ? "退出中..." : "退出登录"}
+        className={cn(
+          "flex min-h-11 items-center py-2 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors w-full disabled:opacity-50 disabled:cursor-not-allowed",
+          compactOnDesktop
+            ? "justify-center gap-0 px-0 min-[90rem]:justify-start min-[90rem]:gap-3 min-[90rem]:px-3"
+            : "gap-3 px-3"
+        )}
       >
         <LogOut className="h-5 w-5 shrink-0" aria-hidden="true" />
-        <span className="text-sm font-medium">{isLoggingOut ? "退出中..." : "退出登录"}</span>
+        <span className={cn("text-sm font-medium", compactOnDesktop && "hidden min-[90rem]:inline")}>{isLoggingOut ? "退出中..." : "退出登录"}</span>
       </button>
     </div>
   );
 
   return (
     <>
-      <aside aria-label="侧栏导航" className="fixed inset-y-0 left-0 z-30 hidden w-56 flex-col border-r bg-card lg:flex">
-        {branding}
-        {navigation}
-        {accountActions}
+      <aside aria-label="侧栏导航" className="fixed inset-y-0 left-0 z-30 hidden w-18 flex-col border-r bg-card lg:flex min-[90rem]:w-56">
+        {renderBranding(true)}
+        {renderNavigation(true)}
+        {renderAccountActions(true)}
       </aside>
 
       <DialogPrimitive.Root open={isMobileMenuOpen} onOpenChange={(open) => setMobileMenuPath(open ? pathname : null)}>
@@ -308,12 +343,12 @@ export function DashboardNav() {
             className="fixed inset-y-0 left-0 z-40 flex h-dvh w-72 max-w-[85vw] flex-col border-r bg-card shadow-xl lg:hidden"
           >
             <DialogPrimitive.Title className="sr-only">更多功能</DialogPrimitive.Title>
-            {branding}
+            {renderBranding()}
             <DialogPrimitive.Close className="absolute right-2 top-2 flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent" aria-label="关闭菜单">
               <X className="size-4" aria-hidden="true" />
             </DialogPrimitive.Close>
-            {navigation}
-            {accountActions}
+            {renderNavigation()}
+            {renderAccountActions()}
           </DialogPrimitive.Content>
         </DialogPrimitive.Portal>
       </DialogPrimitive.Root>

@@ -2,14 +2,14 @@
 
 import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
 import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { HorizontalScroll } from "@/components/ui/horizontal-scroll";
+import { RecordListSkeleton, Skeleton, SkeletonRegion } from "@/components/ui/loading-skeleton";
 import { upsertRow } from "@/lib/list-resource";
 import { matchesGiftSearch, giftSummary } from "@/lib/gift-list-updates";
 
 
 import { TransactionLinksProvider, TransactionLinkButton } from "@/components/transactions/transaction-link";
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
-import { useFormDraft } from "@/hooks/use-form-draft";
-import { DraftNotice } from "@/components/ui/draft-notice";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
@@ -235,7 +235,13 @@ export default function GiftsGivenPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">{s.value}</div>
+                {isLoading ? (
+                  <SkeletonRegion label={`正在加载${s.title}`}>
+                    <Skeleton className="h-8 w-28" />
+                  </SkeletonRegion>
+                ) : (
+                  <div className="text-2xl font-bold">{resource.data ? s.value : "—"}</div>
+                )}
               </CardContent>
             </Card>
           ))}
@@ -294,10 +300,14 @@ export default function GiftsGivenPage() {
             </div>
           </CardHeader>
 
-          <CardContent className="p-0">
+          <CardContent className="p-0 sm:px-0">
             <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {isLoading ? (
-              <div className="text-center py-12 text-muted-foreground">加载中...</div>
+              <RecordListSkeleton
+                label="正在加载送礼记录"
+                tableClassName="min-w-[960px] whitespace-nowrap"
+                columns={["日期", "收礼人", "现金", "物品估值", "物品", "事由", "操作"]}
+              />
             ) : loadError ? (
               <div role="alert" className="space-y-3 px-4 py-10 text-center">
                 <p className="text-sm text-destructive">{loadError}</p>
@@ -313,8 +323,8 @@ export default function GiftsGivenPage() {
             ) : (
               <>
                 {/* PC：表格 */}
-                <div className="hidden md:block overflow-x-auto">
-                  <table className="w-full">
+                <HorizontalScroll className="hidden md:block">
+                  <table className="w-full min-w-[960px] whitespace-nowrap">
                     <thead>
                       <tr className="border-b bg-muted/50">
                         <th className="text-left p-4 font-semibold text-sm text-muted-foreground">
@@ -351,11 +361,11 @@ export default function GiftsGivenPage() {
                           </td>
                           <td className="p-4 font-medium">
                             <div className="flex items-center gap-2">
-                              <span>{g.recipient_name}</span>
+                              <span className="min-w-0 max-w-[200px] truncate" title={g.recipient_name}>{g.recipient_name}</span>
                               {g.attachment_key ? (
                                 <button
                                   type="button"
-                                  className="text-muted-foreground hover:text-foreground"
+                                  className="shrink-0 text-muted-foreground hover:text-foreground"
                                   onClick={() =>
                                     setPreviewAttachment({
                                       url: g.attachment_key!,
@@ -365,13 +375,13 @@ export default function GiftsGivenPage() {
                                   }
                                   aria-label="预览附件"
                                 >
-                                  <Paperclip className="h-4 w-4" />
+                                  <Paperclip className="h-4 w-4 shrink-0" />
                                 </button>
                               ) : null}
                             </div>
-                            <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.recipient_name}的送礼记录`} /></div>
+                            <div className="mt-1 min-w-max"><TransactionLinkButton sourceId={g.id} sourceDate={formatDate(g.gift_date)} label={`${g.recipient_name}的送礼记录`} /></div>
                             {g.notes ? (
-                              <div className="mt-1 text-xs text-muted-foreground truncate max-w-[420px]">
+                              <div className="mt-1 min-w-[160px] max-w-[240px] whitespace-normal wrap-anywhere text-xs text-muted-foreground">
                                 备注：{g.notes}
                               </div>
                             ) : null}
@@ -399,25 +409,27 @@ export default function GiftsGivenPage() {
                             )}
                           </td>
                           <td className="p-4 text-sm text-muted-foreground">
-                            {g.occasion || "-"}
+                            <div className="min-w-[160px] max-w-[320px] whitespace-normal wrap-anywhere">{g.occasion || "-"}</div>
                           </td>
                           <td className="p-4">
                             <div className="flex justify-end gap-2">
                               <Button
                                 variant="outline"
                                 size="icon"
+                                className="shrink-0"
                                 onClick={() => openEdit(g)}
                                 aria-label="编辑"
                               >
-                                <Edit className="h-4 w-4" />
+                                <Edit className="h-4 w-4 shrink-0" />
                               </Button>
                               <Button
                                 variant="outline"
                                 size="icon"
+                                className="shrink-0"
                                 disabled={deleting.has(g.id)} onClick={() => handleDelete(g)}
                                 aria-label="删除"
                               >
-                                <Trash2 className="h-4 w-4" />
+                                <Trash2 className="h-4 w-4 shrink-0" />
                               </Button>
                             </div>
                           </td>
@@ -425,7 +437,7 @@ export default function GiftsGivenPage() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </HorizontalScroll>
 
                 {/* Mobile：卡片 */}
                 <div className="md:hidden divide-y">
@@ -434,7 +446,7 @@ export default function GiftsGivenPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="font-semibold truncate">{g.recipient_name}</div>
-                          <div className="mt-1"><TransactionLinkButton sourceId={g.id} label={`${g.recipient_name}的送礼记录`} /></div>
+                          <div className="mt-1"><TransactionLinkButton sourceId={g.id} sourceDate={formatDate(g.gift_date)} label={`${g.recipient_name}的送礼记录`} /></div>
                           <div className="text-sm leading-6 text-muted-foreground mt-1">
                             {formatDate(g.gift_date)}
                           </div>
@@ -568,7 +580,6 @@ export default function GiftsGivenPage() {
           }}
         >
           <GiftsGivenModal
-            enabled={isModalOpen}
             registerCloseGuard={formClose.register}
             key={
               isModalOpen
@@ -601,19 +612,40 @@ export default function GiftsGivenPage() {
               <DialogTitle>{previewItems?.title || "物品明细"}</DialogTitle>
               <DialogDescription>
                 {previewItemsLoading
-                  ? "加载中..."
+                  ? "物品数量与估值明细"
                   : `共 ${previewItems?.items.length || 0} 行 · 合计估值 ${formatCurrency(previewItems?.estimatedTotal || 0)}`}
               </DialogDescription>
             </DialogHeader>
 
             <DialogBody>
               {previewItemsLoading ? (
-                <div className="py-10 text-center text-muted-foreground">加载中...</div>
+                <SkeletonRegion label="正在加载物品明细">
+                  <HorizontalScroll keyboardFocusable={false} className="min-w-0 max-w-full rounded-md border">
+                    <table className="w-full min-w-[280px] table-fixed whitespace-nowrap text-sm">
+                      <thead className="bg-muted/50">
+                        <tr className="border-b">
+                          <th className="text-left p-3 font-semibold text-muted-foreground">物品</th>
+                          <th className="text-right p-3 font-semibold text-muted-foreground">数量</th>
+                          <th className="text-right p-3 font-semibold text-muted-foreground">估值</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Array.from({ length: 3 }, (_, index) => (
+                          <tr key={index} className="border-b last:border-0">
+                            <td className="p-3"><Skeleton className="h-5 w-24 max-w-full" /></td>
+                            <td className="p-3"><Skeleton className="h-5 w-12 max-w-full ml-auto" /></td>
+                            <td className="p-3"><Skeleton className="h-5 w-16 max-w-full ml-auto" /></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </HorizontalScroll>
+                </SkeletonRegion>
               ) : (previewItems?.items || []).length === 0 ? (
                 <div className="py-10 text-center text-muted-foreground">暂无物品行</div>
               ) : (
-                <div className="rounded-md border overflow-hidden">
-                  <table className="w-full text-sm">
+                <HorizontalScroll className="min-w-0 max-w-full rounded-md border">
+                  <table className="w-full min-w-[280px] whitespace-nowrap text-sm">
                     <thead className="bg-muted/50">
                       <tr className="border-b">
                         <th className="text-left p-3 font-semibold text-muted-foreground">物品</th>
@@ -624,7 +656,7 @@ export default function GiftsGivenPage() {
                     <tbody>
                       {(previewItems?.items || []).map((it, idx) => (
                         <tr key={`${it.item_name}-${idx}`} className="border-b last:border-0">
-                          <td className="p-3">{it.item_name}</td>
+                          <td className="p-3"><div className="min-w-[120px] max-w-[320px] whitespace-normal wrap-anywhere">{it.item_name}</div></td>
                           <td className="p-3 text-right">
                             {formatQty(it.quantity)} {it.unit}
                           </td>
@@ -633,7 +665,7 @@ export default function GiftsGivenPage() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </HorizontalScroll>
               )}
             </DialogBody>
 
@@ -652,14 +684,12 @@ export default function GiftsGivenPage() {
 
 function GiftsGivenModal({
   registerCloseGuard,
-  enabled,
   mode,
   gift,
   loading,
   onClose,
 }: {
   registerCloseGuard: RegisterCloseGuard;
-  enabled: boolean;
   mode: "add" | "edit";
   gift: GivenGiftDetail | null;
   loading: boolean;
@@ -769,21 +799,8 @@ function GiftsGivenModal({
   };
 
   const [initialSnapshot] = useState(() => JSON.stringify(form));
-  const draft = useFormDraft({
-    scope: `gifts-given:${mode === "edit" ? gift?.id : "new"}`,
-    value: form,
-    dirty: JSON.stringify(form) !== initialSnapshot,
-    enabled: enabled && (mode === "add" || !!gift) && !loading,
-    onRestore: (restored) => {
-      setForm(restored);
-      setSubmitError(null);
-      setAttachment(null);
-      setRemoveExistingAttachment(false);
-    },
-  });
-
   const { requestClose } = useFormLeaveGuard({
-    draft,
+    isDirty: JSON.stringify(form) !== initialSnapshot || removeExistingAttachment,
     isBusy: isSubmitting || isUploading,
     hasPendingFiles: !!attachment,
   });
@@ -868,7 +885,6 @@ function GiftsGivenModal({
       }
 
       toast.success(mode === "add" ? "已创建" : "已更新");
-      draft.clear();
       onClose(true, { ...(await res.json()).data, items_count: payload.items.length,
         items_estimated_total: payload.items.reduce((total, item) => total + Math.round(item.estimated_value * 100), 0) / 100 });
     } catch (e) {
@@ -890,22 +906,34 @@ function GiftsGivenModal({
         <DialogDescription>
           {mode === "add"
             ? "支持现金 + 多行物品组合礼"
-            : loading
-              ? "加载中..."
-              : "修改送礼详情"}
+            : "修改送礼详情"}
         </DialogDescription>
       </DialogHeader>
 
       {loading && mode === "edit" ? (
         <DialogBody>
-          <div className="py-10 text-center text-muted-foreground">加载中...</div>
+          <SkeletonRegion label="正在加载送礼记录详情" className="py-4">
+            <div className="space-y-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {["收礼人", "送礼日期", "事由", "备注"].map((field) => (
+                  <div key={field} className="space-y-2">
+                    <div className="text-sm font-medium">{field}</div>
+                    <Skeleton className="h-10 w-full" />
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-6">
+                <Skeleton className="h-5 w-24" />
+                <Skeleton className="h-5 w-24" />
+              </div>
+              <Skeleton className="h-28 w-full" />
+            </div>
+          </SkeletonRegion>
         </DialogBody>
       ) : (
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
           <DialogBody className="space-y-5 py-4">
-          <DraftNotice draft={draft} />
           {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
-          <p className="text-xs text-muted-foreground">草稿不保存附件，恢复后请重新选择。</p>
           {isUploading && (
             <div className="space-y-1" role="status" aria-live="polite">
               <p className="text-sm text-muted-foreground">附件上传 {Math.round(uploadProgress)}%</p>

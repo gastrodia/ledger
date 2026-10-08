@@ -2,11 +2,11 @@
 
 import { useListResource, useJsonLoader, usePendingRows } from "@/hooks/use-list-resource";
 import { ListSyncFeedback } from "@/components/ui/list-sync-feedback";
+import { HorizontalScroll } from "@/components/ui/horizontal-scroll";
+import { RecordListSkeleton } from "@/components/ui/loading-skeleton";
 import { upsertRow } from "@/lib/list-resource";
 
 import { useFormLeaveGuard } from "@/hooks/use-form-leave-guard";
-import { useFormDraft } from "@/hooks/use-form-draft";
-import { DraftNotice } from "@/components/ui/draft-notice";
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
@@ -123,7 +123,6 @@ export default function GiftBooksPage() {
               </Button>
             </DialogTrigger>
             <CreateGiftBookModal
-              enabled={isCreateOpen}
               registerCloseGuard={createClose.register}
               key={isCreateOpen ? "open" : "closed"}
               onClose={(refresh, saved) => {
@@ -138,10 +137,15 @@ export default function GiftBooksPage() {
           <CardHeader className="border-b">
             <CardTitle>我的礼簿</CardTitle>
           </CardHeader>
-          <CardContent className="p-0">
+          <CardContent className="p-0 sm:px-0">
             <ListSyncFeedback error={resource.refreshError} refreshing={resource.isRefreshing} onRetry={resource.refresh} />
             {isLoading ? (
-              <div className="text-center py-12 text-muted-foreground">加载中...</div>
+              <RecordListSkeleton
+                label="正在加载礼簿"
+                columns={["礼簿", "日期 / 地点", "类型", "礼金合计", "礼品估值", "礼金/礼品明细数", "操作"]}
+                leadingIcon
+                tableClassName="min-w-[960px] whitespace-nowrap"
+              />
             ) : loadError ? (
               <div role="alert" className="space-y-3 px-4 py-10 text-center">
                 <p className="text-sm text-destructive">{loadError}</p>
@@ -160,8 +164,8 @@ export default function GiftBooksPage() {
             ) : (
               <>
                 {/* PC：表格（进入 = 点礼簿名） */}
-                <div className="hidden md:block overflow-x-auto">
-                  <table className="w-full">
+                <HorizontalScroll className="hidden md:block">
+                  <table className="w-full min-w-[960px] whitespace-nowrap">
                     <thead>
                       <tr className="border-b bg-muted/50">
                         <th className="text-left p-4 font-semibold text-sm text-muted-foreground">礼簿</th>
@@ -184,10 +188,11 @@ export default function GiftBooksPage() {
                               <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-muted shrink-0">
                                 <BookHeart className="h-5 w-5 text-primary" />
                               </div>
-                              <div className="min-w-0">
+                              <div className="min-w-0 max-w-[240px]">
                                 <Link
                                   href={`/dashboard/giftbooks/${gb.id}`}
                                   className="font-semibold truncate hover:underline block"
+                                  title={gb.name}
                                 >
                                   {gb.name}
                                 </Link>
@@ -197,12 +202,12 @@ export default function GiftBooksPage() {
                           <td className="p-4">
                             <div className="space-y-1 text-sm">
                               <div className="flex items-center gap-2 text-muted-foreground">
-                                <CalendarDays className="h-3.5 w-3.5" />
+                                <CalendarDays className="h-3.5 w-3.5 shrink-0" />
                                 <span>{gb.event_date ? formatDate(gb.event_date) : "-"}</span>
                               </div>
                               <div className="flex items-center gap-2 text-muted-foreground">
-                                <MapPin className="h-3.5 w-3.5" />
-                                <span className="truncate max-w-[240px]">{gb.location || "-"}</span>
+                                <MapPin className="h-3.5 w-3.5 shrink-0" />
+                                <span className="min-w-0 truncate max-w-[240px]" title={gb.location || undefined}>{gb.location || "-"}</span>
                               </div>
                             </div>
                           </td>
@@ -229,7 +234,7 @@ export default function GiftBooksPage() {
                             <span className="text-sm text-muted-foreground">{gb.summary?.recordCount ?? 0}</span>
                           </td>
                           <td className="p-4">
-                            <div className="flex items-center justify-end gap-1">
+                            <div className="flex min-w-max items-center justify-end gap-1">
                               <Button variant="ghost" size="icon" className="h-8 w-8" asChild>
                                 <Link href={`/dashboard/giftbooks/${gb.id}`} aria-label="进入礼簿">
                                   <LogIn className="h-4 w-4" />
@@ -259,7 +264,7 @@ export default function GiftBooksPage() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </HorizontalScroll>
 
                 {/* 移动端：卡片（进入 = 点标题，右侧仅作为指示，不做大按钮） */}
                 <div className="md:hidden divide-y">
@@ -378,7 +383,7 @@ export default function GiftBooksPage() {
   );
 }
 
-function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose: (refresh?: boolean, saved?: GiftBook) => void; enabled: boolean; registerCloseGuard: RegisterCloseGuard }) {
+function CreateGiftBookModal({ onClose, registerCloseGuard }: { onClose: (refresh?: boolean, saved?: GiftBook) => void; registerCloseGuard: RegisterCloseGuard }) {
   const getTodayDate = () => {
     const now = new Date();
     const year = now.getFullYear();
@@ -398,19 +403,8 @@ function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose
   });
 
   const [initialSnapshot] = useState(() => JSON.stringify(formData));
-  const draft = useFormDraft({
-    scope: "giftbooks:new",
-    value: formData,
-    dirty: JSON.stringify(formData) !== initialSnapshot,
-    enabled: enabled,
-    onRestore: (restored) => {
-      setFormData(restored);
-      setSubmitError(null);
-    },
-  });
-
   const { requestClose } = useFormLeaveGuard({
-    draft,
+    isDirty: JSON.stringify(formData) !== initialSnapshot,
     isBusy: isSubmitting,
   });
   useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
@@ -436,7 +430,6 @@ function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose
         throw new Error(err.error || "创建失败");
       }
       toast.success("礼簿创建成功");
-      draft.clear();
       onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
@@ -455,7 +448,6 @@ function CreateGiftBookModal({ onClose, enabled, registerCloseGuard }: { onClose
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
-          <DraftNotice draft={draft} />
           {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
           <div className="space-y-2">
             <Label htmlFor="gb-name">礼簿名 *</Label>
@@ -557,19 +549,8 @@ function EditGiftBookModal({
   });
 
   const [initialSnapshot] = useState(() => JSON.stringify(formData));
-  const draft = useFormDraft({
-    scope: `giftbooks:${giftbook.id}:edit`,
-    value: formData,
-    dirty: JSON.stringify(formData) !== initialSnapshot,
-    enabled: true,
-    onRestore: (restored) => {
-      setFormData(restored);
-      setSubmitError(null);
-    },
-  });
-
   const { requestClose } = useFormLeaveGuard({
-    draft,
+    isDirty: JSON.stringify(formData) !== initialSnapshot,
     isBusy: isSubmitting,
   });
   useEffect(() => registerCloseGuard(requestClose), [registerCloseGuard, requestClose]);
@@ -595,7 +576,6 @@ function EditGiftBookModal({
         throw new Error(err.error || "更新失败");
       }
       toast.success("礼簿已更新");
-      draft.clear();
       onClose(true, (await res.json()).data);
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : "保存失败，请重试");
@@ -614,7 +594,6 @@ function EditGiftBookModal({
       </DialogHeader>
       <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
         <DialogBody className="space-y-4 py-4">
-          <DraftNotice draft={draft} />
           {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
           <div className="space-y-2">
             <Label htmlFor="gb-edit-name">礼簿名 *</Label>

@@ -95,11 +95,13 @@ test('SDK configuration rejects missing credentials and unsafe endpoints before 
 test('real SDK sends structured schema and image content while preserving Bailian thinking and token settings', async () => {
   const schema = ai.jsonSchema({ type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false });
   const image = 'data:image/png;base64,YWJj';
+  const secondImage = 'data:image/jpeg;base64,YWJk';
   const f = fixture(completion(JSON.stringify({ answer: '待确认' })));
   assert.deepEqual(await f.adapter.bailianObject({ model: 'fixture-model', schema, schemaName: 'ledger_plan',
     thinking: false, temperature: 0.2, maxOutputTokens: 5000,
     messages: [{ role: 'system', content: '识别账目' }, { role: 'user', content: [
       { type: 'text', text: '请识别截图' }, { type: 'file', mediaType: 'image/png', data: image },
+      { type: 'text', text: '截图 2 / 2' }, { type: 'file', mediaType: 'image/jpeg', data: secondImage },
     ] }],
   }), { answer: '待确认' });
   const { body, init, url } = f.calls[0];
@@ -118,6 +120,7 @@ test('real SDK sends structured schema and image content while preserving Bailia
   assert.equal(body.response_format.json_schema.strict, true);
   assert.equal(body.messages[1].content[1].type, 'image_url');
   assert.equal(body.messages[1].content[1].image_url.url, image);
+  assert.equal(body.messages[1].content[3].image_url.url, secondImage);
   assert.equal(f.calls.length, 1);
 });
 
@@ -171,6 +174,7 @@ test('real SDK validates the ledger schema, normalizes a single multimodal plan 
   assert.equal(value.action, 'record');
   assert.equal(value.drafts[0].amount_cents, 298);
   assert.equal(value.update, null);
+  assert.equal(value.undo, null);
   const malformed = [
     [valid, valid], { ...valid, action: 'execute_sql' }, { ...valid, unexpected: 'raw action private-response-secret secret-fixture' },
     { ...valid, drafts: [{ ...valid.drafts[0], amount_cents: 2.98 }] },
@@ -192,9 +196,10 @@ test('real SDK preserves a structured member choice with a null member without i
   const f = fixture(completion(JSON.stringify(valid)));
   const value = await f.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
     schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' });
-  assert.deepEqual(Object.keys(value).sort(), ['action', 'drafts', 'query', 'reply', 'update']);
+  assert.deepEqual(Object.keys(value).sort(), ['action', 'drafts', 'query', 'reply', 'undo', 'update']);
   assert.equal(value.action, 'update');
   assert.deepEqual(value.update, valid.update);
+  assert.equal(value.undo, null);
   assert.equal(value.drafts.length, 0);
   assert.equal(f.calls.length, 1);
   for (const member_id of [42, {}, undefined]) {
@@ -202,6 +207,49 @@ test('real SDK preserves a structured member choice with a null member without i
     await assert.rejects(rejected.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
       schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' }), error => safeValidationFailure(rejected.adapter, error));
   }
+});
+
+test('real SDK transports structured undo targets without asserting a successful database mutation', async () => {
+  const valid = { action: 'undo', reply: '准备撤销入账', drafts: [], query: null,
+    undo: { batch_id: '00000000-0000-4000-8000-000000000003',
+      draft_ids: ['00000000-0000-4000-8000-000000000004', '00000000-0000-4000-8000-000000000005'] } };
+  const f = fixture(completion(JSON.stringify(valid)));
+  const value = await f.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
+    schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' });
+  assert.deepEqual(Object.keys(value).sort(), ['action', 'drafts', 'query', 'reply', 'undo', 'update']);
+  assert.equal(value.action, 'undo');
+  assert.equal(value.reply, '准备撤销入账');
+  assert.deepEqual(value.undo, valid.undo);
+  assert.equal(value.update, null);
+  assert.equal(value.query, null);
+  assert.equal(value.drafts.length, 0);
+  const schema = f.calls[0].body.response_format.json_schema.schema;
+  assert.ok(schema.properties.action.enum.includes('undo'));
+  assert.ok('undo' in schema.properties);
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(f.calls.length, 1);
+});
+
+test('real SDK rejects malformed undo targets and unknown fields with safe validation errors', async () => {
+  const valid = { action: 'undo', reply: '准备撤销入账', drafts: [], query: null, update: null,
+    undo: { batch_id: '00000000-0000-4000-8000-000000000003',
+      draft_ids: ['00000000-0000-4000-8000-000000000004'] } };
+  for (const undo of [
+    { ...valid.undo, batch_id: 42 }, { ...valid.undo, draft_ids: null },
+    { ...valid.undo, draft_ids: [42] }, { ...valid.undo, draft_ids: undefined },
+    { ...valid.undo, transaction_id: 'private-response-secret secret-fixture' },
+    { ...valid.undo, user_id: 'private-response-secret secret-fixture' },
+    'raw action private-response-secret secret-fixture',
+  ]) {
+    const f = fixture(completion(JSON.stringify({ ...valid, undo })));
+    await assert.rejects(f.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
+      schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' }), error => safeValidationFailure(f.adapter, error));
+    assert.equal(f.calls.length, 1);
+  }
+  const extra = fixture(completion(JSON.stringify({ ...valid, transaction_ids: ['private-response-secret secret-fixture'] })));
+  await assert.rejects(extra.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
+    schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' }), error => safeValidationFailure(extra.adapter, error));
+  assert.equal(extra.calls.length, 1);
 });
 
 test('real SDK ASR uses input_audio data URLs and Chinese normalization through the common provider', async () => {
@@ -337,6 +385,160 @@ test('SDK requests propagate caller cancellation to the actual provider fetch wi
   await new Promise(resolve => setImmediate(resolve));
   controller.abort();
   await assert.rejects(pending);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].init.signal.aborted, true);
+});
+
+test('structured SDK streaming delivers reply snapshots before completion, then validates the final ledger plan', async () => {
+  const partials = [];
+  let send, complete;
+  const firstReply = new Promise(resolve => { complete = resolve; });
+  const f = fixture(({ init }) => new Response(new ReadableStream({ start(body) {
+    send = (event, end = false) => {
+      const bytes = new TextEncoder().encode(`data: ${typeof event === 'string' ? event : JSON.stringify(event)}\r\n\r\n`);
+      // UTF-8 and SSE boundaries must not affect partial Chinese replies.
+      for (const byte of bytes) body.enqueue(new Uint8Array([byte]));
+      if (end) body.close();
+    };
+    init.signal.addEventListener('abort', () => { try { body.error(init.signal.reason); } catch {} }, { once: true });
+    send({ choices: [{ delta: { reasoning_content: 'private-response-secret hidden reasoning' } }] });
+    send(textChunk('{"action":"chat","reply":"你好'));
+  } }), { headers: { 'Content-Type': 'text/event-stream' } }));
+  let settled = false;
+  const pending = f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt,
+    schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan', thinking: false,
+  }, partial => {
+    partials.push(partial);
+    if (partial.reply === '你好') complete();
+  }).finally(() => { settled = true; });
+  await firstReply;
+  assert.equal(settled, false, 'partial replies must arrive while provider generation is still pending');
+  assert.equal(partials.at(-1).reply, '你好');
+  assert.equal(partials.at(-1).drafts, undefined, 'partial fields must not be invented');
+  send(textChunk('，可以帮你记账。","drafts":[],"query":null}'));
+  send(finishChunk('stop'));
+  send('[DONE]', true);
+  const value = await pending;
+  assert.equal(value.reply, '你好，可以帮你记账。');
+  assert.equal(value.action, 'chat');
+  assert.equal(value.update, null, 'schema defaults are applied only to the final result');
+  assert.equal(value.undo, null);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].body.stream, true);
+  assert.equal(f.calls[0].body.enable_thinking, false);
+  assert.equal(f.calls[0].body.response_format.json_schema.name, 'ledger_plan');
+  assert.equal(f.logs.length, 1);
+  assert.equal(f.logs[0][1].operation, 'object-stream');
+  for (const sensitive of ['secret-fixture', 'private-response-secret', 'hidden reasoning']) {
+    assert.ok(!JSON.stringify(partials).includes(sensitive));
+    assert.ok(!JSON.stringify(f.logs).includes(sensitive));
+  }
+});
+
+test('structured SDK streams reject malformed or schema-invalid final JSON after provisional output', async () => {
+  for (const text of [
+    '{"action":"chat","reply":"partial",broken private-response-secret secret-fixture',
+    JSON.stringify({ action: 'execute_sql', reply: 'partial', drafts: [], query: null }),
+    JSON.stringify({ action: 'record', reply: 'partial', drafts: [{ amount_cents: 2.98 }], query: null }),
+  ]) {
+    const f = fixture(() => sse([textChunk(text), finishChunk('stop')]));
+    const partials = [];
+    await assert.rejects(f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt,
+      schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA,
+    }, partial => partials.push(partial)), error => safeValidationFailure(f.adapter, error));
+    assert.ok(partials.length > 0);
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('structured SDK streams reject truncation, incomplete transport, missing finish and empty output', async () => {
+  const content = '{"action":"chat","reply":"partial","drafts":[],"query":null}';
+  for (const [events, options, expectedCode] of [
+    [[textChunk(content), finishChunk('length')], {}, 'truncated'],
+    [[textChunk(content), finishChunk('stop')], { done: false }, 'incomplete_stream'],
+    [[textChunk(content)], {}, ''],
+    [[finishChunk('stop')], {}, 'empty'],
+    [[{ choices: [{ delta: { reasoning_content: 'hidden reasoning' } }] }, finishChunk('stop')], {}, 'empty'],
+  ]) {
+    const f = fixture(() => sse(events, options));
+    const partials = [];
+    await assert.rejects(f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt,
+      schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA,
+    }, partial => partials.push(partial)), error => {
+      assert.equal(error.code, expectedCode);
+      assert.equal(f.adapter.bailianFailure(error).status, 502);
+      return true;
+    });
+    assert.ok(!JSON.stringify(partials).includes('hidden reasoning'));
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('structured SDK streams preserve safe provider errors before and after partial replies', async () => {
+  for (const reply of [
+    () => Response.json({ error: { code: 'Arrearage', message: 'private-response-secret secret-fixture' } }, { status: 403 }),
+    () => sse([{ error: { code: 'Arrearage', message: 'private-response-secret secret-fixture' } }]),
+    () => sse([textChunk('{"action":"chat","reply":"partial'),
+      { error: { code: 'Arrearage', message: 'private-response-secret secret-fixture' } }]),
+  ]) {
+    const f = fixture(reply);
+    await assert.rejects(f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt,
+      schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA,
+    }, () => {}), error => {
+      const failure = f.adapter.bailianFailure(error);
+      assert.equal(failure.status, 503);
+      assert.match(failure.message, /余额/);
+      assert.ok(!failure.message.includes('private-response-secret'));
+      assert.ok(!error.message.includes('private-response-secret'));
+      return true;
+    });
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].init.signal.aborted, true);
+  }
+});
+
+test('cancelling a structured SDK stream or rejecting its callback aborts unfinished provider work', async () => {
+  for (const cancelViaCallback of [false, true]) {
+    const caller = new AbortController();
+    let firstPartial;
+    const arrived = new Promise(resolve => { firstPartial = resolve; });
+    const f = fixture(({ init }) => new Response(new ReadableStream({ start(body) {
+      body.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(textChunk('{"action":"chat","reply":"partial'))}\n\n`));
+      init.signal.addEventListener('abort', () => body.error(init.signal.reason), { once: true });
+    } }), { headers: { 'Content-Type': 'text/event-stream' } }));
+    const pending = f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt,
+      schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA,
+    }, () => {
+      firstPartial();
+      if (cancelViaCallback) throw new Error('private-response-secret callback failed');
+    }, caller.signal);
+    const rejected = assert.rejects(pending, error => {
+      assert.ok(!error.message.includes('private-response-secret'));
+      return true;
+    });
+    await arrived;
+    if (!cancelViaCallback) caller.abort();
+    await rejected;
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.calls[0].init.signal.aborted, true);
+  }
+});
+
+test('caller cancellation interrupts structured generation before its first output', async () => {
+  const caller = new AbortController();
+  let started;
+  const requested = new Promise(resolve => { started = resolve; });
+  const f = fixture(({ init }) => new Response(new ReadableStream({ start(body) {
+    init.signal.addEventListener('abort', () => body.error(init.signal.reason), { once: true });
+    started();
+  } }), { headers: { 'Content-Type': 'text/event-stream' } }));
+  const pending = f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt,
+    schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA,
+  }, () => assert.fail('cancelled generation must not publish any output'), caller.signal);
+  const rejected = assert.rejects(pending);
+  await requested;
+  caller.abort();
+  await rejected;
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].init.signal.aborted, true);
 });
