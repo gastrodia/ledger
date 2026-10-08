@@ -18,6 +18,10 @@ function loadModule(file, dependencies = {}) {
 }
 const assistant = loadModule('lib/assistant.ts');
 const assistantOutput = loadModule('lib/assistant-output.ts', { ai, zod: require('zod'), '@/lib/assistant': assistant });
+const assistantImages = loadModule('lib/assistant-images.ts');
+const assistantImageImport = loadModule('lib/assistant-image-import.ts', {
+  '@/lib/assistant': assistant, '@/lib/assistant-images': assistantImages,
+});
 
 function loadAdapter(fetchImpl, env = {}, logs = []) {
   const exports = {};
@@ -186,6 +190,69 @@ test('real SDK validates the ledger schema, normalizes a single multimodal plan 
     await assert.rejects(rejected.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
       schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' }), error => safeValidationFailure(rejected.adapter, error));
     assert.equal(rejected.calls.length, 1);
+  }
+});
+
+test('real SDK object and stream results preserve statement amounts when empty notes are null or omitted', async () => {
+  const amounts = [1300, 1800, 43832, 3300, 2000];
+  const descriptions = ['车辆服务商户', '服务区小吃店', '95号车用汽油', '旅行服务商户', '数字服务商户'];
+  const validSource = { image_index: 1, row_index: 1, time: '15:33', transaction_id: null, kind: 'statement' };
+  const sources = [validSource, undefined, null, { ...validSource, row_index: 0 }, { ...validSource, row_index: 5 }];
+  const paidRows = amounts.map((amount_cents, index) => ({ type: 'expense', amount_cents,
+    category_id: null, member_id: null, transaction_date: '2026-10-04', description: descriptions[index],
+    payment_method: null, ...(index % 2 === 0 ? { note: null } : {}),
+    ...(sources[index] === undefined ? {} : { source: sources[index] }),
+  }));
+  const original = { action: 'record', reply: '请核对年份后确认入账。', drafts: paidRows, query: null };
+  const text = JSON.stringify(original);
+  const parsed = await assistantOutput.ASSISTANT_OUTPUT_SCHEMA.validate(original);
+  assert.equal(parsed.success, true);
+  assert.ok(parsed.value.drafts.every(draft => draft.note === ''));
+  assert.equal(JSON.stringify(original), text, 'normalization must not modify the input plan');
+  for (const streaming of [false, true]) {
+    const f = fixture(streaming ? () => sse([textChunk(text), finishChunk('stop')], { bytewise: true }) : completion(text));
+    const request = { model: 'fixture-model', messages: prompt,
+      schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' };
+    const value = streaming ? await f.adapter.bailianObjectStream(request, () => {}) : await f.adapter.bailianObject(request);
+    assert.deepEqual(Array.from(value.drafts, draft => draft.amount_cents), amounts);
+    assert.deepEqual(Array.from(value.drafts, draft => draft.description), descriptions);
+    assert.ok(value.drafts.every(draft => draft.note === ''));
+    assert.ok(value.drafts.every(draft => draft.transaction_date === '2026-10-04' && draft.member_id === null));
+    assert.equal(value.drafts[0].source.row_index, 1);
+    assert.equal(value.drafts[1].source, undefined);
+    assert.equal(value.drafts[2].source, null);
+    assert.equal(value.drafts[3].source, null);
+    const refund = { ...value.drafts[0], amount_cents: -0, description: '退款商品', note: '有退款' };
+    const imported = assistantImageImport.mergeAssistantImageImport({ ...value, drafts: [refund, ...value.drafts] }, 1);
+    let nextId = 0;
+    const accepted = assistant.validatePlan(imported.output, [], [], () => `draft-${++nextId}`);
+    assert.deepEqual(Array.from(accepted.drafts, draft => draft.amount_cents), amounts);
+    assert.equal(accepted.drafts.reduce((sum, draft) => sum + draft.amount_cents, 0), 52232);
+    assert.equal(imported.summary.skipped_zero_amounts, 1);
+    assert.equal(imported.summary.retained_count, 5);
+    assert.equal(refund.note, '有退款');
+    assert.equal(f.calls.length, 1, 'empty notes must not trigger another paid recognition');
+    const draftSchema = f.calls[0].body.response_format.json_schema.schema.properties.drafts.items;
+    assert.deepEqual(draftSchema.properties.note, { type: 'string' });
+    assert.ok(draftSchema.required.includes('note'), 'the provider must still be asked for a string note');
+  }
+});
+
+test('empty-note compatibility still rejects other note types and malformed financial fields in real SDK results', async () => {
+  const row = { type: 'expense', amount_cents: 1300, category_id: null, member_id: null,
+    transaction_date: '2026-10-04', description: 'C3', payment_method: null, note: null };
+  for (const streaming of [false, true]) {
+    for (const patch of [
+      { note: 0 }, { note: [] }, { note: {} }, { note: false },
+      { amount_cents: '1300' }, { amount_cents: 13.5 }, { transaction_date: null }, { member_id: 42 },
+    ]) {
+      const text = JSON.stringify({ action: 'record', reply: '待确认', drafts: [{ ...row, ...patch }], query: null });
+      const f = fixture(streaming ? () => sse([textChunk(text), finishChunk('stop')]) : completion(text));
+      const request = { model: 'fixture-model', messages: prompt, schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA };
+      await assert.rejects(streaming ? f.adapter.bailianObjectStream(request, () => {}) : f.adapter.bailianObject(request),
+        error => safeValidationFailure(f.adapter, error));
+      assert.equal(f.calls.length, 1);
+    }
   }
 });
 

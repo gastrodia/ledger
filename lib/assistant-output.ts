@@ -40,15 +40,18 @@ export const ASSISTANT_OUTPUT_SCHEMA = jsonSchema<AssistantModelOutput>(
     // Preserve the existing single-plan wrapper compatibility without accepting
     // multiple plans or letting a model recreate an existing batch.
     let normalized = Array.isArray(value) && value.length === 1 ? value[0] : value;
-    // Provenance only controls conservative overlap matching. Unusable source
-    // metadata must not discard otherwise valid financial rows or trigger a
-    // second paid recognition; the merger keeps these rows and warns for review.
+    // Empty notes are optional commentary, not financial data. Some image
+    // responses use null or omit them despite the advertised string schema.
+    // Provenance only controls conservative overlap matching; unusable source
+    // metadata keeps the row for review instead of requiring another request.
     if (normalized && typeof normalized === "object" && !Array.isArray(normalized) && Array.isArray((normalized as { drafts?: unknown }).drafts)) {
       const plan = normalized as { drafts: unknown[] };
       normalized = { ...plan, drafts: plan.drafts.map(draft => {
-        if (!draft || typeof draft !== "object" || Array.isArray(draft) || !("source" in draft) || draft.source == null) return draft;
+        if (!draft || typeof draft !== "object" || Array.isArray(draft)) return draft;
+        const row = { ...draft, note: "note" in draft ? draft.note ?? "" : "" };
+        if (!("source" in draft) || draft.source == null) return row;
         const source = imageSource.safeParse(draft.source);
-        return { ...draft, source: source.success ? source.data : null };
+        return { ...row, source: source.success ? source.data : null };
       }) };
     }
     const result = assistantOutput.safeParse(normalized);
