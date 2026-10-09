@@ -125,8 +125,9 @@ export async function prepareAssistantGeneration(userId: string, raw: unknown, o
         outcome = "succeeded";
         return plan;
       }
+      const model = process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL;
       const settings = {
-        model: process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL,
+        model,
         thinking: options.thinking ?? process.env.BAILIAN_ASSISTANT_THINKING === "true", temperature: 0.2, maxOutputTokens: images.length > 1 ? 16000 : 5000,
         schema: imageRecognition?.schema ?? ASSISTANT_OUTPUT_SCHEMA,
         schemaName: imageRecognition?.schemaName ?? "ledger_plan", messages, telemetryId,

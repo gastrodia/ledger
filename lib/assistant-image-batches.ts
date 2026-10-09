@@ -10,7 +10,7 @@ import { BAILIAN_ASSISTANT_MODEL, bailianObjectStream } from "@/lib/bailian";
 
 // Changes to the prompt, schema, provenance mapping or merge contract require a
 // new version so a resumed task cannot mix incompatible recognition results.
-export const ASSISTANT_IMAGE_BATCH_VERSION = "target-image-v3";
+export const ASSISTANT_IMAGE_BATCH_VERSION = "target-image-v4";
 export const ASSISTANT_IMAGE_BATCH_TIMEOUT_MS = 90_000;
 export class AssistantImageBatchError extends Error {}
 export type AssistantImageBatchOutcome = "complete" | "empty" | "needs_clarification";
@@ -55,7 +55,11 @@ function parseDateContext(raw: unknown, imageCount: number): AssistantImageDateC
     || !Number.isInteger(raw.month) || Number(raw.month) < 1 || Number(raw.month) > 12
     || !Number.isInteger(raw.source_image_index) || Number(raw.source_image_index) < 1 || Number(raw.source_image_index) > imageCount
     || typeof raw.evidence !== "string" || !raw.evidence.trim() || raw.evidence.length > 120) throw new Error(INVALID_BATCH);
-  const { year, month, source_image_index, evidence } = raw as AssistantImageDateContext;
+  const { month, source_image_index, evidence } = raw as AssistantImageDateContext;
+  // A bare month header cannot attest to a year. Drop only the inferred year
+  // from this auxiliary context; transaction dates and month evidence remain
+  // subject to their original validation.
+  const year = /^\s*(?:0?[1-9]|1[0-2])\s*月\s*$/.test(evidence) ? null : raw.year as number | null;
   // Context is an explicit quotation of a header, never a model's prose guess
   // or a month inferred only from transaction dates. Images still determine
   // whether this header actually continues onto the current target.
@@ -99,7 +103,7 @@ date_context必须为null或{year,month,source_image_index,evidence}，供后续
     content.push({ type: "file", mediaType: image.slice(5, image.indexOf(";")), data: image });
   });
   const messages: ModelMessage[] = [
-    { role: "system", content: `${recognition.messages[0].content}\n${rules}` },
+    { role: "system", content: `${recognition.messages[0].content}\n${rules}\n字段示例：交易收支类型只能用type字段（\"type\":\"expense\"），不能使用direction。当前目标图标题只有“10月”时，date_context必须为{\"year\":null,\"month\":10,\"source_image_index\":${imageIndex + 1},\"evidence\":\"10月\"}；即使交易date根据today使用当前年份，标题year仍是null，并在相关交易note提示核对年份。` },
     { role: "user", content },
   ];
   const expandOutput = (raw: unknown): AssistantImageBatchResult => {
@@ -116,6 +120,9 @@ date_context必须为null或{year,month,source_image_index,evidence}，供后续
       // Unlike an all-images call, missing provenance here could mean a context
       // row. Reject the entire target result; never filter or silently relabel it.
       checkSource(draft.source, targetLocalIndex, index + 1);
+      if (context?.year === null && !draft.note.includes("年份")) {
+        draft.note = ["截图标题未显示年份，请核对交易年份。", draft.note].filter(Boolean).join("；");
+      }
     });
     return {
       image_index: imageIndex + 1,
@@ -170,8 +177,9 @@ export async function generateAssistantImageBatch(args: AssistantImageBatchInput
     preparationMs: Date.now() - startedAt });
   let outcome = "failed";
   try {
+    const model = process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL;
     const raw = await bailianObjectStream<unknown>({
-      model: process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL,
+      model,
       thinking: false, temperature: 0.2, maxOutputTokens: 5000,
       timeoutMs: ASSISTANT_IMAGE_BATCH_TIMEOUT_MS, telemetryId,
       messages: request.messages, schema: request.schema, schemaName: request.schemaName,

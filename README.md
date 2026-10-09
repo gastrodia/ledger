@@ -305,6 +305,7 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 - `POST /api/assistant/transcribe/session` 签发60秒有效、仅用于语音网关的一次性授权票据；`WS /api/assistant/transcribe/realtime` 双向传输音频块与识别文字。`POST /api/assistant/transcribe` 保留音频文件转文字；`POST /api/assistant/confirm` 原子批量确认，按用户和批次ID幂等，拒绝不同内容复用批次。
 - `POST /api/assistant/undo` 按用户、确认批次及撤销请求ID执行原子撤销，校验原始入账快照与当前记录；重复核对返回相同的恢复草稿，撤销后的原批次不能再次确认。`assistant_batches` 与 `assistant_undos` 在首次确认或撤销时按需创建和补齐字段；无DDL权限的部署请先执行 `scripts/init-db.sql` 中相关建表及迁移语句。
 - 使用普通百炼 API Key。Coding Plan 等有专门用途的订阅不能直接当作本产品的通用 API 配额。
+- 普通记账、截图和 Agent 的结构化请求使用统一的输出契约：模型通过 JSON Object 模式生成，完整 Schema 由共享中间件加入提示词，SDK 和服务端校验最终结果，不依赖具体模型名或供应商的 JSON Schema 方言。金额、日期、账户引用与图片来源等校验通过后才生成待确认结果；普通文本流不受影响。标题只有月份时，日期上下文不会继承模型推测的年份，相关草稿提示核对交易年份。切换模型仍需具备请求所需的文本/图片输入和 JSON Object 能力。
 - 服务器接续地址优先使用显式配置的 `ASSISTANT_TASK_ORIGIN`，Vercel 生产环境没有自动化访问密钥时使用 `VERCEL_PROJECT_PRODUCTION_URL` 的公开生产域名，其他情况使用 `VERCEL_URL`；预览环境不会向生产域名接续任务。自建生产部署需要配置本应用的 HTTPS 根地址，本地开发默认 `http://localhost:3000`（可用 `PORT` 修改）。接续签名复用 `JWT_SECRET` 派生独立用途密钥，不向浏览器暴露，不能作为登录凭证。部署保护启用时需提供平台的 `VERCEL_AUTOMATION_BYPASS_SECRET`；接续错误会保留任务供页面恢复，不反复调用模型。已有数据库通过 `scripts/assistant-tasks.sql` 增加 `run_token`、`image_progress`、`image_checkpoint`、`execution_steps` 字段；应用有 DDL 权限时首次访问自动迁移。
 
 ### 实时语音运行与部署

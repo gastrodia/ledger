@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const crypto = require('node:crypto');
 
-function fixture(provider = async () => { throw new Error('Unexpected provider request'); }, { realSdk = false } = {}) {
+function fixture(provider = async () => { throw new Error('Unexpected provider request'); }, { realSdk = false, env = {} } = {}) {
   const cache = new Map();
   const calls = [];
   const bailian = {
@@ -29,7 +29,7 @@ function fixture(provider = async () => { throw new Error('Unexpected provider r
         calls.push(call);
         return provider(call);
       },
-      process: { env: { DASHSCOPE_API_KEY: 'batch-sdk-fixture-secret' } }, console: { info() {}, error() {}, warn() {} },
+      process: { env: { DASHSCOPE_API_KEY: 'batch-sdk-fixture-secret', ...env } }, console: { info() {}, error() {}, warn() {} },
       require: id => {
         if (id === '@/lib/bailian' && !realSdk) return bailian;
         if (id.startsWith('@/')) return load(path.join(process.cwd(), `${id.slice(2)}.ts`));
@@ -190,6 +190,24 @@ test('date context cannot invent unseen headers, alter earlier quotations, or su
   assert.throws(() => request.expandOutput(wire([], {
     action: 'chat', outcome: 'needs_clarification', date_context: dateContext,
   })));
+});
+
+test('a bare month quotation drops only an inferred context year and preserves reviewed transaction dates', async () => {
+  const request = fixture().buildAssistantImageBatch(args(0));
+  const raw = wire([row], { date_context: { year: 2026, month: 10, source_image_index: 1, evidence: '10月' } });
+  assert.equal((await request.schema.validate(raw)).success, true);
+  const result = request.expandOutput(raw);
+  assert.equal(result.date_context.year, null);
+  assert.equal(result.date_context.month, 10);
+  assert.equal(result.output.drafts[0].transaction_date, '2026-10-03');
+  assert.equal(result.output.drafts[0].amount_cents, 1200);
+  assert.match(result.output.drafts[0].note, /核对交易年份/);
+  assert.equal(raw.date_context.year, 2026, 'do not mutate provider data');
+  assert.equal(raw.drafts[0].note, '');
+  for (const patch of [{ year: '2026' }, { year: 999 }, { month: 9 },
+    { year: 2025, evidence: '2026年10月' }, { evidence: '10月（推测）' }, { evidence: '昨天' }]) {
+    assert.equal((await request.schema.validate({ ...raw, date_context: { ...raw.date_context, ...patch } })).success, false);
+  }
 });
 
 test('unordered completed batches merge in original screenshot order and deduplicate only an evidenced boundary', () => {
@@ -431,10 +449,9 @@ test('real Bailian SDK streams the batch schema and expands verified target rows
   assert.equal(body.stream, true);
   assert.equal(body.enable_thinking, false);
   assert.equal(body.max_completion_tokens, 5000);
-  assert.equal(body.response_format.type, 'json_schema');
-  const format = body.response_format.json_schema;
-  assert.equal(format.name, 'ledger_image_batch');
-  assert.equal(format.strict, true);
+  assert.deepEqual(body.response_format, { type: 'json_object' });
+  assert.match(body.messages[0].content, /ledger_image_batch/);
+  const format = { schema: JSON.parse(body.messages[0].content.split('\nJSON Schema:\n')[1]) };
   assert.ok(format.schema.required.includes('outcome'));
   assert.ok(format.schema.required.includes('date_context'));
   assert.deepEqual(format.schema.properties.outcome.enum, ['complete', 'empty', 'needs_clarification']);
@@ -468,5 +485,30 @@ test('real Bailian SDK rejects wrong-image or missing-date-context batch output 
     });
     assert.equal(checkpointAccepted, false);
     assert.equal(api.calls.length, 1);
+  }
+});
+
+test('image batches on an arbitrary model retain strict financial and source checks without native Schema support', async () => {
+  const env = { BAILIAN_ASSISTANT_MODEL: 'future-vision-model' };
+  const raw = wire([{ ...row, source: source(2, 1) }]);
+  const api = fixture(async () => streamedObject(raw), { realSdk: true, env });
+  const result = await api.generateAssistantImageBatch(args(2), new AbortController().signal);
+  assert.equal(result.output.drafts[0].amount_cents, 1200);
+  assert.deepEqual(api.calls[0].body.response_format, { type: 'json_object' });
+  const instructions = api.calls[0].body.messages[0].content;
+  for (const field of ['type', 'amount_cents', 'category', 'member', 'date_context', 'outcome', 'source']) {
+    assert.ok(instructions.includes(`"${field}"`));
+  }
+  assert.equal(api.calls[0].body.enable_thinking, false);
+  assert.equal(api.calls.length, 1);
+  for (const invalid of [[], wire([{ ...row, source: source(1, 1) }]),
+    wire([{ ...row, source: source(2, 1), category: 3 }]),
+    wire([{ ...row, source: source(2, 1), amount_cents: -980 }]),
+    wire([{ ...row, source: source(2, 1), date: '2026-02-30' }]),
+    wire([{ ...row, source: source(2, 1), type: undefined, direction: 'expense' }]),
+    wire([{ ...row, source: source(2, 1) }], { command: {} })]) {
+    const rejected = fixture(async () => streamedObject(invalid), { realSdk: true, env });
+    await assert.rejects(rejected.generateAssistantImageBatch(args(2), new AbortController().signal));
+    assert.equal(rejected.calls.length, 1);
   }
 });

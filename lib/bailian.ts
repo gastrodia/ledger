@@ -1,5 +1,6 @@
-import { generateText, Output, streamText, type FlexibleSchema, type LanguageModelUsage, type ModelMessage } from "ai";
+import { generateText, Output, streamText, wrapLanguageModel, type FlexibleSchema, type LanguageModelUsage, type ModelMessage } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { structuredOutputMiddleware } from "@/lib/structured-output";
 
 // Server-side only. Never return this configuration or provider payloads to the client.
 export const BAILIAN_SUMMARY_MODEL = "qwen3.8-max";
@@ -162,7 +163,7 @@ function requestSettings(request: BailianRequest, operation: BailianOperation, e
   const controller = new AbortController();
   const signal = AbortSignal.any([...(externalSignal ? [externalSignal] : []), AbortSignal.timeout(timeoutMs), controller.signal]);
   const provider = createOpenAICompatible({
-    name: "bailian", ...config, supportsStructuredOutputs: true, includeUsage: true,
+    name: "bailian", ...config, supportsStructuredOutputs: false, includeUsage: true,
     transformRequestBody: transformBailianBody,
     fetch: async (input, init) => {
       const response = await fetch(input, { ...init, cache: "no-store" });
@@ -204,12 +205,11 @@ function requestSettings(request: BailianRequest, operation: BailianOperation, e
   return {
     controller, signal, recordUsage, recordFirstOutput, recordFailure,
     settings: {
-      model: provider(request.model),
+      model: wrapLanguageModel({ model: provider(request.model), middleware: structuredOutputMiddleware }),
       instructions: request.messages.filter(message => message.role === "system"),
       messages: request.messages.filter(message => message.role !== "system"), temperature: request.temperature,
       maxOutputTokens: request.maxOutputTokens, maxRetries: 0, abortSignal: signal,
       providerOptions: { bailian: {
-        strictJsonSchema: true,
         ...(request.thinking !== undefined ? { enable_thinking: request.thinking } : {}),
         ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
         ...(request.asrOptions !== undefined ? { asr_options: request.asrOptions } : {}),

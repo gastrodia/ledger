@@ -36,6 +36,7 @@ function loadAdapter(fetchImpl, env = {}, logs = [], globals = {}) {
     require: id => {
       if (id === 'ai') return ai;
       if (id === '@ai-sdk/openai-compatible') return compatible;
+      if (id === '@/lib/structured-output') return loadModule('lib/structured-output.ts');
       assert.fail(`Unexpected adapter dependency ${id}`);
     },
   });
@@ -56,6 +57,12 @@ function fixture(reply, env, globals) {
   }, env, logs, globals);
   return { adapter, calls, logs };
 }
+function schemaFromRequest(body) {
+  const instruction = body.messages.find(message => message.role === 'system'
+    && typeof message.content === 'string' && message.content.includes('\nJSON Schema:\n'));
+  assert.ok(instruction, 'the model must receive the exact output contract');
+  return JSON.parse(instruction.content.split('\nJSON Schema:\n')[1]);
+}
 function sse(events, { done = true, bytewise = false } = {}) {
   const payload = events.map(event => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\r\n\r\n`).join('')
     + (done ? 'data: [DONE]\r\n\r\n' : '');
@@ -66,6 +73,38 @@ function sse(events, { done = true, bytewise = false } = {}) {
     controller.close();
   } }), { headers: { 'Content-Type': 'text/event-stream' } });
 }
+
+test('one model-independent output contract validates ordinary and streaming JSON without native schema support', async () => {
+  const { z } = require('zod');
+  const schema = z.object({ type: z.enum(['income', 'expense']), amount_cents: z.number().int().positive() }).strict();
+  const valid = { type: 'expense', amount_cents: 980 };
+  for (const [model, streaming] of [['arbitrary-future-model', false], ['another-vendor-model', true]]) {
+    const response = value => streaming
+      ? sse([textChunk(JSON.stringify(value)), finishChunk('stop')])
+      : completion(JSON.stringify(value));
+    const f = fixture(response(valid));
+    const request = { model, messages: prompt, schema,
+      schemaName: 'image_test', thinking: false };
+    const invoke = instance => streaming
+      ? instance.adapter.bailianObjectStream(request, () => {}) : instance.adapter.bailianObject(request);
+    assert.deepEqual(await invoke(f), valid);
+    assert.deepEqual(f.calls[0].body.response_format, { type: 'json_object' });
+    assert.ok(f.calls[0].body.messages[0].content.includes('amount_cents'));
+    assert.ok(f.calls[0].body.messages[0].content.includes('additionalProperties'));
+    assert.equal(f.calls[0].body.enable_thinking, false);
+    assert.equal(f.calls.length, 1);
+    for (const invalid of [[], { direction: 'expense', amount_cents: 980 },
+      { ...valid, amount_cents: '980' }, { ...valid, amount_cents: -1 }, { ...valid, extra: true }]) {
+      const rejected = fixture(response(invalid));
+      await assert.rejects(invoke(rejected), error => {
+        assert.equal(error.code, 'invalid_output');
+        assert.equal(rejected.adapter.bailianFailure(error).status, 422);
+        return true;
+      });
+      assert.equal(rejected.calls.length, 1);
+    }
+  }
+});
 const textChunk = text => ({ choices: [{ delta: { content: text } }] });
 const finishChunk = finish_reason => ({ choices: [{ delta: {}, finish_reason }] });
 async function collect(result) {
@@ -186,13 +225,13 @@ test('real SDK sends structured schema and image content while preserving Bailia
   assert.equal(body.temperature, 0.2);
   assert.equal(body.max_completion_tokens, 5000);
   assert.equal(body.max_tokens, undefined);
-  assert.equal(body.response_format.type, 'json_schema');
-  assert.equal(body.response_format.json_schema.name, 'ledger_plan');
-  assert.equal(body.response_format.json_schema.schema.type, 'object');
-  assert.equal(body.response_format.json_schema.strict, true);
-  assert.equal(body.messages[1].content[1].type, 'image_url');
-  assert.equal(body.messages[1].content[1].image_url.url, image);
-  assert.equal(body.messages[1].content[3].image_url.url, secondImage);
+  assert.deepEqual(body.response_format, { type: 'json_object' });
+  assert.match(body.messages[0].content, /ledger_plan/);
+  assert.equal(schemaFromRequest(body).type, 'object');
+  assert.equal(schemaFromRequest(body).additionalProperties, false);
+  assert.equal(body.messages[2].content[1].type, 'image_url');
+  assert.equal(body.messages[2].content[1].image_url.url, image);
+  assert.equal(body.messages[2].content[3].image_url.url, secondImage);
   assert.equal(f.calls.length, 1);
 });
 
@@ -307,7 +346,7 @@ test('real SDK object and stream results preserve statement amounts when empty n
     assert.equal(imported.summary.retained_count, 5);
     assert.equal(refund.note, '有退款');
     assert.equal(f.calls.length, 1, 'empty notes must not trigger another paid recognition');
-    const draftSchema = f.calls[0].body.response_format.json_schema.schema.properties.drafts.items;
+    const draftSchema = schemaFromRequest(f.calls[0].body).properties.drafts.items;
     assert.deepEqual(draftSchema.properties.note, { type: 'string' });
     assert.ok(draftSchema.required.includes('note'), 'the provider must still be asked for a string note');
   }
@@ -365,7 +404,7 @@ test('real SDK transports structured undo targets without asserting a successful
   assert.equal(value.update, null);
   assert.equal(value.query, null);
   assert.equal(value.drafts.length, 0);
-  const schema = f.calls[0].body.response_format.json_schema.schema;
+  const schema = schemaFromRequest(f.calls[0].body);
   assert.ok(schema.properties.action.enum.includes('undo'));
   assert.ok('undo' in schema.properties);
   assert.equal(schema.additionalProperties, false);
@@ -620,7 +659,7 @@ test('structured SDK streaming delivers reply snapshots before completion, then 
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].body.stream, true);
   assert.equal(f.calls[0].body.enable_thinking, false);
-  assert.equal(f.calls[0].body.response_format.json_schema.name, 'ledger_plan');
+  assert.match(f.calls[0].body.messages[0].content, /ledger_plan/);
   assert.equal(f.logs.length, 2);
   assert.equal(f.logs[1][0], 'AI request completed');
   assert.equal(f.logs[1][1].operation, 'object-stream');
@@ -781,7 +820,7 @@ test('real SDK carries draft removal targets separately from saved-transaction u
   assert.deepEqual(value.remove, valid.remove);
   assert.equal(value.undo, null);
   assert.equal(value.update, null);
-  const schema = f.calls[0].body.response_format.json_schema.schema;
+  const schema = schemaFromRequest(f.calls[0].body);
   assert.ok(schema.properties.action.enum.includes('remove'));
   assert.ok('remove' in schema.properties);
   assert.equal(f.calls.length, 1);
