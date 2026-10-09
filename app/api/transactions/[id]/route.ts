@@ -127,7 +127,7 @@ export async function PATCH(
         category_id = ${newCategoryId},
         member_id = ${newMemberId || null},
         amount = ${newAmount},
-        transaction_date = ${transaction_date !== undefined ? transaction_date : existingTransaction.transaction_date},
+        transaction_date = COALESCE(${transaction_date === undefined ? null : transaction_date}::timestamp, transaction_date),
         description = ${description !== undefined ? description : existingTransaction.description},
         attachment_key = ${attachment_key !== undefined ? attachment_key : existingTransaction.attachment_key},
         attachment_name = ${attachment_name !== undefined ? attachment_name : existingTransaction.attachment_name},

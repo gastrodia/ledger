@@ -25,7 +25,7 @@ export async function PATCH(request: NextRequest, context: Context) {
     const session = await getSession();
     if (!session) return NextResponse.json({ error: "未登录" }, { status: 401, headers });
     const body = await request.json();
-    if (!body || !["cancel", "retry"].includes(body.action)) throw new AssistantTaskError(400, "任务操作无效。");
+    if (!body || !["cancel", "retry", "resume"].includes(body.action)) throw new AssistantTaskError(400, "任务操作无效。");
     const task = await changeAssistantTask(session.userId, (await context.params).id, body.action, body.attempt);
     if (task.status === "queued") after(() => runAndContinueAssistantTask(session.userId, task.id));
     return NextResponse.json({ task }, { headers });

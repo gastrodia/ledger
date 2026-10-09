@@ -28,7 +28,8 @@ function loadClient(globals = {}) {
       fetch() { throw new Error('Recovery must not make financial requests'); },
       ...globals,
       require(name) {
-        assert.ok(name.startsWith('@/lib/'), `Unexpected dependency ${name}`);
+        if (name === 'zod') return require('zod');
+    assert.ok(name.startsWith('@/lib/'), `Unexpected dependency ${name}`);
         return load(`${name.slice(2)}.ts`);
       },
     });
@@ -364,7 +365,7 @@ test('image progress advances without publishing drafts and survives failed-task
   assert.equal(recovered[1].taskApplied, undefined);
   assert.equal(client.mergeAssistantTasks(recovered, [plain(failed)], conversationId, members), recovered);
   assert.equal(client.assistantTaskRetryLabel(recovered[1]), '继续识别');
-  assert.match(client.assistantImageProgressText(recovered[1].image_progress, 'failed'), /第 5 张识别失败；已完成 4\/5 张，结果已保留/);
+  assert.match(client.assistantImageProgressText(recovered[1].image_progress, 'failed'), /第 5 张识别失败；已完成 4\/5 张，识别进度已保存，尚未生成可确认的账单/);
 });
 
 test('invalid image progress is dropped without losing the task or producing misleading completion', () => {
@@ -406,6 +407,8 @@ test('queued, active, merging and recovered image labels describe observed progr
   assert.equal(client.assistantImageProgressText(imageProgress(), 'recovering'), '上次进度：已完成 2/5 张，正在恢复处理进度…');
   const merged = imageProgress({ completed: 5, active: [], stage: 'merging' });
   assert.equal(client.assistantImageProgressText(merged, 'running'), '已完成 5/5 张，正在整理账目…');
+  assert.equal(client.assistantImageProgressText(merged, 'failed'), '已识别 5/5 张，但账目整理失败，尚未生成可确认的账单。');
+  assert.equal(client.assistantImageProgressText(merged, 'cancelled'), '已识别 5/5 张，但账目整理已停止，尚未生成可确认的账单。');
   assert.equal(client.assistantTaskRetryLabel({ taskId: uuid(30), taskStatus: 'failed', image_progress: merged }), '重新整理结果');
   assert.equal(client.assistantTaskRetryLabel({ taskId: uuid(30), taskStatus: 'failed' }), '重新处理');
   assert.equal(client.assistantTaskRetryLabel({ taskId: uuid(30), taskStatus: 'missing', image_progress: merged }), '重试发送');
@@ -511,4 +514,103 @@ test('refreshes coalesce while polling and terminal results use the idle interva
     assert.equal(polling.received.length, 2);
     assert.equal([...polling.timers.values()][0].ms, 15000);
   } finally { polling.subscription.stop(); }
+});
+
+test('process history survives reload and later draft edits without replaying financial actions', () => {
+  const completed = task({ image_progress: imageProgress({ completed: 5, active: [], stage: 'merging' }) });
+  const recovered = client.mergeAssistantTasks([user()], [completed], conversationId, members);
+  const reply = recovered.find(message => message.id === completed.id);
+  assert.equal(reply.process.status, 'succeeded');
+  assert.equal(reply.process.action, 'record');
+  assert.equal(reply.process.draftCount, 1);
+  const edited = plain(recovered).map(message => message.id === completed.id ? { ...message, status: 'deleted', drafts: [] } : message);
+  const restored = client.mergeAssistantTasks(edited, [completed], conversationId, members);
+  assert.equal(restored, edited);
+  assert.equal(restored[1].process.draftCount, 1);
+  assert.equal(restored[1].drafts.length, 0);
+});
+
+test('historical applied replies gain process details without restoring deleted drafts', () => {
+  const completed = task();
+  const messages = client.mergeAssistantTasks([user()], [completed], conversationId, members);
+  delete messages[1].process;
+  messages[1].status = 'deleted';
+  messages[1].drafts = [];
+  const recovered = client.mergeAssistantTasks(messages, [completed], conversationId, members);
+  assert.equal(recovered[1].process.status, 'succeeded');
+  assert.equal(recovered[1].status, 'deleted');
+  assert.equal(recovered[1].drafts.length, 0);
+  assert.equal(client.mergeAssistantTasks(recovered, [completed], conversationId, members), recovered);
+});
+
+test('removing transfers leaves five original drafts and survives reload and task replay without any financial write', () => {
+  const descriptions = ['易加油', '坂田六、七区停车场', '转账-转给好知己', '微信红包-来自晶晶', '转账-转给弟', '转账-转给小贾妈', '天虹数科商业股份有限公司', '转账-来自妈', '长沙市拿云餐饮管理有限公司'];
+  const amounts = [9896, 800, 278500, 5, 30000, 60000, 15527, 10000, 300];
+  const drafts = descriptions.map((description, i) => row(100 + i, { description, amount_cents: amounts[i], amount: (amounts[i] / 100).toFixed(2), member_id: null }));
+  const original = { id: uuid(40), role: 'assistant', text: '这 9 笔账目属于谁？', status: 'pending', memberFlow: true, drafts };
+  const older = { ...original, id: uuid(41), drafts: [row(200)] };
+  const ids = [2, 4, 5, 7].map(i => drafts[i].id);
+  const choice = { id: uuid(42), role: 'assistant', text: '请选择成员', memberChoice: { batch_id: original.id, draft_ids: ids, member_id: null } };
+  const completed = task({ result: plan({ action: 'remove', drafts: [], remove: { batch_id: original.id, draft_ids: ids } }) });
+  const isolated = loadClient({ fetch() { assert.fail('removing drafts must never write transactions'); } });
+  const preview = isolated.mergeAssistantTasks([older, original, choice, user()], [completed], conversationId, members);
+  assert.equal(preview.find(m => m.id === original.id), original, 'preview must not mutate drafts');
+  assert.equal(preview.find(m => m.id === choice.id), choice, 'preview must not clear existing choices');
+  assert.match(preview.at(-1).text, /准备删除以下 4 笔/);
+  assert.match(preview.at(-1).text, /尚未删除/);
+  assert.match(preview.at(-1).text, /支出 ¥3785.00/);
+  const recoveredPreview = plain(preview);
+  assert.deepEqual(plain(isolated.mergeAssistantTasks(recoveredPreview, [completed], conversationId, members)), recoveredPreview);
+  const merged = isolated.approveAssistantDraftRemoval(preview, completed.id, members);
+  assert.equal(isolated.approveAssistantDraftRemoval(merged, completed.id, members), merged, 'approval is consumed once');
+  const remaining = drafts.filter(d => !ids.includes(d.id));
+  assert.deepEqual(plain(merged.find(m => m.id === original.id).drafts), remaining);
+  assert.equal(merged.find(m => m.id === original.id).status, 'pending');
+  assert.match(merged.find(m => m.id === original.id).text, /5 笔/);
+  assert.equal(merged.find(m => m.id === choice.id).memberChoice, undefined);
+  assert.equal(merged[0], older);
+  assert.equal(original.drafts.length, 9);
+  assert.match(merged.at(-1).text, /已删除 4 笔待确认草稿/);
+  assert.match(merged.at(-1).text, /本组剩余 5 笔，尚未入账/);
+  for (const id of ids) assert.ok(merged.at(-1).text.includes(drafts.find(d => d.id === id).description));
+  const persisted = plain(merged);
+  assert.deepEqual(plain(isolated.mergeAssistantTasks(persisted, [completed, completed], conversationId, members)), persisted);
+});
+
+test('removing all drafts clears the batch; stale, saved and unresolved targets remain untouched', () => {
+  const original = { id: uuid(40), role: 'assistant', text: '待确认', status: 'pending', drafts: [row(10)] };
+  const remove = { batch_id: original.id, draft_ids: [uuid(10)] };
+  const completed = task({ result: plan({ action: 'remove', drafts: [], remove }) });
+  const preview = client.mergeAssistantTasks([original, user()], [completed], conversationId, members);
+  assert.equal(preview[0], original);
+  const merged = client.approveAssistantDraftRemoval(preview, completed.id, members);
+  assert.equal(merged[0].status, 'deleted');
+  assert.equal(merged[0].drafts.length, 0);
+  assert.match(merged.at(-1).text, /本组已清空，未入账/);
+  for (const target of [{ ...original, status: 'saved' }, { ...original, commit: original.drafts }, { ...original, status: 'conflict' },
+    { ...original, drafts: [] }, { ...original, drafts: [row(10, { ignored: true })] }, { ...original, id: uuid(41) },
+    { ...original, role: 'user' }]) {
+    const rejected = client.mergeAssistantTasks([target, user()], [completed], conversationId, members);
+    assert.equal(rejected[0], target);
+    assert.match(rejected.at(-1).text, /本次未删除/);
+  }
+});
+
+
+test('draft removal approval fails closed when reviewed rows change, disappear, become ignored or are saved', () => {
+  const original = { id: uuid(40), role: 'assistant', text: '待确认', status: 'pending', drafts: [row(10), row(11)] };
+  const completed = task({ result: plan({ action: 'remove', drafts: [], remove: { batch_id: original.id, draft_ids: [uuid(10), uuid(11)] } }) });
+  const preview = client.mergeAssistantTasks([original, user()], [completed], conversationId, members);
+  for (const target of [{ ...original, status: 'saved' }, { ...original, commit: original.drafts },
+    { ...original, drafts: [row(10)] }, { ...original, drafts: [row(10, { amount: '99.00' }), row(11)] },
+    { ...original, drafts: [row(10, { ignored: true }), row(11)] },
+    { ...original, drafts: [row(10, { transaction_date: '2026-10-01' }), row(11)] }]) {
+    const changed = preview.map(message => message.id === target.id ? target : message);
+    const approved = client.approveAssistantDraftRemoval(changed, completed.id, members);
+    assert.equal(approved[0], target, 'never partially remove a stale selection');
+    assert.equal(approved.at(-1).removeChoice, undefined);
+    assert.match(approved.at(-1).text, /本次未删除/);
+  }
+  const cancelled = preview.map(message => message.id === completed.id ? { ...message, removeChoice: undefined } : message);
+  assert.equal(client.approveAssistantDraftRemoval(cancelled, completed.id, members), cancelled);
 });

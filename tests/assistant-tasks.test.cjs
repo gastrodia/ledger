@@ -51,7 +51,7 @@ function loader(dependencies, globals = {}) {
       if (name.startsWith('.')) return load(path.join(path.dirname(file), `${name}.ts`));
       assert.fail(`Unexpected dependency ${name}`);
     }, Error, SyntaxError, Date, JSON, Number, URL, Response, TextEncoder, TextDecoder,
-    ReadableStream, AbortController, AbortSignal, Buffer, setTimeout, clearTimeout, setInterval, clearInterval,
+    ReadableStream, AbortController, AbortSignal, Buffer, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval,
     process: { env: {} }, ...globals }, { filename: file });
     return exports;
   };
@@ -70,12 +70,29 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {} } = {}) {
     '@/lib/assistant-task-dispatch': { runAndContinueAssistantTask: async (...args) => { await load('lib/assistant-tasks.ts').runAssistantTask(...args); } },
     'next/server': { NextResponse, after: callback => background.push(callback) },
     ai: require('ai'), zod: require('zod'),
-    'node:crypto': crypto, '@/lib/db': { sql: database }, '@/lib/auth': { getSession: async () => session },
+    'node:crypto': crypto, 'node:async_hooks': require('node:async_hooks'), '@/lib/db': { sql: database }, '@/lib/auth': { getSession: async () => session },
     '@/lib/assistant-output': { ASSISTANT_OUTPUT_SCHEMA: {} },
     '@/lib/bailian': {
       BAILIAN_ASSISTANT_MODEL: 'fixture-object', BAILIAN_SUMMARY_MODEL: 'fixture-summary', BailianError,
       bailianConfig: () => ({}), bailianFailure: error => ({ status: error.status || 502, message: 'AI 服务暂时无法连接，请稍后重试。' }),
-      bailianObject: invoke(provider.bailianObject || (async settings => settings.schemaName === 'ledger_image_batch' ? imageBatch(settings) : settings.schemaName === 'ledger_image_import' ? imageRecord : record)),
+      bailianObject: invoke(async (settings, signal) => {
+        if (settings.schemaName !== 'ledger_agent_step') return provider.bailianObject ? provider.bailianObject(settings, signal)
+          : settings.schemaName === 'ledger_image_batch' ? imageBatch(settings) : settings.schemaName === 'ledger_image_import' ? imageRecord : record;
+        // Preserve the provider promises used by worker concurrency/cancellation
+        // tests while exercising the actual portable agent schema and SQL loop.
+        let output;
+        if (provider.bailianStream && settings.messages.some(message => typeof message.content === 'string' && message.content.startsWith('账本工具 query 的结果'))) {
+          let reply = '';
+          for await (const chunk of await provider.bailianStream(settings, signal)) {
+            signal.throwIfAborted(); if (chunk.type === 'text-delta') reply += chunk.text;
+          }
+          output = { action: 'chat', reply, drafts: [], query: null };
+        } else output = provider.bailianObject ? await provider.bailianObject(settings, signal)
+          : provider.bailianObjectStream ? await provider.bailianObjectStream(settings, () => {}, signal) : record;
+        if (output.kind) return output;
+        return output.action === 'query' ? { kind: 'read', tool: 'query', arguments_json: JSON.stringify(output.query), plan_json: null, needs_input: false }
+          : { kind: 'respond', tool: null, arguments_json: '{}', plan_json: JSON.stringify(output), needs_input: false };
+      }),
       bailianObjectStream: invoke(provider.bailianObjectStream || (async (settings, partial) => {
         const output = settings.schemaName === 'ledger_image_batch' ? imageBatch(settings) : settings.schemaName === 'ledger_image_import' ? imageRecord : record;
         partial(output); return output;
@@ -207,7 +224,8 @@ if (PGlite) {
     await started.promise;
     await f.tasks.runAssistantTask('owner', taskId);
     assert.equal(f.paidCalls.length, 1);
-    assert.equal(f.paidCalls[0][0].timeoutMs, undefined, 'ordinary background conversation keeps the default provider timeout');
+    assert.equal(f.paidCalls[0][0].schemaName, 'ledger_agent_step');
+    assert.equal(f.paidCalls[0][0].timeoutMs, 60000, 'each agent model call is bounded within the 75-second runtime budget');
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'running');
     finish.resolve(); await running;
     const saved = await f.tasks.getAssistantTask('owner', taskId);
@@ -218,7 +236,11 @@ if (PGlite) {
     await f.tasks.runAssistantTask('owner', taskId);
     assert.equal(f.paidCalls.length, 1);
     assert.deepEqual(plain((await f.tasks.listAssistantTasks('owner', conversationId))[0].result), plain(saved.result));
-    assert.equal((await f.db.query('SELECT payload FROM assistant_tasks')).rows[0].payload, null, 'successful recognition releases original image payloads');
+    const privateState = (await f.db.query('SELECT payload,agent_checkpoint FROM assistant_tasks')).rows[0];
+    assert.equal(privateState.payload.message, body().message, 'record goal input is retained until actual batch confirmation');
+    assert.equal(privateState.agent_checkpoint.status, 'waiting_approval');
+    assert.equal(privateState.agent_checkpoint.pending_batch.batch_id, taskId);
+    assert.equal(privateState.agent_checkpoint.pending_plan.drafts[0].id, saved.result.drafts[0].id);
     assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
     assert.equal(f.statements.some(statement => /(?:INSERT INTO|UPDATE|DELETE FROM) transactions/i.test(statement.text)), false);
   });
@@ -534,6 +556,38 @@ if (PGlite) {
     assert.ok(rows.every(row => row.payload === null && row.image_checkpoint === null && row.image_progress === null && row.run_token === null));
   });
 
+  test('real PostgreSQL: reverse-overlap merge failure retries saved 24-row checkpoints without another model request', async t => {
+    const starts = [9, 3, 0];
+    const entries = Array.from({ length: 17 }, (_, index) => ({ ...draft, description: `交易${index}`, amount_cents: 1000 + index,
+      source: { image_index: 1, row_index: 1, time: `12:${String(index).padStart(2, '0')}`, transaction_id: null, kind: 'statement' } }));
+    const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
+      const output = imageBatch(settings);
+      const target = Number(output.drafts[0].description.split(' ')[1]) - 1;
+      return { ...output, drafts: entries.slice(starts[target], starts[target] + 8).map((entry, index) => ({ ...output.drafts[0],
+        description: entry.description, amount_cents: entry.amount_cents,
+        source: { ...entry.source, image_index: output.drafts[0].source.image_index, row_index: index + 1 } })) };
+    } } });
+    await f.tasks.createAssistantTask('owner', body({ images: Array(3).fill('data:image/png;base64,YWJj') }));
+    await f.tasks.runAssistantTask('owner', taskId);
+    const checkpoint = (await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint;
+    // Reproduce a pre-fix terminal task: all three targets are valid and saved,
+    // but finalization rejected the unmerged 24 visible rows.
+    checkpoint.results[2] = { ...checkpoint.results[1], image_index: 3, output: { ...checkpoint.results[1].output,
+      drafts: entries.slice(0, 8).map((entry, index) => ({ ...entry, source: { ...entry.source, image_index: 3, row_index: index + 1 } })) } };
+    await f.db.query(`UPDATE assistant_tasks SET image_checkpoint=$1::jsonb,status='failed',run_token=NULL,lease_until=NULL,
+      image_progress=$2::jsonb,error='一次最多识别20笔，请分批输入。'`, [JSON.stringify(checkpoint),
+      JSON.stringify({ total: 3, completed: 3, active: [], failed: [], stage: 'merging' })]);
+    const requests = f.paidCalls.length;
+    await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
+    await f.tasks.runAssistantTask('owner', taskId);
+    const recovered = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(recovered.status, 'succeeded');
+    assert.equal(recovered.result.drafts.length, 17);
+    assert.equal(recovered.result.import_summary.removed_duplicates, 7);
+    assert.equal(f.paidCalls.length, requests, 'merge retry must reuse every saved target');
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+  });
+
   test('real PostgreSQL: model input fingerprints invalidate changed category mappings, while corrupt cached targets are retried', async t => {
     const f = await databaseFixture(t);
     await f.tasks.createAssistantTask('owner', body({ images: Array(3).fill('data:image/png;base64,YWJj') }));
@@ -599,10 +653,11 @@ if (PGlite) {
   test('real PostgreSQL: existing task tables receive additive checkpoint columns without losing saved tasks', async t => {
     const f = await databaseFixture(t);
     await f.tasks.createAssistantTask('owner', body());
-    await f.db.exec('ALTER TABLE assistant_tasks DROP COLUMN image_checkpoint,DROP COLUMN image_progress,DROP COLUMN run_token');
+    await f.db.exec('ALTER TABLE assistant_tasks DROP COLUMN image_checkpoint,DROP COLUMN image_progress,DROP COLUMN run_token,DROP COLUMN execution_steps');
     const restored = await f.tasks.getAssistantTask('owner', taskId);
     assert.equal(restored.status, 'queued');
     assert.equal(restored.image_progress, null);
+    assert.deepEqual(plain(restored.execution_steps), []);
     await f.tasks.runAssistantTask('owner', taskId);
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'succeeded');
   });
@@ -707,6 +762,62 @@ if (PGlite) {
     assert.equal(saved.status, 'succeeded');
     assert.deepEqual(plain(saved.image_progress), { total: 3, completed: 3, failed: [], active: [], stage: 'merging' });
     assert.equal(f.paidCalls.length, 3);
+  });
+
+  test('real PostgreSQL: detailed query steps persist while generating and survive task recovery', async t => {
+    const started = deferred(), finish = deferred();
+    const query = { start_date: '2026-10-01', end_date: '2026-10-09', type: 'expense', category_id: categoryId, member_id: memberId, keyword: '午餐' };
+    const f = await databaseFixture(t, { provider: {
+      bailianObjectStream: async () => ({ action: 'query', reply: '查询中', drafts: [], query }),
+      bailianStream: async () => (async function* () { started.resolve(); await finish.promise; yield { type: 'text-delta', text: '匹配一笔午餐，支出12元。' }; yield { finishReason: 'stop' }; })(),
+    } });
+    await f.db.query(`INSERT INTO transactions(id,user_id,type,amount,category_id,member_id,transaction_date,description)
+      VALUES($1,'owner','expense',12,$2,$3,'2026-10-08','午餐')`, [id(800),categoryId,memberId]);
+    await f.tasks.createAssistantTask('owner', body());
+    const running = f.tasks.runAssistantTask('owner', taskId);
+    await started.promise;
+    await new Promise(resolve => setTimeout(resolve, 1150));
+    const live = await f.tasks.getAssistantTask('owner', taskId);
+    const queryStep = live.execution_steps.find(step => step.id === 'agent_tool_1');
+    assert.equal(queryStep.state, 'done');
+    assert.match(queryStep.details.join(' '), /2026-10-01 至 2026-10-09.*分类：餐饮；成员：本人.*匹配 1 笔/);
+    assert.equal(live.execution_steps.find(step => step.id === 'agent_2').state, 'running');
+    finish.resolve(); await running;
+    const saved = (await f.tasks.listAssistantTasks('owner', conversationId))[0];
+    assert.equal(saved.execution_steps.length, 4);
+    assert.ok(saved.execution_steps.every(step => step.state === 'done' && step.finishedAt >= step.startedAt));
+    assert.equal(saved.execution_steps.find(step => step.id === 'agent_2').details.some(detail => detail.includes('已生成')), true);
+    assert.equal((await f.db.query('SELECT COUNT(*)::int AS count FROM transactions')).rows[0].count, 1);
+  });
+
+  test('real PostgreSQL: image steps retain earlier waves and errors, retry replaces failed steps without replaying saved images', async t => {
+    let fail = true;
+    const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
+      const result = imageBatch(settings);
+      if (fail && result.drafts[0].description === '午餐 2') throw new Error('private provider diagnostic');
+      return result;
+    } } });
+    const images = [1,2,3].map(value => `data:image/png;base64,${Buffer.from(String(value)).toString('base64')}`);
+    await f.tasks.createAssistantTask('owner', body({ images }));
+    let continuation = await f.tasks.runAssistantTask('owner', taskId);
+    await f.tasks.runAssistantTask('owner', taskId, continuation);
+    const failed = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(failed.execution_steps.find(step => step.id === 'image-1').state, 'done');
+    assert.equal(failed.execution_steps.find(step => step.id === 'image-2').state, 'failed');
+    assert.equal(failed.execution_steps.find(step => step.id === 'merge'), undefined);
+    assert.equal(JSON.stringify(failed.execution_steps).includes('private provider diagnostic'), false);
+    fail = false;
+    const retried = await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
+    assert.deepEqual(plain(retried.execution_steps), []);
+    continuation = await f.tasks.runAssistantTask('owner', taskId);
+    if (continuation) await f.tasks.runAssistantTask('owner', taskId, continuation);
+    const saved = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(saved.status, 'succeeded');
+    assert.match(saved.execution_steps.find(step => step.id === 'image-1').details.join(' '), /复用/);
+    assert.match(saved.execution_steps.find(step => step.id === 'merge').details.join(' '), /保留 3 笔/);
+    assert.ok(saved.execution_steps.every(step => step.state === 'done'));
+    await f.tasks.cancelConversationTasks('owner', conversationId);
+    assert.deepEqual((await f.db.query('SELECT execution_steps FROM assistant_tasks')).rows[0].execution_steps, []);
   });
 
 }

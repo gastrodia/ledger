@@ -1,8 +1,8 @@
 export type TransactionFilters = {
   startDate: string; endDate: string; type: 'all' | 'income' | 'expense';
-  categoryId: string; memberId: string; q: string;
+  categoryId: string; memberId: string; q: string; flowKind?: "daily" | "loan";
 };
-export const transactionFilterKeys = ['startDate', 'endDate', 'type', 'categoryId', 'memberId', 'q'] as const;
+export const transactionFilterKeys = ['startDate', 'endDate', 'type', 'categoryId', 'memberId', 'q', 'flowKind'] as const;
 const emptyFilters: TransactionFilters = { startDate: '', endDate: '', type: 'all', categoryId: '__all__', memberId: '__all__', q: '' };
 export function hasTransactionFilters(search: string) {
   const params = new URLSearchParams(search);
@@ -19,6 +19,7 @@ export function parseTransactionFilters(search: string, defaults: TransactionFil
     type: type === 'income' || type === 'expense' ? type : 'all',
     categoryId: params.get('categoryId') || '__all__', memberId: params.get('memberId') || '__all__',
     q: params.get('q') || '',
+    ...(['daily','loan'].includes(params.get('flowKind') || '') ? { flowKind: params.get('flowKind') as 'daily' | 'loan' } : {}),
   };
 }
 export function serializeTransactionFilters(filters: TransactionFilters) {

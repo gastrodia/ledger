@@ -92,7 +92,7 @@ export function buildAssistantImageRecognition({ today, message, images, categor
     if (!result.success) throw new Error("AI 返回的截图识别格式或分类、成员引用无效，请重试。");
     const output = result.data;
     return {
-      action: output.action, reply: output.reply, query: null, update: null, undo: null,
+      action: output.action, reply: output.reply, query: null, update: null, undo: null, remove: null, event: null, command: null, edit: null, confirm: null, navigation: null,
       drafts: output.drafts.map(({ category, member, date, ...draft }) => ({
         ...draft,
         category_id: category === null ? null : categoryIds[category - 1],

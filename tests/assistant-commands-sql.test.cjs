@@ -1,0 +1,156 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- opt-in real SQL and route integration on disposable Postgres. */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const createFixture = require('./helpers/ledger-sql-fixture.cjs');
+const modulePath = process.env.LEDGER_TASKS_PGLITE_MODULE;
+const uuid = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const emptyFilter = { keyword: null, start_date: null, end_date: null, type: null, category_id: null, member_id: null, status: null, amount_min: null, amount_max: null };
+const command = (resource, operation, values = {}, patch = {}) => ({ resource, operation, scope: 'one', ids: [], parent_id: null, parent_name: null, filter: emptyFilter, values_json: JSON.stringify(values), ...patch });
+
+test('a gift event and an independent note remain separately pending and commit only by their own approvals', { skip: !modulePath }, async t => {
+  const f=await createFixture(modulePath);t.after(f.close);
+  const server=f.load('lib/assistant-command-server.ts');
+  const events=f.load('lib/ledger-event-server.ts');
+  await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','本人')",[uuid(960)]);
+  const gift=await events.prepareLedgerEvent('owner',uuid(961),{operation:'create',kind:'gift_given',counterparty:'大伯',amount_cents:30000,date:'2026-10-09',member_id:uuid(960),cashflow:'new'});
+  const note=await server.prepareLedgerCommand('owner',uuid(961),command('notes','create',{content:'买鸡蛋'}));
+  assert.equal((await server.getAssistantAction('owner',gift.approval.id)).status,'pending');
+  assert.equal((await server.getAssistantAction('owner',note.approval.id)).status,'pending');
+  assert.equal((await f.db.query('SELECT * FROM transactions')).rows.length,0);
+  assert.equal((await f.db.query('SELECT * FROM given_gifts')).rows.length,0);
+  assert.equal((await server.decideAssistantAction('owner',note.approval.id,'approve')).status,'succeeded');
+  assert.equal((await f.db.query('SELECT * FROM notes')).rows.length,1);
+  assert.equal((await server.getAssistantAction('owner',gift.approval.id)).status,'pending');
+  assert.equal((await f.db.query('SELECT * FROM transactions')).rows.length,0);
+  assert.equal((await server.decideAssistantAction('owner',gift.approval.id,'approve')).status,'succeeded');
+  assert.equal((await server.decideAssistantAction('owner',gift.approval.id,'approve')).status,'succeeded');
+  assert.equal((await f.db.query('SELECT * FROM given_gifts')).rows.length,1);
+  assert.equal((await f.db.query('SELECT * FROM transactions')).rows.length,1);
+});
+
+test('note proposal preserves dated content, waits for approval and creates only once', { skip: !modulePath }, async t => {
+  const f = await createFixture(modulePath); t.after(f.close);
+  const server = f.load('lib/assistant-command-server.ts');
+  const content = '2026-10-10：送车去保养';
+  const prepare = () => server.prepareLedgerCommand('owner', uuid(39), command('notes', 'create', { title: '送车去保养', content }));
+  const plan = await prepare();
+  assert.equal(plan.approval.preview.approveLabel, '创建便利贴');
+  assert.ok(plan.approval.preview.sections[0].rows.some(row => row.value === content));
+  assert.match(plan.approval.preview.notices[0].text, /不会定时提醒/);
+  assert.equal((await f.db.query('SELECT * FROM notes')).rows.length, 0);
+  const refreshed = await server.getAssistantAction('owner', plan.approval.id);
+  assert.equal(refreshed.preview.approveLabel, '创建便利贴');
+  await server.decideAssistantAction('owner', plan.approval.id, 'cancel');
+  assert.equal((await f.db.query('SELECT * FROM notes')).rows.length, 0);
+  const next = await prepare();
+  assert.equal((await server.decideAssistantAction('owner', next.approval.id, 'approve')).status, 'succeeded');
+  await server.decideAssistantAction('owner', next.approval.id, 'approve');
+  const saved = (await f.db.query('SELECT * FROM notes')).rows;
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].content, content);
+});
+
+test('real SQL approval journal and real resource handlers cover every data module without production access', { skip: !modulePath }, async t => {
+  const f = await createFixture(modulePath); t.after(f.close);
+  const server = f.load('lib/assistant-command-server.ts');
+  const execute = async c => {
+    const plan = await server.prepareLedgerCommand('owner', uuid(30), c);
+    assert.ok(plan.approval);
+    const before = await f.db.query("SELECT status FROM assistant_actions WHERE id=$1", [plan.approval.id]);
+    assert.equal(before.rows[0].status, 'pending');
+    const result = await server.decideAssistantAction('owner', plan.approval.id, 'approve');
+    assert.equal(result.status, 'succeeded', result.text);
+    assert.equal((await server.decideAssistantAction('owner', plan.approval.id, 'approve')).status, 'succeeded');
+    return plan;
+  };
+  const first = async table => (await f.db.query(`SELECT * FROM ${table} WHERE user_id='owner' ORDER BY created_at DESC LIMIT 1`)).rows[0];
+  await execute(command('categories', 'create', { name: '餐饮', type: 'expense' }));
+  const category = await first('categories');
+  await execute(command('members', 'create', { name: '小明' }));
+  const member = await first('members');
+  await f.db.query("INSERT INTO transactions(id,user_id,category_id,member_id,type,amount,transaction_date,description) VALUES($1,'owner',$2,$3,'expense',18,'2026-10-09','早餐')", [uuid(1), category.id, member.id]);
+  await execute(command('transactions', 'update', { amount: 20, description: '早饭' }, { ids: [uuid(1)] }));
+  assert.equal(Number((await first('transactions')).amount), 20);
+  await execute(command('categories', 'update', { name: '吃喝' }, { ids: [category.id] }));
+  await execute(command('members', 'update', { name: '家人' }, { ids: [member.id] }));
+  await execute(command('notes', 'create', { title: '采购', content: '买鸡蛋', pinned: true }));
+  const note = await first('notes');
+  assert.ok(note.pinned_at, 'requested initial pin is actually persisted');
+  await execute(command('notes', 'update', { archived: true, color: 'green' }, { ids: [note.id] }));
+  assert.ok((await first('notes')).archived_at);
+  await execute(command('loans', 'create', { direction: 'lent', subject_type: 'money', counterparty_name: '小王', amount: 500, occurred_at: '2026-10-09' }));
+  const loan = await first('loans');
+  await execute(command('repayments', 'create', { repaid_at: '2026-10-09', repaid_amount: 100 }, { parent_name: '小王' }));
+  const repayment = await first('loan_repayments');
+  await execute(command('repayments', 'update', { repaid_amount: 120 }, { ids: [repayment.id] }));
+  const loans = await server.prepareLedgerCommand('owner', uuid(30), command('loans', 'list', {}, { scope: 'all', filter: { ...emptyFilter, status: 'partial' } }));
+  assert.match(loans.reply, /已还 120.00，未还 380/);
+  await execute(command('giftbooks', 'create', { name: '婚礼', event_date: '2026-10-09' }));
+  const book = await first('giftbooks');
+  await execute(command('gift_records', 'create', { gift_type: 'cash', counterparty_name: '小王', gift_date: '2026-10-09', amount: 600 }, { parent_name: '婚礼' }));
+  const received = await first('gift_records');
+  await execute(command('gift_records', 'update', { amount: 800 }, { ids: [received.id] }));
+  const groupUnlink = await server.prepareLedgerCommand('owner', uuid(30), command('gift_records', 'unlink', {}, { ids: [received.id] }));
+  assert.match(groupUnlink.reply, /按整组关联，影响本组 1 条明细/);
+  await server.decideAssistantAction('owner', groupUnlink.approval.id, 'cancel');
+  await execute(command('gifts_given', 'create', { recipient_name: '小王', gift_date: '2026-10-09', cash_amount: 300, items: [] }));
+  const given = await first('given_gifts');
+  await execute(command('gifts_given', 'update', { occasion: '生日' }, { ids: [given.id] }));
+  await execute(command('gifts_given', 'link', { transaction_id: uuid(1) }, { ids: [given.id] }));
+  assert.equal((await f.db.query('SELECT * FROM transaction_links')).rows.length, 1);
+  await execute(command('gifts_given', 'unlink', {}, { ids: [given.id] }));
+  assert.equal((await f.db.query('SELECT * FROM transaction_links')).rows.length, 0);
+  await assert.rejects(server.prepareLedgerCommand('owner', uuid(30), command('members', 'delete', {}, { ids: [member.id] })), /仍被收支使用/);
+  const deleteBook = await server.prepareLedgerCommand('owner', uuid(30), command('giftbooks', 'delete', {}, { ids: [book.id] }));
+  assert.match(deleteBook.reply, /同时删除 1 条关联明细/);
+  await server.decideAssistantAction('owner', deleteBook.approval.id, 'cancel');
+  assert.equal((await f.db.query('SELECT * FROM gift_records')).rows.length, 1);
+  await execute(command('giftbooks', 'delete', {}, { ids: [book.id] }));
+  assert.equal((await f.db.query('SELECT * FROM gift_records')).rows.length, 0);
+  await execute(command('loans', 'delete', {}, { ids: [loan.id] }));
+  assert.equal((await f.db.query('SELECT * FROM loan_repayments')).rows.length, 0);
+  await execute(command('transactions', 'delete', {}, { ids: [uuid(1)] }));
+  await execute(command('members', 'delete', {}, { ids: [member.id] }));
+  await execute(command('categories', 'delete', {}, { ids: [category.id] }));
+  await execute(command('gifts_given', 'delete', {}, { ids: [given.id] }));
+  await execute(command('notes', 'delete', {}, { ids: [note.id] }));
+  assert.equal((await f.db.query("SELECT * FROM assistant_actions WHERE status='pending'")).rows.length, 0);
+});
+
+test('real action API rejects foreign approval and invalid decisions, and cleared conversations invalidate previews', { skip: !modulePath }, async t => {
+  const { NextRequest } = require('next/server');
+  const f = await createFixture(modulePath); t.after(f.close);
+  const server = f.load('lib/assistant-command-server.ts');
+  const route = f.load('app/api/assistant/actions/[id]/route.ts');
+  const plan = await server.prepareLedgerCommand('owner', uuid(31), command('notes', 'create', { content: '不可误写' }));
+  const context = { params: Promise.resolve({ id: plan.approval.id }) };
+  const request = body => new NextRequest('http://fixture.test/api/assistant/actions/' + plan.approval.id, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  f.setSession(null);
+  assert.equal((await route.POST(request({ decision: 'approve' }), context)).status, 401);
+  f.setSession({ userId: 'foreign' });
+  assert.equal((await route.POST(request({ decision: 'approve' }), context)).status, 400);
+  f.setSession({ userId: 'owner' });
+  assert.equal((await route.POST(request({ decision: 'yes', command: { operation: 'delete' } }), context)).status, 400);
+  await f.db.exec('CREATE TABLE IF NOT EXISTS assistant_task_conversations(user_id VARCHAR(36),id VARCHAR(36),cleared_at TIMESTAMPTZ)');
+  await f.db.query("INSERT INTO assistant_task_conversations VALUES('owner',$1,NOW())", [uuid(31)]);
+  const response = await route.POST(request({ decision: 'approve' }), context);
+  assert.equal((await response.json()).status, 'cancelled');
+  assert.equal((await f.db.query('SELECT * FROM notes')).rows.length, 0);
+  await assert.rejects(server.prepareLedgerCommand('owner', uuid(31), command('notes', 'create', { content: '迟到的模型结果' })), /已清空/);
+});
+
+test('read-only record cards and CSV preserve calendar dates across database driver serialization', { skip: !modulePath }, async t => {
+  const f=await createFixture(modulePath);t.after(f.close);
+  const server=f.load('lib/assistant-command-server.ts');
+  await f.db.query("INSERT INTO categories(id,user_id,type,name) VALUES($1,'owner','expense','餐饮')",[uuid(993)]);
+  await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','本人')",[uuid(994)]);
+  await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date,description,category_id,member_id) VALUES($1,'owner','expense',18,'2026-10-09','日期验证',$2,$3)",[uuid(991),uuid(993),uuid(994)]);
+  for(const operation of ['list','export']) {
+    const result=await server.prepareLedgerCommand('owner',uuid(992),command('transactions',operation));
+    assert.equal(result.record_context.rows[0].transaction_date,'2026-10-09');
+    assert.match(result.reply,/2026-10-09/);
+    if(operation==='export') assert.match(result.export_file.csv,/2026-10-09/);
+  }
+  const plan=await server.prepareLedgerCommand('owner',uuid(992),command('transactions','update',{description:'日期不变'},{ids:[uuid(991)]}));
+  assert.equal((await server.decideAssistantAction('owner',plan.approval.id,'approve')).status,'succeeded','date normalization must not invalidate write snapshots');
+});

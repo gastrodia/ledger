@@ -73,7 +73,7 @@ export function getComparisonEnd(period: StatsPeriod) {
 }
 
 export function statsDetailHref(period: Pick<StatsPeriod, "startDate" | "endDate">, type: "income" | "expense", dimension: "categoryId" | "memberId", id: string | null) {
-  const params = new URLSearchParams({ startDate: period.startDate, endDate: period.endDate, type, [dimension]: id || "none" });
+  const params = new URLSearchParams({ startDate: period.startDate, endDate: period.endDate, type, [dimension]: id || "none", flowKind: "daily" });
   return `/dashboard?${params.toString()}`;
 }
 

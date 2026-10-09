@@ -56,8 +56,8 @@ test('create persists color and untouched Markdown, defaults older clients to ye
   const f = fixture();
   const content = '\n# Original\n![](https://example.invalid/legacy.png)\n';
   assert.equal((await f.collection.POST(req({ title: ' Title ', content, color: 'green' }))).status, 201);
-  assert.deepEqual(f.calls[0].values, ['new-note', 'owner', 'Title', content, 'green']);
-  await f.collection.POST(req({ content })); assert.equal(f.calls[1].values.at(-1), 'yellow');
+  assert.deepEqual(f.calls[0].values, ['new-note', 'owner', 'Title', content, 'green', null, null]);
+  await f.collection.POST(req({ content })); assert.equal(f.calls[1].values[4], 'yellow');
   assert.equal((await f.collection.POST(req({ content, color: 'invalid' }))).status, 400); assert.equal(f.calls.length, 2);
 });
 

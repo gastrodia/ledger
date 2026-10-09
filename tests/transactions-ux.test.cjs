@@ -27,6 +27,7 @@
       'next/server': { NextResponse },
       '@/lib/auth': { getSession: async () => ({ userId: 'user-a' }) },
       '@/lib/attachments': {}, uuid: {},
+      '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
       '@/lib/db': { sql: { query: async (sql, params) => {
         queries.push({ sql, params: [...params] });
         return sql.includes('has_any_transactions') ? [{ total_income: null, total_expense: null, has_any_transactions: hasAny }] : [];

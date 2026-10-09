@@ -11,6 +11,7 @@ export function updateTransactions(current: TransactionList, filters: Transactio
     const date = saved.transaction_date.slice(0, 10);
     const matchesId = (filter: string, id?: string) => filter === "__all__" || !filter || (filter === "none" ? !id : id === filter);
     if ((!filters.startDate || date >= filters.startDate) && (!filters.endDate || date <= filters.endDate)
+      && (!filters.flowKind || (saved.flow_kind || "daily") === filters.flowKind)
       && (filters.type === "all" || saved.type === filters.type)
       && matchesId(filters.categoryId, saved.category_id) && matchesId(filters.memberId, saved.member_id)
       && (saved.description ?? "").toLowerCase().includes(filters.q.trim().toLowerCase())) data = [...data, saved];

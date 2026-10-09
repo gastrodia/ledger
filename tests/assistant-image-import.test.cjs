@@ -10,7 +10,7 @@ function load(file, deps = {}) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText, { exports, Date, JSON, Number, Error,
-    require: id => { assert.ok(id in deps, id); return deps[id]; },
+    require: id => { const contract = require('./helpers/assistant-contracts.cjs')(id); if (contract) return contract; assert.ok(id in deps, id); return deps[id]; },
   });
   return exports;
 }
@@ -179,12 +179,52 @@ test('a complete multi-row suffix-prefix overlap joins adjacent screenshots and 
 });
 
 test('only neighboring screenshot boundaries qualify, never matching rows in the middle or non-neighboring images', () => {
-  const middle = merge([{ ...row, source: source(1, 1) }, { ...row, description: '其他交易', source: source(1, 2) },
+  const middle = merge([{ ...row, description: '开头交易', source: source(1, 1) }, { ...row, source: source(1, 2) }, { ...row, description: '其他交易', source: source(1, 3) },
     { ...row, source: source(2, 1) }]);
   assert.equal(middle.summary.removed_duplicates, 0);
   const separated = imports.mergeAssistantImageImport(plan([{ ...row, source: source(1, 1) },
     { ...row, source: source(3, 1) }]), 3);
   assert.equal(separated.summary.removed_duplicates, 0);
+});
+
+test('three reverse-uploaded eight-row statements merge 24 visible rows into 17 unique drafts before the cap', () => {
+  // Anonymized reproduction of 2-row and 5-row overlaps in reverse upload order.
+  const entries = Array.from({ length: 17 }, (_, index) => ({ ...row,
+    description: `测试交易${index}`, amount_cents: 1000 + index,
+    source: source(1, index + 1, `12:${String(index).padStart(2, '0')}`) }));
+  for (const starts of [[9, 3, 0], [0, 3, 9]]) {
+    const drafts = starts.flatMap((start, imageIndex) => entries.slice(start, start + 8)
+      .map((entry, index) => ({ ...entry, source: { ...entry.source, image_index: imageIndex + 1, row_index: index + 1 } })));
+    const result = imports.mergeAssistantImageImport(plan(drafts), 3);
+    assert.equal(result.summary.extracted_count, 24);
+    assert.equal(result.summary.removed_duplicates, 7);
+    assert.equal(result.summary.retained_count, 17);
+    assert.equal(result.summary.review_required, false);
+    const accepted = assistant.validatePlan(result.output, [], [], crypto.randomUUID);
+    assert.equal(accepted.drafts.length, 17);
+    assert.equal(new Set(accepted.drafts.map(d => d.description)).size, 17);
+    assert.deepEqual(Array.from(accepted.drafts, d => d.amount_cents).sort((a, b) => a - b), entries.map(d => d.amount_cents));
+    assert.deepEqual(Array.from(accepted.drafts.slice(0, 8), d => d.description), entries.slice(starts[0], starts[0] + 8).map(d => d.description));
+    assert.equal(drafts.length, 24);
+  }
+});
+
+test('reverse boundaries keep conflicting or ambiguous rows and do not infer a scrolling direction', () => {
+  const make = (description, image, index, patch = {}) => ({ ...row, description, source: source(image, index), ...patch });
+  const reversed = merge([make('乙', 1, 1), make('丙', 1, 2), make('甲', 2, 1), make('乙', 2, 2)]);
+  assert.equal(reversed.summary.removed_duplicates, 1);
+  assert.equal(reversed.output.drafts.map(d => d.description).join(), '乙,丙,甲');
+  for (const patch of [{ member_id: 'other-member' }, { payment_method: '支付宝' }, { source: source(2, 2, '12:48') }]) {
+    const result = merge([make('乙', 1, 1, { member_id: 'member', payment_method: '微信' }), make('丙', 1, 2),
+      make('甲', 2, 1), make('乙', 2, 2, patch)]);
+    assert.equal(result.summary.removed_duplicates, 0);
+  }
+  const ambiguous = merge([make('乙', 1, 1), make('乙', 1, 2), make('丙', 1, 3), make('甲', 2, 1), make('乙', 2, 2)]);
+  assert.equal(ambiguous.summary.removed_duplicates, 0);
+  assert.equal(ambiguous.summary.review_required, true);
+  const twoEnds = merge([make('甲', 1, 1), make('乙', 1, 2), make('乙', 2, 1), make('甲', 2, 2)]);
+  assert.equal(twoEnds.summary.removed_duplicates, 0);
+  assert.match(twoEnds.summary.warnings.join(), /重叠方向/);
 });
 
 test('same merchant and amount without matching printed time or transaction ID remain as separate drafts', () => {

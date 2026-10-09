@@ -26,6 +26,7 @@ interface RankedStat {
   count: number | string;
 }
 interface StatsData {
+  cashflow?: { inflow: number; outflow: number; loanInflow: number; loanOutflow: number };
   categoryStats: { income: RankedStat[]; expense: RankedStat[] };
   memberStats: { income: RankedStat[]; expense: RankedStat[] };
   summary: { totalIncome: number; totalExpense: number; balance: number; count: number; futureCount: number };
@@ -93,6 +94,12 @@ function StatsSkeleton({ periodLabel = "0000年00月", mode = "month", period, s
             <div className="flex h-7 items-center"><Skeleton className="h-4 w-16" /></div>
             <Skeleton className={cn("mt-2 w-32 max-w-full sm:h-10", index === 0 ? "h-[2.34375rem]" : "h-[1.875rem]")} /><Skeleton className="mt-2 h-5 w-28 max-w-full" />
           </div>)}
+        </div>
+      </div>
+      <div className="rounded-2xl border bg-card p-4 sm:p-5">
+        <Skeleton className="h-6 w-20" /><Skeleton className="mt-1 h-5 w-96 max-w-full" />
+        <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          {[0, 1, 2, 3].map(index => <div key={index}><Skeleton className="h-5 w-24 max-w-full" /><Skeleton className="mt-1 h-5 w-24 max-w-full" /></div>)}
         </div>
       </div>
       <Card>
@@ -178,7 +185,7 @@ function StatsPageSkeleton() {
       <SkeletonRegion label="正在加载统计周期…">
         <StatsPeriodToolbar
           mode={<Skeleton className="h-9 w-[6.375rem]" />}
-          navigation={<><Skeleton className="size-9 sm:size-8" /><Skeleton className="h-9 w-full min-w-0 sm:w-40" /><Skeleton className="size-9 sm:size-8" /></>}
+          navigation={<><Skeleton className="size-9 sm:size-8" /><Skeleton className="h-9 w-32 min-w-0 max-w-full justify-self-center sm:w-40" /><Skeleton className="size-9 sm:size-8" /></>}
           reset={<Skeleton className="ml-auto h-8 w-18" />}
         />
       </SkeletonRegion>
@@ -274,9 +281,9 @@ function StatsContent() {
         mode={<Segment value={view} label="统计周期" options={[{ value: "month", label: "按月" }, { value: "year", label: "按年" }]} onChange={value => navigate({ view: value })} />}
         navigation={<>
           <Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 sm:size-8" aria-label={view === "month" ? "上个月" : "上一年"} disabled={!previousDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, -1) || current.date }))}><ChevronLeft /></Button>
-          {view === "month" ? <Input type="month" aria-label="选择月份" value={date} min="0002-01" max="9998-12" className="relative h-9 min-w-0 border-transparent bg-transparent px-2 text-center text-sm hover:border-transparent focus-visible:ring-inset max-sm:[&::-webkit-datetime-edit]:w-full max-sm:[&::-webkit-datetime-edit-fields-wrapper]:flex max-sm:[&::-webkit-datetime-edit-fields-wrapper]:justify-center max-sm:[&::-webkit-calendar-picker-indicator]:absolute max-sm:[&::-webkit-calendar-picker-indicator]:right-2 sm:w-40 sm:border-input sm:bg-background sm:px-3 sm:text-left sm:hover:border-slate-300" onInput={event => isStatsMonth(event.currentTarget.value) && navigate({ date: event.currentTarget.value })} onChange={event => isStatsMonth(event.target.value) && navigate({ date: event.target.value })} /> :
+          {view === "month" ? <Input type="month" aria-label="选择月份" value={date} min="0002-01" max="9998-12" className="h-9 w-32 min-w-0 max-w-full justify-self-center border-transparent bg-transparent px-2 text-sm hover:border-transparent focus-visible:ring-inset sm:w-40 sm:border-input sm:bg-background sm:px-3 sm:hover:border-slate-300" onInput={event => isStatsMonth(event.currentTarget.value) && navigate({ date: event.currentTarget.value })} onChange={event => isStatsMonth(event.target.value) && navigate({ date: event.target.value })} /> :
             <Select value={year} onValueChange={value => navigate(current => ({ date: `${value}-${current.date.slice(5)}` }))}>
-              <SelectTrigger aria-label="选择年份" className="relative h-9 min-w-0 border-transparent bg-transparent px-2 text-sm hover:border-transparent focus:ring-inset [&>span]:flex-1 [&>span]:text-center [&>svg]:absolute [&>svg]:right-2 sm:w-40 sm:border-input sm:bg-background sm:px-3 sm:hover:border-slate-300 sm:[&>span]:text-left sm:[&>svg]:static"><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="选择年份" className="h-9 w-32 min-w-0 max-w-full justify-self-center border-transparent bg-transparent px-2 text-sm hover:border-transparent focus:ring-inset sm:w-40 sm:border-input sm:bg-background sm:px-3 sm:hover:border-slate-300"><SelectValue /></SelectTrigger>
               <SelectContent>{years.map(value => <SelectItem key={value} value={String(value).padStart(4, "0")}>{value} 年</SelectItem>)}</SelectContent>
             </Select>}
           <Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 sm:size-8" aria-label={view === "month" ? "下个月" : "下一年"} disabled={!nextDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, 1) || current.date }))}><ChevronRight /></Button>
@@ -310,6 +317,17 @@ function StatsContent() {
           {data.summary.futureCount > 0 && <p className="mt-5 border-t pt-3 text-xs leading-5 text-muted-foreground">期间总额含 {data.summary.futureCount} 笔未来日期记录{data.period.state === "current" ? "；同期对比与日均支出不含这些记录。" : "。"}</p>}
         </section>
 
+        {data.cashflow && <section className="rounded-2xl border bg-card p-4 sm:p-5" aria-label="资金流动">
+            <p className="font-medium">资金流动</p>
+            <p className="mt-1 text-sm text-muted-foreground">日常收支不含借还往来；资金流动包含全部流入和流出。</p>
+            <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4 text-sm">
+              <div>资金流入<p className="mt-1 font-semibold tabular-nums">{money(data.cashflow.inflow, true)}</p></div>
+              <div>资金流出<p className="mt-1 font-semibold tabular-nums">{money(data.cashflow.outflow)}</p></div>
+              <div>其中借还流入<p className="mt-1 font-semibold tabular-nums">{money(data.cashflow.loanInflow, true)}</p></div>
+              <div>其中借还流出<p className="mt-1 font-semibold tabular-nums">{money(data.cashflow.loanOutflow)}</p></div>
+            </div>
+          </section>}
+
         <PeriodTrend key={`trend:${query}`} mode={view} periodLabel={periodLabel} points={points} showIncome={showIncome} dailyExpense={data.dailyExpense} />
 
         <section aria-label="收支构成" className="space-y-3">
@@ -330,10 +348,10 @@ function StatsContent() {
         <details className="group px-1 text-xs leading-6 text-muted-foreground">
           <summary className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 [&::-webkit-details-marker]:hidden">统计范围与对比口径<ChevronDown className="size-3.5 transition-transform group-open:rotate-180" aria-hidden="true" /></summary>
           <div className="space-y-1 pb-3">
-            <p>期间总额、趋势与构成：{data.period.startDate} 至 {data.period.endDate}内全部已记录的收支，包含未来日期记录。</p>
+            <p>期间总额、趋势与构成：{data.period.startDate} 至 {data.period.endDate}内已记录的日常收支，排除借还往来，包含未来日期记录。</p>
             {data.comparison ? <p>{data.period.state === "current" ? "同期对比" : "完整期间对比"}：{data.period.startDate} 至 {data.period.state === "current" ? asOfDate : data.period.endDate}，与 {data.period.previousStartDate} 至 {inclusiveEnd(data.comparison.previousEndExclusive)}比较{data.period.state === "current" ? "；上期较短时截至上期末" : ""}。</p> : <p>所选期间尚未开始，暂不计算变化和日均支出。</p>}
             {data.dailyExpense !== null && <p>日均支出按{data.period.state === "current" ? `截至 ${asOfDate}已过的` : "完整期间的"} {data.period.elapsedDays} 天计算，不含未来日期支出。</p>}
-            <p>礼簿、送礼和借还台账保持独立，不会自动计入；记账结余不代表账户余额。</p>
+            <p>礼金事项以已确认的关联流水计入日常收支；借还本金只计资金流动，实物估值不计现金。仅登记台账时不产生流水；记账结余不代表账户余额。</p>
           </div>
         </details>
       </> : null}

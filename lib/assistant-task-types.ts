@@ -42,6 +42,9 @@ export type AssistantTaskRequest = {
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   draft_batch?: AssistantDraftBatch | null;
   saved_batch?: AssistantSavedBatch | null;
+  event_context?: import("@/lib/ledger-event").LedgerEventContext;
+  event_selection?: import("@/lib/ledger-event").LedgerEventInput;
+  record_contexts?: NonNullable<AssistantPlan["record_context"]>[];
 };
 
 export type AssistantTask = {
@@ -57,6 +60,9 @@ export type AssistantTask = {
   created_at: string;
   updated_at: string;
   image_progress?: AssistantImageProgress | null;
+  approval_history?: import("@/lib/assistant-agent-state").AssistantAgentApprovalHistory;
+  agent?: import("@/lib/assistant-agent-runtime").AssistantAgentMetadata;
+  execution_steps?: import("@/lib/assistant-execution").AssistantExecutionStep[];
   /** Included on creation or GET by ID with include_input=1; lists stay lightweight. */
   input?: { message: string; display_text: string; display_images: AssistantImage[] };
 };

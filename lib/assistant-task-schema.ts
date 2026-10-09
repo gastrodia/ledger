@@ -1,7 +1,7 @@
 import { sql } from "@/lib/db";
 
 export async function ensureAssistantTaskSchema() {
-  try { await sql.query("SELECT t.id,t.image_progress,t.image_checkpoint,t.run_token FROM assistant_tasks t, assistant_task_conversations c LIMIT 0"); }
+  try { await sql.query("SELECT t.id,t.image_progress,t.image_checkpoint,t.run_token,t.execution_steps,t.agent_checkpoint FROM assistant_tasks t, assistant_task_conversations c LIMIT 0"); }
   catch (error) {
     if (!["42P01", "42703"].includes((error as { code?: string }).code ?? "")) throw error;
     await sql.query(`-- A cleared conversation stays closed even when an earlier POST arrives late.
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS assistant_tasks (
   run_token VARCHAR(36),
   image_progress JSONB,
   image_checkpoint JSONB,
+  execution_steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+  agent_checkpoint JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id,id)
@@ -37,7 +39,9 @@ CREATE TABLE IF NOT EXISTS assistant_tasks (
     await sql.query(`ALTER TABLE assistant_tasks
       ADD COLUMN IF NOT EXISTS run_token VARCHAR(36),
       ADD COLUMN IF NOT EXISTS image_progress JSONB,
-      ADD COLUMN IF NOT EXISTS image_checkpoint JSONB`);
+      ADD COLUMN IF NOT EXISTS image_checkpoint JSONB,
+      ADD COLUMN IF NOT EXISTS execution_steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS agent_checkpoint JSONB`);
     await sql.query(`CREATE INDEX IF NOT EXISTS assistant_tasks_conversation_idx ON assistant_tasks (user_id,conversation_id,created_at)`);
   }
 }

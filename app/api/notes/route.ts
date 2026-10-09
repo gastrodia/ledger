@@ -100,8 +100,8 @@ export async function POST(request: NextRequest) {
         ${title && title.trim() ? title.trim() : null},
         ${content},
         ${color},
-        NULL,
-        NULL,
+        ${body.pinned ? new Date().toISOString() : null},
+        ${body.archived ? new Date().toISOString() : null},
         NOW(),
         NOW()
       )

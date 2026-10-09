@@ -91,6 +91,7 @@
       'next/server': { NextResponse },
       '@/lib/auth': { getSession: async () => authenticated ? { userId: 'owner' } : null },
       '@/lib/stats-period': helper,
+      '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
       '@/lib/db': { sql: async (strings, ...params) => {
         const sql = strings.join('?'); queries.push({ sql, params });
         if (sql.includes('"elapsedExpense"')) return [summary];

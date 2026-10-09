@@ -10,7 +10,7 @@ function load(file, deps = {}, globals = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, { exports, require: id => { assert.ok(id in deps, id); return deps[id]; },
+  }).outputText, { exports, require: id => { const contract = require('./helpers/assistant-contracts.cjs')(id); if (contract) return contract; assert.ok(id in deps, id); return deps[id]; },
     Date, JSON, URL, Number, ArrayBuffer, DataView, Float32Array, Uint8Array, TextEncoder, TextDecoder, Response,
     ReadableStream, AbortController, AbortSignal, Buffer, SyntaxError, ...globals });
   return exports;
@@ -218,7 +218,8 @@ function routes({ session = { userId: 'owner' }, provider = JSON.stringify(plan)
   sql.transaction = async statements => { transactions.push(statements); return [[], [], result]; };
   const deps = {
     'next/server': { NextResponse }, 'node:crypto': crypto,
-    '@/lib/auth': { getSession: async () => session }, '@/lib/db': { sql }, '@/lib/assistant': helper,
+    '@/lib/auth': { getSession: async () => session }, '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
+      '@/lib/db': { sql }, '@/lib/assistant': helper,
     '@/lib/assistant-output': output,
     '@/lib/assistant-image-import': imageImport,
     '@/lib/assistant-image-recognition': imageRecognition,
@@ -896,4 +897,35 @@ test('invalid audio never causes a paid call; valid WAV uses the documented audi
   assert.equal(audio.validatePcmWav(part.data.buffer.slice(part.data.byteOffset, part.data.byteOffset + part.data.byteLength)), true);
   assert.equal(f.calls[0][0].asrOptions.language, 'zh');
   assert.equal(f.calls[0][0].asrOptions.enable_itn, true);
+});
+
+test('pending draft removal validates the entire target and never claims execution on the server', async () => {
+  const drafts = ['早餐', '转账-转给家人', '转账-来自家人'].map(description => ({ ...row, id: crypto.randomUUID(), description, member_id: null }));
+  const batch = { batch_id: batchId, status: 'pending', drafts };
+  const remove = { batch_id: batchId, draft_ids: drafts.slice(1).map(d => d.id) };
+  const candidate = { action: 'remove', reply: '已删除全部账单并入账', drafts: [], query: null, remove };
+  const parsed = await output.ASSISTANT_OUTPUT_SCHEMA.validate(candidate);
+  assert.equal(parsed.success, true);
+  const result = helper.validatePlan(parsed.value, categories, members, crypto.randomUUID, batch);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.remove)), remove);
+  assert.match(result.reply, /已找到要删除的 2 笔待确认草稿/);
+  assert.doesNotMatch(result.reply, /已删除|已入账/);
+  for (const target of [null, { ...batch, status: 'saved' }, { ...batch, commit: drafts }]) {
+    assert.throws(() => helper.validatePlan(candidate, categories, members, crypto.randomUUID, target));
+  }
+  for (const patch of [{ batch_id: crypto.randomUUID() }, { draft_ids: [] }, { draft_ids: [drafts[0].id, crypto.randomUUID()] },
+    { draft_ids: [drafts[0].id, drafts[0].id] }, { draft_ids: [1] }]) {
+    assert.throws(() => helper.validatePlan({ ...candidate, remove: { ...remove, ...patch } }, categories, members, crypto.randomUUID, batch));
+  }
+  for (const patch of [{ drafts: [row] }, { query: {} }, { update: { batch_id: batchId } }, { undo: remove }, { remove: null }]) {
+    assert.throws(() => helper.validatePlan({ ...candidate, ...patch }, categories, members, crypto.randomUUID, batch));
+  }
+  for (const action of ['chat', 'record', 'query', 'update', 'undo']) {
+    assert.throws(() => helper.validatePlan({ ...candidate, action }, categories, members, crypto.randomUUID, batch));
+  }
+  const f = routes({ provider: JSON.stringify(candidate) });
+  const response = await f.assistant.POST(request({ message: '删除转账相关的', today: '2026-10-09', draft_batch: batch }));
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).remove, remove);
+  assert.equal(f.transactions.length, 0);
 });

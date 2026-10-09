@@ -16,6 +16,7 @@
     const mocks = {
       'next/server': { NextResponse },
       '@/lib/auth': { getSession: async () => ({ userId: 'owner' }) },
+      '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
       '@/lib/db': { sql },
       '@/lib/attachments': { validateAttachment: async () => { calls.attachments++; return null; } },
       uuid: { v4: () => 'new-id' },

@@ -13,7 +13,7 @@ function load(file, dependencies = {}) {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText, { exports, Error, SyntaxError, Date, JSON, Number, Response, TextEncoder,
     ReadableStream, AbortController, AbortSignal, process: { env: {} },
-    require: name => { assert.ok(name in dependencies, `Unexpected dependency ${name}`); return dependencies[name]; },
+    require: name => { const contract = require('./helpers/assistant-contracts.cjs')(name); if (contract) return contract; assert.ok(name in dependencies, `Unexpected dependency ${name}`); return dependencies[name]; },
   });
   return exports;
 }
@@ -71,7 +71,8 @@ function fixture(provider = {}, session = { userId: 'authorized-user' }) {
   };
   const deps = {
     'next/server': { NextResponse }, 'node:crypto': crypto,
-    '@/lib/auth': { getSession: async () => session }, '@/lib/db': { sql }, '@/lib/assistant': assistant,
+    '@/lib/auth': { getSession: async () => session }, '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
+      '@/lib/db': { sql }, '@/lib/assistant': assistant,
     '@/lib/assistant-output': { ASSISTANT_OUTPUT_SCHEMA: {} }, '@/lib/assistant-image-import': imageImport,
     '@/lib/assistant-image-recognition': imageRecognition,
     '@/lib/bailian': {

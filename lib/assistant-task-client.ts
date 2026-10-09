@@ -1,9 +1,29 @@
-import { applyDraftMemberUpdate, memberBatchQuestionText, unassignedMemberDrafts, validateAssistantUndo, UUID_PATTERN, type AssistantDraft, type AssistantDraftMemberChoice, type AssistantMember, type AssistantPlan, type AssistantUndo } from "@/lib/assistant";
+import { restoreAssistantExecution } from "@/lib/assistant-execution";
+import { recordReplyView, type AssistantReplyView } from "@/lib/assistant-reply-view";
+import type { AssistantActionPreview } from "@/lib/assistant-action-preview";
+import { applyDraftEdit, assistantPagePaths, type AssistantDraftConfirm } from "@/lib/assistant-draft-actions";
+import type { AssistantApproval, AssistantActionResult, AssistantExport } from "@/lib/assistant-commands";
+import { applyDraftMemberUpdate, assignMissingDraftMembers, memberBatchQuestionText, unassignedMemberDrafts, validateAssistantUndo, validateDraftRemoval, UUID_PATTERN, type AssistantCategory, type AssistantDraft, type AssistantDraftMemberChoice, type AssistantMember, type AssistantPlan, type AssistantUndo } from "@/lib/assistant";
 import { restoreAssistantImages, restoreAssistantImportSummary, type AssistantImage } from "@/lib/assistant-images";
 import { sortedAssistantDrafts, type AssistantDraftSort } from "@/lib/assistant-draft-sort";
 import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask } from "@/lib/assistant-task-types";
+import { assistantProcessFromTask, type AssistantProcess } from "@/lib/assistant-process";
 
 export type EditableAssistantDraft = AssistantDraft & { amount: string; ignored?: boolean };
+
+export function syncSavedTransactionCards(messages: AssistantConversationMessage[], updates: NonNullable<AssistantActionResult["transaction_updates"]>) {
+  return messages.map(message => {
+    if (message.status !== "saved" || !message.drafts) return message;
+    const changed = updates.filter(update => update.batch_id === message.id && message.drafts!.some(draft => draft.id === update.draft_id));
+    if (!changed.length) return message;
+    return { ...message, text: "本组账目已更新，请查看卡片中的最新信息。", drafts: message.drafts.map(draft => {
+      const update = changed.find(update => update.draft_id === draft.id);
+      if (!update) return draft;
+      return { ...draft, type: update.type, amount_cents: update.amount_cents, amount: (update.amount_cents / 100).toFixed(2), category_id: update.category_id,
+        member_id: update.member_id, transaction_date: update.transaction_date, description: update.description };
+    }) };
+  });
+}
 export type AssistantConversationMessage = {
   id: string; role: "user" | "assistant"; text: string; drafts?: EditableAssistantDraft[];
   status?: "pending" | "saved" | "ignored" | "deleted" | "conflict" | "undone"; commit?: AssistantDraft[]; error?: string;
@@ -14,20 +34,135 @@ export type AssistantConversationMessage = {
   importSummary?: AssistantPlan["import_summary"];
   memberChoice?: AssistantDraftMemberChoice;
   undoChoice?: AssistantUndo;
+  approval?: AssistantApproval;
+  actionResult?: AssistantActionResult;
+  actionPreview?: AssistantActionPreview;
+  replyView?: AssistantReplyView;
+  replyKind?: "result";
+  confirmChoice?: AssistantDraftConfirm & { snapshot: string };
+  removeChoice?: AssistantDraftConfirm & { snapshot: string };
+  clearChoice?: boolean;
+  navigateTo?: string;
+  exportFile?: AssistantExport;
+  eventContext?: AssistantPlan["event_context"];
+  eventChoices?: AssistantPlan["event_choices"];
+  ledgerContext?: AssistantPlan["record_context"];
   draftSort?: AssistantDraftSort;
   incomplete?: "stopped" | "interrupted";
+  /** An approval/cancellation handled locally is not an unsent model request. */
+  localHandled?: boolean;
   taskId?: string;
   taskStatus?: AssistantTask["status"] | "submitting" | "missing";
   taskAttempt?: number;
   image_progress?: AssistantImageProgress | null;
+  process?: AssistantProcess;
   /** Remains set after editing/deleting/moving drafts so recovery cannot replay them. */
   taskApplied?: boolean;
+  agent?: NonNullable<AssistantPlan["agent"]>;
+  /** Earlier checkpoint outputs remain visible when this stable reply advances. */
+  taskHistory?: AssistantTaskOutput[];
+  approvalHistory?: AssistantTask["approval_history"];
 };
+
+/** Keep the confirmation batch ID while placing its review after the member answer. */
+export function completeAssistantMemberSelection(messages: AssistantConversationMessage[], messageId: string, member: AssistantMember,
+  members: AssistantMember[], answerId: string, questionId: string): AssistantConversationMessage[] {
+  const source = messages.find(message => message.id === messageId);
+  if (!source || source.role !== "assistant" || source.status !== "pending" || source.commit || !source.drafts?.length
+    || !messages.some(message => message.id === answerId && message.role === "user") || messages.some(message => message.id === questionId)) return messages;
+  const unassigned = unassignedMemberDrafts(source.drafts, members);
+  if (!unassigned.length) return messages;
+  let selected: EditableAssistantDraft[];
+  try { selected = assignMissingDraftMembers(source.drafts, member.id, members); }
+  catch { return messages; }
+  const questionText = memberBatchQuestionText(unassigned);
+  const question: AssistantConversationMessage = { id: questionId, role: "assistant",
+    text: source.text === questionText ? questionText : `${source.text}\n\n${questionText}` };
+  const review: AssistantConversationMessage = { ...source, drafts: selected, error: undefined, memberChoice: undefined,
+    memberFlow: true, text: "成员已补充，请核对账目后确认入账。" };
+  // Move the original card instead of creating a new batch: approvals, undo and
+  // task recovery continue to reference the exact same persisted identity.
+  return [...messages.map(message => message.id === messageId ? question
+    : message.memberChoice?.batch_id === messageId ? { ...message, memberChoice: undefined } : message), review];
+}
+
+export type AssistantTaskOutput = Pick<AssistantConversationMessage, "text" | "replyView" | "ledgerContext" | "exportFile" | "actionPreview" | "actionResult" | "approval" | "eventContext" | "drafts" | "savedDrafts" | "status"> & { attempt: number };
+
+export function restoreAssistantAgent(value: unknown): NonNullable<AssistantPlan["agent"]> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const agent = value as NonNullable<AssistantPlan["agent"]>;
+  if (typeof agent.goal_id !== "string" || !UUID_PATTERN.test(agent.goal_id) || typeof agent.goal !== "string" || !agent.goal.trim() || agent.goal.length > 4000
+    || !["running", "waiting_approval", "completed", "stopped", "needs_input"].includes(agent.status)
+    || !Number.isSafeInteger(agent.steps) || agent.steps < 0 || !Number.isSafeInteger(agent.tool_calls) || agent.tool_calls < 0
+    || (agent.pending_action_id !== undefined && (typeof agent.pending_action_id !== "string" || !UUID_PATTERN.test(agent.pending_action_id)))
+    || (agent.pending_batch_id !== undefined && (typeof agent.pending_batch_id !== "string" || !UUID_PATTERN.test(agent.pending_batch_id)))) return;
+  return { goal_id: agent.goal_id, goal: agent.goal, status: agent.status, steps: agent.steps, tool_calls: agent.tool_calls,
+    ...(agent.pending_action_id ? { pending_action_id: agent.pending_action_id } : {}),
+    ...(agent.pending_batch_id ? { pending_batch_id: agent.pending_batch_id } : {}) };
+}
+
+export function restoreAssistantApprovalHistory(value: unknown): NonNullable<AssistantTask["approval_history"]> {
+  if (!Array.isArray(value)) return [];
+  return value.filter(entry => entry && typeof entry === "object" && entry.approval && UUID_PATTERN.test(entry.approval.id)
+    && typeof entry.approval.summary === "string" && (entry.approval.expires_at === null || typeof entry.approval.expires_at === "string")
+    && (!entry.result || (entry.result.id === entry.approval.id && typeof entry.result.text === "string"
+      && ["pending", "executing", "succeeded", "failed", "cancelled", "expired"].includes(entry.result.status)))).slice(-20);
+}
+
+export function restoreAssistantTaskHistory(value: unknown): AssistantTaskOutput[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(output => output && typeof output === "object" && typeof output.text === "string"
+    && Number.isSafeInteger(output.attempt) && output.attempt > 0).slice(-20);
+}
+
+export function assistantAgentWaiting(task: AssistantTask) {
+  const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+  return task.status === "succeeded" && agent?.status === "waiting_approval" && !!(agent.pending_action_id || agent.pending_batch_id);
+}
+
+export function assistantAgentActionSettled(result: AssistantActionResult) {
+  return !result.replacement_approval && ["succeeded", "failed", "cancelled", "expired"].includes(result.status);
+}
+
+/** Resume consumes the durable server outcome; local text is never authority. */
+export async function resumeAssistantAgentTask(task: AssistantTask, request: typeof fetch = fetch, signal?: AbortSignal) {
+  return assistantTaskJson<{ task: AssistantTask }>(await request(`/api/assistant/tasks/${task.id}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, signal, body: JSON.stringify({ action: "resume", attempt: task.attempt }),
+  }));
+}
+
+/** Stop the current incarnation of this goal even if a resume won the race. */
+export async function cancelAssistantTaskCheckpoint(task: AssistantTask, request: typeof fetch = fetch, signal?: AbortSignal) {
+  let current = task;
+  for (let tries = 0; tries < 3; tries++) {
+    const result = await assistantTaskJson<{ task: AssistantTask }>(await request(`/api/assistant/tasks/${current.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, signal, body: JSON.stringify({ action: "cancel", attempt: current.attempt }),
+    }));
+    if (!assistantTaskActive(result.task) && !assistantAgentWaiting(result.task)) return result;
+    if (result.task.attempt === current.attempt) break;
+    current = result.task;
+  }
+  throw new Error("原任务暂未停止，请核对处理状态后重试。");
+}
+
+function checkpointHistory(message: AssistantConversationMessage): AssistantTaskOutput[] {
+  const previous = message.taskHistory || [];
+  const actionId = message.actionResult?.id || message.approval?.id;
+  if (previous.some(output => output.attempt === message.taskAttempt && (output.actionResult?.id || output.approval?.id) === actionId)) return previous;
+  const { text, replyView, ledgerContext, exportFile, actionPreview, actionResult, approval, eventContext, drafts, savedDrafts, status } = message;
+  return [...previous, { attempt: message.taskAttempt || 1, text, replyView, ledgerContext, exportFile, actionPreview, actionResult, drafts, savedDrafts, status,
+    // Pending approvals stay on the current checkpoint only. History is read-only.
+    ...(actionResult ? {} : approval ? { approval } : {}), eventContext }].slice(-20);
+}
+
 
 export function assistantImageProgressText(progress: AssistantImageProgress, status: AssistantTask["status"] | "recovering") {
   const completed = `已完成 ${progress.completed}/${progress.total} 张`;
   if (status === "recovering") return `上次进度：${completed}，正在恢复处理进度…`;
-  if (status === "failed" || status === "cancelled") return `${progress.failed.length ? `第 ${progress.failed.join("、")} 张识别失败；` : ""}${completed}${progress.completed > 0 ? "，结果已保留" : ""}`;
+  if (status === "failed" || status === "cancelled") {
+    if (progress.stage === "merging") return `已识别 ${progress.completed}/${progress.total} 张，但账目整理${status === "failed" ? "失败" : "已停止"}，尚未生成可确认的账单。`;
+    return `${progress.failed.length ? `第 ${progress.failed.join("、")} 张识别失败；` : ""}${completed}${progress.completed > 0 ? "，识别进度已保存，尚未生成可确认的账单" : ""}`;
+  }
   if (progress.stage === "merging") return `${completed}，正在整理账目…`;
   if (status === "queued") return `${completed}，等待继续识别…`;
   if (progress.active.length) return `${completed}，正在识别第 ${progress.active.join("、")} 张…`;
@@ -54,9 +189,47 @@ export function assistantMemberChoiceTarget(choice: AssistantDraftMemberChoice |
 
 const changed = "草稿状态已变化，本次未修改。请核对当前卡片后重试。";
 
+function draftRemovalTotals(drafts: EditableAssistantDraft[]) {
+  const totals = { income: 0, expense: 0 };
+  for (const draft of drafts) {
+    const cents = Math.round(Number(draft.amount) * 100);
+    if (!/^\d+(?:\.\d{1,2})?$/.test(draft.amount) || !Number.isSafeInteger(cents)) return "部分金额待核对，请以逐笔明细为准。";
+    totals[draft.type] += cents;
+  }
+  return `涉及收入 ¥${(totals.income / 100).toFixed(2)}，支出 ¥${(totals.expense / 100).toFixed(2)}。`;
+}
+
+/** Resolve the current persisted preview, never a stale click closure; consume it atomically. */
+export function approveAssistantDraftRemoval(messages: AssistantConversationMessage[], requestId: string, members: AssistantMember[]): AssistantConversationMessage[] {
+  const request = messages.find(message => message.id === requestId);
+  if (!request?.removeChoice) return messages;
+  const choice = request.removeChoice;
+  const target = messages.find(message => message.id === choice.batch_id);
+  try {
+    validateDraftRemoval(choice, target?.role === "assistant" && target.status === "pending" && !target.commit && target.drafts?.length
+      ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored) } : null);
+    const selected = target!.drafts!.filter(d => choice.draft_ids.includes(d.id));
+    if (JSON.stringify(selected) !== choice.snapshot) throw new Error("stale removal preview");
+    const remaining = target!.drafts!.filter(d => !choice.draft_ids.includes(d.id));
+    const unassigned = target!.memberFlow ? unassignedMemberDrafts(remaining, members) : [];
+    return messages.map(message => {
+      if (message.id === requestId) return { ...message, removeChoice: undefined, replyKind: "result",
+        text: `已删除 ${selected.length} 笔待确认草稿：${selected.map(d => `「${d.description || "未填写用途"}」`).join("、")}。${remaining.length ? `本组剩余 ${remaining.length} 笔，尚未入账。` : "本组已清空，未入账。"}` };
+      if (message.id === target!.id) return { ...message, drafts: remaining, error: undefined,
+        status: remaining.length ? "pending" : "deleted",
+        text: remaining.length ? unassigned.length ? memberBatchQuestionText(unassigned) : "请核对账目后确认入账。" : "这组草稿已删除，未入账。" };
+      if (message.memberChoice?.batch_id === target!.id && message.memberChoice.draft_ids.some(id => choice.draft_ids.includes(id))) return { ...message, memberChoice: undefined };
+      return message;
+    });
+  } catch {
+    return messages.map(message => message.id === requestId ? { ...message, removeChoice: undefined, replyKind: "result",
+      text: "草稿在确认期间已变化，本次未删除。请重新核对并发起删除。" } : message);
+  }
+}
+
 /** Pure, replay-safe recovery. Financial writes always remain explicit UI actions. */
 export function mergeAssistantTasks(
-  messages: AssistantConversationMessage[], tasks: AssistantTask[], conversationId: string, members: AssistantMember[],
+  messages: AssistantConversationMessage[], tasks: AssistantTask[], conversationId: string, members: AssistantMember[], categories: AssistantCategory[] = [],
 ): AssistantConversationMessage[] {
   let next = messages;
   for (const task of tasks) {
@@ -77,36 +250,124 @@ export function mergeAssistantTasks(
     // This flag is persisted on the stable reply, even when its drafts were moved
     // into a later member-selection card or removed by the user.
     const previousReply = next.find(message => message.id === task.id);
-    if (previousReply?.taskApplied) continue;
+    const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+    const approvalHistory = restoreAssistantApprovalHistory(task.approval_history);
+    const advanced = !!previousReply && task.attempt > (previousReply.taskAttempt || 1);
+    // A stop receipt belongs to the existing action card. Keep its identity even
+    // after executable approval controls are removed, including on fresh recovery.
+    if (agent?.status === "stopped" && (previousReply || task.result?.approval)) {
+      const approval = previousReply?.approval || task.result?.approval;
+      const actionId = previousReply?.actionResult?.id || approval?.id;
+      const receipt = approvalHistory.find(entry => entry.approval.id === actionId)?.result;
+      const stopped: AssistantConversationMessage = {
+        ...(previousReply || { id: task.id, role: "assistant", text: task.result?.reply || task.text, taskId: task.id }),
+        agent, approvalHistory, taskApplied: true, taskStatus: task.status, taskAttempt: task.attempt,
+        actionResult: receipt || previousReply?.actionResult,
+        actionPreview: previousReply?.actionPreview || approval?.preview,
+        process: assistantProcessFromTask(task), approval: undefined, error: undefined, incomplete: undefined,
+      };
+      if (previousReply) {
+        if (!sameTaskValue(previousReply, stopped)) next = next.map(message => message.id === task.id ? stopped : message);
+      } else {
+        const userIndex = next.findIndex(message => message.id === task.user_message_id);
+        next = [...next.slice(0, userIndex + 1), stopped, ...next.slice(userIndex + 1)];
+      }
+      continue;
+    }
+    if (previousReply?.taskApplied && !advanced) {
+      const rebound = agent?.status === "waiting_approval" && task.result?.approval?.id === agent.pending_action_id
+        && (previousReply.approval?.id || previousReply.actionResult?.id) !== agent.pending_action_id
+        && previousReply.agent?.pending_action_id !== agent.pending_action_id ? task.result?.approval : undefined;
+      if (rebound) {
+        const receipt = approvalHistory.find(entry => entry.approval.id === (previousReply.actionResult?.id || previousReply.approval?.id))?.result;
+        next = next.map(message => message.id === task.id ? { ...message, agent, approvalHistory,
+          taskHistory: checkpointHistory({ ...message, ...(receipt ? { actionResult: receipt } : {}) }), approval: rebound,
+          actionResult: undefined, actionPreview: rebound.preview, text: rebound.summary, error: undefined } : message);
+      }
+      if (agent && (!sameTaskValue(previousReply.agent, agent) || previousReply.taskStatus !== task.status || !sameTaskValue(previousReply.approvalHistory || [], approvalHistory))) next = next.map(message => message.id === task.id
+        ? { ...message, agent, ...(approvalHistory.length ? { approvalHistory } : {}), taskStatus: task.status, process: assistantProcessFromTask(task),
+          ...(agent.status === "stopped" ? { approval: undefined, error: undefined } : {}) } : message);
+      if (!previousReply.process || (previousReply.process.startedAt === undefined && Number.isFinite(Date.parse(task.created_at))) || (!previousReply.process.execution?.length && restoreAssistantExecution(task.execution_steps).length > 0)) next = next.map(message => message.id === task.id
+        ? { ...message, process: assistantProcessFromTask(task) } : message);
+      continue;
+    }
     if (assistantTaskActive(task)) {
-      if (previousReply) next = next.filter(message => message.id !== task.id);
+      if (previousReply && agent) {
+        const process = assistantProcessFromTask(task);
+        if (!sameTaskValue(previousReply.agent, agent) || previousReply.taskStatus !== task.status
+          || !sameTaskValue(previousReply.process, process) || !sameTaskValue(previousReply.approvalHistory || [], approvalHistory)
+          || previousReply.incomplete !== undefined || previousReply.error !== undefined) next = next.map(message => message.id === task.id
+          ? { ...message, agent, ...(approvalHistory.length ? { approvalHistory } : {}), taskStatus: task.status, process, incomplete: undefined, error: undefined } : message);
+      } else if (previousReply) next = next.filter(message => message.id !== task.id);
       continue;
     }
     let reply: AssistantConversationMessage = { id: task.id, role: "assistant", text: task.text,
-      taskId: task.id, taskAttempt: task.attempt, taskStatus: task.status, ...(imageProgress ? { image_progress: imageProgress } : {}) };
+      taskId: task.id, taskAttempt: task.attempt, taskStatus: task.status, process: assistantProcessFromTask(task), ...(imageProgress ? { image_progress: imageProgress } : {}) };
     if (task.status !== "succeeded" || !task.result) {
       reply = { ...reply, incomplete: task.status === "cancelled" ? "stopped" : "interrupted",
         error: task.error || (task.status === "cancelled" ? "已停止处理，可以重新识别。" : "处理未完成，请重试原请求。") };
       if (previousReply && previousReply.text === reply.text && previousReply.taskId === reply.taskId
         && previousReply.taskStatus === reply.taskStatus && previousReply.taskAttempt === reply.taskAttempt
         && previousReply.incomplete === reply.incomplete && previousReply.error === reply.error
+        && sameTaskValue(previousReply.process, reply.process)
         && sameTaskValue(previousReply.image_progress || null, reply.image_progress || null)) continue;
     } else {
       const result = task.result;
-      reply = { ...reply, text: result.reply, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
-      if (result.action === "undo") {
+      reply = { ...reply, text: result.reply, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
+      if (result.action === "manage" || result.action === "event") {
+        reply = { ...reply, eventContext: result.event_context, eventChoices: result.event_choices, approval: result.approval, actionPreview: result.approval?.preview, exportFile: result.export_file, ledgerContext: result.record_context, replyView: result.record_context ? recordReplyView(result.record_context.resource, result.record_context.rows, result.command, members, categories) : result.reply_view };
+      } else if (result.action === "edit") {
+        reply.replyKind = "result";
+        const edit = result.edit;
+        const target = next.find(message => message.id === edit?.batch_id);
+        if (!edit || !target || target.status !== "pending" || target.commit || !target.drafts?.length) reply.text = changed;
+        else try {
+          const drafts = applyDraftEdit(target.drafts, edit, categories, members);
+          next = next.map(message => message.id === target.id ? { ...message, drafts, error: undefined }
+            : message.memberChoice?.batch_id === target.id ? { ...message, memberChoice: undefined } : message);
+          reply.text = `已修改 ${edit.edits.length} 笔待确认草稿，请核对卡片；尚未入账。`;
+        } catch (error) { reply.text = error instanceof Error ? error.message : changed; }
+      } else if (result.action === "confirm") {
+        const target = next.find(message => message.id === result.confirm?.batch_id);
+        try {
+          const choice = validateDraftRemoval(result.confirm, target?.status === "pending" && !target.commit && target.drafts?.length
+            ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored) } : null);
+          const selected = target!.drafts!.filter(d => choice.draft_ids.includes(d.id));
+          reply.confirmChoice = { ...choice, snapshot: JSON.stringify(selected) };
+          reply.text = `准备将以下 ${selected.length} 笔草稿入账：\n${selected.map(d => `- ${d.description} · ${d.transaction_date} · ${d.type === "income" ? "收入" : "支出"} ¥${d.amount} · ${members.find(m => m.id === d.member_id)?.name || "未选成员"} · ${categories.find(c => c.id === d.category_id)?.name || "未选分类"}`).join("\n")}\n尚未入账。回复“确认执行”批准，或回复“取消”。`;
+        } catch { reply.text = changed; }
+      } else if (result.action === "navigate" && result.navigation) {
+        const nav = result.navigation;
+        if (nav.operation === "clear_chat") reply.clearChoice = true;
+        else if (nav.operation === "open") { reply.navigateTo = assistantPagePaths[nav.page]; reply.text = "已找到对应页面，可直接打开。"; }
+        else {
+          const target = next.find(message => message.id === nav.batch_id && message.status === "pending" && !message.commit);
+          if (!target || !nav.order) reply.text = changed;
+          else { reply.replyKind = "result"; next = next.map(message => message.id === target.id ? { ...message, draftSort: nav.order! } : message); reply.text = "已调整本组草稿的显示顺序。"; }
+        }
+      } else if (result.action === "undo") {
         const target = next.find(message => message.id === result.undo?.batch_id);
         try {
           const undo = validateAssistantUndo(result.undo, target?.status === "saved" && target.drafts?.length
             ? { batch_id: target.id, status: "saved", drafts: target.drafts } : null);
           reply = { ...reply, text: `已找到要撤销的 ${undo.draft_ids.length} 笔入账，请核对后确认撤销。`, undoChoice: undo };
         } catch { reply.text = "原账单状态已变化，请在交易记录中核对撤销结果。"; }
+      } else if (result.action === "remove") {
+        const target = next.find(message => message.id === result.remove?.batch_id);
+        try {
+          const removal = validateDraftRemoval(result.remove, target?.role === "assistant" && target.status === "pending" && !target.commit && target.drafts?.length
+            ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored) } : null);
+          const selected = target!.drafts!.filter(d => removal.draft_ids.includes(d.id));
+          reply.removeChoice = { ...removal, snapshot: JSON.stringify(selected) };
+          reply.text = `准备删除以下 ${selected.length} 笔待确认草稿：\n${selected.map(d => `- ${d.description || "未填写用途"} · ${d.transaction_date} · ${d.type === "income" ? "收入" : "支出"} ¥${d.amount}`).join("\n")}\n\n${draftRemovalTotals(selected)}\n\n确认后本组剩余 ${target!.drafts!.length - selected.length} 笔。尚未删除，也不会影响已入账记录。回复“确认删除”批准，或回复“取消”。`;
+        } catch { reply.text = "草稿状态已变化，本次未删除。请核对当前卡片后重试。"; }
       } else if (result.action === "update") {
+        reply.replyKind = "result";
         const update = result.update;
         const target = next.find(message => message.id === update?.batch_id);
         if (!update || !target || target.status !== "pending" || target.commit || !target.drafts?.length) reply.text = changed;
         else if (update.member_id === null) {
-          if (assistantMemberChoiceTarget(update, next)) reply.memberChoice = update;
+          if (assistantMemberChoiceTarget(update, next)) { reply.memberChoice = update; reply.replyKind = undefined; }
           else reply.text = changed;
         } else {
           try {
@@ -120,6 +381,17 @@ export function mergeAssistantTasks(
           drafts: result.drafts.map(draft => ({ ...draft, amount: (draft.amount_cents / 100).toFixed(2) })), status: "pending", memberFlow: true,
         };
       }
+    }
+    if (agent) { reply.agent = agent; if (approvalHistory.length) reply.approvalHistory = approvalHistory; }
+    if (previousReply && agent) {
+      reply.taskHistory = advanced ? checkpointHistory(previousReply) : previousReply.taskHistory;
+      if (agent.status === "completed" && previousReply.status === "saved" && previousReply.drafts?.length && !reply.drafts?.length) {
+        reply = { ...reply, drafts: previousReply.drafts, savedDrafts: previousReply.savedDrafts, status: "saved",
+          taskHistory: previousReply.taskHistory };
+      }
+      // A stopped goal preserves its settled card and has no automatic retry.
+      if (agent.status === "stopped") reply = { ...previousReply, agent, ...(approvalHistory.length ? { approvalHistory } : {}), taskStatus: task.status,
+        taskAttempt: task.attempt, process: assistantProcessFromTask(task), approval: undefined, error: undefined, incomplete: undefined };
     }
     const previousIndex = next.findIndex(message => message.id === task.id);
     if (previousIndex !== -1) next = next.map(message => message.id === task.id ? reply : message);
@@ -163,25 +435,39 @@ export function reconcileAssistantTaskSnapshots(current: AssistantTask[], receiv
   for (const task of received) {
     const previous = byId.get(task.id);
     if (previous) {
-      if (task.attempt < previous.attempt || (previous.status === "succeeded" && task.status !== "succeeded")) continue;
+      const previousAgent = restoreAssistantAgent(previous.agent || previous.result?.agent);
+      const receivedAgent = restoreAssistantAgent(task.agent || task.result?.agent);
+      const sameGoal = !!previousAgent && previousAgent.goal_id === receivedAgent?.goal_id;
+      const continuingGoal = sameGoal && previousAgent.status === "waiting_approval" && task.attempt > previous.attempt;
+      const stoppedGoal = sameGoal && receivedAgent?.status === "stopped" && task.status === "cancelled";
+      const retryingGoal = sameGoal && task.attempt > previous.attempt && ["cancelled", "failed"].includes(previous.status) && assistantTaskActive(task);
+      if (task.attempt < previous.attempt || (previous.status === "succeeded" && task.status !== "succeeded" && !continuingGoal && !stoppedGoal)
+        || (previousAgent?.status === "stopped" && sameGoal && receivedAgent?.status !== "stopped" && !retryingGoal)) continue;
       if (task.attempt === previous.attempt) {
         if (Date.parse(task.updated_at) < Date.parse(previous.updated_at)) continue;
         if (!assistantTaskActive(previous) && assistantTaskActive(task)) continue;
       }
     }
+    const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+    const approvalHistory = restoreAssistantApprovalHistory(task.approval_history);
+    const stableApprovalHistory = previous && sameTaskValue(previous.approval_history || [], approvalHistory) ? previous.approval_history : approvalHistory;
+    const stableAgent = previous && sameTaskValue(previous.agent, agent) ? previous.agent : agent;
     const input = task.input || previous?.input;
     const stableInput = previous && sameTaskValue(previous.input, input) ? previous.input : input;
     const result = previous && sameTaskValue(previous.result, task.result) ? previous.result : task.result;
+    const execution = restoreAssistantExecution(task.execution_steps);
+    const stableExecution = previous && sameTaskValue(previous.execution_steps || [], execution) ? previous.execution_steps : execution;
     const imageProgress = restoreAssistantImageProgress(task.image_progress);
     const stableProgress = previous && sameTaskValue(previous.image_progress || null, imageProgress) ? previous.image_progress : imageProgress;
     if (previous && previous.conversation_id === task.conversation_id && previous.user_message_id === task.user_message_id
       && previous.status === task.status && previous.phase === task.phase && previous.text === task.text
       && previous.error === task.error && previous.attempt === task.attempt && previous.created_at === task.created_at
-      && previous.updated_at === task.updated_at && previous.result === result && previous.input === stableInput
+      && previous.updated_at === task.updated_at && previous.result === result && previous.input === stableInput && previous.agent === stableAgent && sameTaskValue(previous.approval_history || [], stableApprovalHistory || [])
+      && sameTaskValue(previous.execution_steps || [], stableExecution || [])
       && sameTaskValue(previous.image_progress || null, stableProgress || null)) continue;
     // Heartbeats still advance updated_at so an older response cannot overwrite
     // newer progress, while the unchanged result/input retain their references.
-    byId.set(task.id, { ...task, result, ...(stableInput ? { input: stableInput } : {}),
+    byId.set(task.id, { ...task, result, ...(stableAgent ? { agent: stableAgent } : {}), ...(stableApprovalHistory?.length ? { approval_history: stableApprovalHistory } : {}), execution_steps: stableExecution, ...(stableInput ? { input: stableInput } : {}),
       ...(Object.hasOwn(task, "image_progress") || previous?.image_progress ? { image_progress: stableProgress || null } : {}) });
     changed = true;
   }

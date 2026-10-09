@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS assistant_tasks (
   run_token VARCHAR(36),
   image_progress JSONB,
   image_checkpoint JSONB,
+  execution_steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+  agent_checkpoint JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id,id)
@@ -34,4 +36,6 @@ CREATE INDEX IF NOT EXISTS assistant_tasks_conversation_idx ON assistant_tasks (
 ALTER TABLE assistant_tasks
   ADD COLUMN IF NOT EXISTS run_token VARCHAR(36),
   ADD COLUMN IF NOT EXISTS image_progress JSONB,
-  ADD COLUMN IF NOT EXISTS image_checkpoint JSONB;
+  ADD COLUMN IF NOT EXISTS image_checkpoint JSONB,
+  ADD COLUMN IF NOT EXISTS execution_steps JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS agent_checkpoint JSONB;

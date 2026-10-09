@@ -18,6 +18,7 @@ const response = (value, status = 200) => Response.json(value, { status });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 function nodes(tree) {
   if (!tree || typeof tree !== 'object') return [];
+  if (typeof tree?.type === 'function' && ['AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return [tree, ...nodes(tree.type(tree.props))];
   return Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
 }
 function text(tree) {
@@ -26,7 +27,7 @@ function text(tree) {
   if (tree?.props?.['aria-hidden'] === 'true' || tree?.props?.['aria-hidden'] === true) return '';
   // The page's pure member label is a real child component rather than an icon
   // fixture; render it so assertions still exercise the displayed member name.
-  if (typeof tree?.type === 'function' && tree.type.name === 'AssistantMemberLabel') return text(tree.type(tree.props));
+  if (typeof tree?.type === 'function' && ['AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberLabel', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantProcessingDetails', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return text(tree.type(tree.props));
   return typeof tree === 'object' ? text(tree.props?.children) : String(tree);
 }
 
@@ -89,7 +90,7 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
     },
     Image: FixtureImage, navigator: { mediaDevices: { getUserMedia() {} } }, AudioContext: class {}, AudioWorkletNode: class {},
     window: { localStorage: storage, addEventListener(name, fn) { listeners.set(name, fn); }, removeEventListener(name) { listeners.delete(name); } },
-    document: { visibilityState: "visible", addEventListener() {}, removeEventListener() {}, createElement(tag) {
+    document: { getElementById() { return null; }, visibilityState: "visible", addEventListener() {}, removeEventListener() {}, createElement(tag) {
       assert.equal(tag, 'canvas');
       const canvas = { width: 0, height: 0, picture: null,
         getContext(kind) { assert.equal(kind, '2d'); return { fillRect() {}, drawImage(picture) { canvas.picture = picture; } }; },
@@ -97,6 +98,7 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
       };
       return canvas;
     } },
+    requestAnimationFrame: callback => setTimeout(callback, 0), cancelAnimationFrame: clearTimeout,
     URLSearchParams, crypto, AbortController, AbortSignal, Error, DOMException, Response, ReadableStream, TextDecoder, TextEncoder, setInterval, clearInterval, queueMicrotask, setTimeout: (...args) => { const timer = setTimeout(...args); timer.unref(); return timer; }, clearTimeout,
     console: { error() {}, log() {} },
     fetch: async (url, options = {}) => {
@@ -162,6 +164,7 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
     }).outputText;
     vm.runInNewContext(source, { ...globals, exports, require(name) {
+      if (name === 'zod') return require('zod');
       if (name in modules) return modules[name];
       if (name.startsWith('@/components/') || name === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
       if (name.startsWith('@/lib/')) return modules[name] = load(`${name.slice(2)}.ts`);
@@ -175,6 +178,12 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
     modules['@/hooks/use-form-draft'] = { useFormDraft(next) { config = next; return useFormDraft(next); } };
   }
   modules['@/components/ui/draft-notice'] = load('components/ui/draft-notice.tsx');
+  modules['@/components/assistant/processing-details'] = load('components/assistant/processing-details.tsx');
+  modules['@/components/assistant/agent-task-status'] = load('components/assistant/agent-task-status.tsx');
+  modules['@/components/assistant/reply-primitives'] = load('components/assistant/reply-primitives.tsx');
+  modules['@/components/assistant/member-picker'] = load('components/assistant/member-picker.tsx');
+  modules['@/components/assistant/draft-card'] = load('components/assistant/draft-card.tsx');
+  modules['@/components/assistant/action-card'] = load('components/assistant/action-card.tsx');
   const Page = load('app/dashboard/assistant/page.tsx').default;
   const h = {
     calls, notices, revoked, taskStore, storage, feed, scrolls,
@@ -281,7 +290,7 @@ test('assistant UI sends image order once, displays merge results and waits for 
   assert.deepEqual(h.value.images, []);
   assert.deepEqual(h.value.messages[0].images, [a, b]);
   assert.equal(h.all(node => node.props?.['aria-label'] === '已发送的截图').length, 1);
-  assert.match(h.text, /已联合识别 2 张截图，衔接去重 1 笔，保留 2 笔/);
+  assert.match(h.text, /已识别截图2 张待核对账目2 笔整理结果衔接去重1 笔/);
   const before = h.value.messages.find(message => message.drafts)?.drafts;
   const chooser = h.control('选择记账成员');
   nodes(chooser).find(node => node.type === 'Button' && text(node) === member.name).props.onClick();
@@ -325,7 +334,7 @@ test('screenshot caveats and zero omission stay visible while choosing a member 
     h.click('发送'); await h.flush();
     assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
     if (mode !== 'member-specified') assert.match(h.text, /这 2 笔支出的支出人是谁/);
-    if (serverSkippedZero) assert.match(h.text, /已识别 1 张截图，跳过 1 行零金额，保留 2 笔/);
+    if (serverSkippedZero) assert.match(h.text, /已识别截图1 张待核对账目2 笔整理结果衔接去重0 笔跳过零金额1 行/);
     h.restore(h.value);
     assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
     if (mode !== 'member-specified') {
@@ -397,6 +406,24 @@ function clickTextButton(h, caption) {
   button.props.onClick(); h.render();
 }
 
+test('draft card totals follow edits and do not present invalid amounts as a confirmed total', async () => {
+  const h = await ready();
+  const expense = datedDraft(50, '2026-10-09');
+  const income = { ...datedDraft(51, '2026-10-09'), type: 'income', amount: '5000.00' };
+  h.restore({ messages: [draftGroup(95, [expense, income])], input: '' });
+  const card = () => h.find(node => node.type?.name === 'AssistantDraftCard');
+  assert.match(text(card()), /收入合计¥5000.00/);
+  assert.match(text(card()), /支出合计¥50.00/);
+  h.find(node => node.props?.id === `${expense.id}-amount`).props.onChange({ target: { value: '30.50' } }); h.render();
+  assert.match(text(card()), /支出合计¥30.50/);
+  h.find(node => node.props?.id === `${expense.id}-amount`).props.onChange({ target: { value: '30.501' } }); h.render();
+  assert.match(text(card()), /支出合计金额待核对/);
+  clickTextButton(h, '确认 2 笔'); await h.flush();
+  assert.equal(h.calls.filter(call => call.body).length, 0);
+  assert.equal(h.find(node => node.props?.id === `${expense.id}-amount`).props['aria-invalid'], true);
+  h.unmount();
+});
+
 test('draft date sort cycles stably, survives restore, and keeps group order after editing and deleting', async () => {
   const h = await ready();
   const drafts = [datedDraft(10, '2026-10-08'), datedDraft(11, '2026-10-01'), datedDraft(12, '2026-10-01'), datedDraft(13, '2026-10-03'), datedDraft(14, '')];
@@ -415,7 +442,7 @@ test('draft date sort cycles stably, survives restore, and keeps group order aft
   sortGroup(h);
   h.find(node => node.props?.id === `${uuid(11)}-date`).props.onChange({ target: { value: '2026-10-09' } }); h.render();
   assert.deepEqual(visibleDraftNames(h), ['交易12', '交易13', '交易10', '交易11', '交易14']);
-  const container = h.find(node => node.type === 'div' && node.props.className === 'relative border-b border-border'
+  const container = h.find(node => node.type === 'div' && node.props['aria-label'] === '账目：交易12'
     && nodes(node).some(child => child.props?.id === `${uuid(12)}-date`));
   nodes(container).find(node => node.props?.['aria-label'] === '删除这笔草稿').props.onClick(); h.render();
   sortGroup(h); sortGroup(h);
@@ -804,10 +831,10 @@ test('assistant UI displays incremental task text before completion and applies 
   h.click('发送'); await h.flush();
   assert.equal(h.value.messages.length, 1);
   h.patchTask({ phase: 'query', text: '可以先' }); await h.poll();
-  assert.equal(text(h.find(node => node.props?.['data-streaming-reply'])), '可以先');
+  assert.equal(text(nodes(h.find(node => node.props?.['data-streaming-reply'])).find(node => node.type === 'Markdown')), '可以先');
   assert.equal(h.value.messages.length, 1, 'Provisional text is not persisted as a completed message');
   h.patchTask({ text: '可以先描述一笔收支。' }); await h.poll();
-  assert.equal(text(h.find(node => node.props?.['data-streaming-reply'])), '可以先描述一笔收支。');
+  assert.equal(text(nodes(h.find(node => node.props?.['data-streaming-reply'])).find(node => node.type === 'Markdown')), '可以先描述一笔收支。');
   assert.equal(h.control('停止生成').props.disabled, undefined);
   h.patchTask({ status: 'succeeded', result: chat('描述收支后，请核对草稿再确认。') }); await h.poll();
   assert.equal(h.all(node => node.props?.['data-streaming-reply']).length, 0);
@@ -893,12 +920,14 @@ test('image task UI displays real progress, retains completed images on retry an
     h.restore({ messages: [], input: '识别这些账单', images: Array.from({ length: 5 }, (_, index) => image(`截图${index + 1}`)) });
     h.click('发送'); await h.flush();
     h.patchTask({ image_progress: progress() }); await h.poll();
-    assert.match(text(h.find(node => node.props?.['data-reply-status'] !== undefined)), /已完成 0\/5 张，正在识别第 1、2 张/);
+    const panel = h.find(node => node.type?.name === 'AssistantProcessingDetails');
+    assert.equal(panel.type(panel.props).props.open, undefined, 'Processing details start collapsed');
+    assert.match(text(panel), /已完成 0\/5 张 · 正在识别第 1、2 张/);
     h.patchTask({ image_progress: progress({ completed: 2, active: [3, 4] }) }); await h.poll();
-    assert.match(h.text, /已完成 2\/5 张，正在识别第 3、4 张/);
+    assert.match(h.text, /已完成 2\/5 张 · 正在识别第 3、4 张/);
     assert.equal(h.value.messages.some(message => message.drafts?.length), false);
     h.patchTask({ status: 'failed', error: '识别超时，请重试。', image_progress: progress({ completed: 4, active: [], failed: [3] }) }); await h.poll();
-    assert.match(h.text, /第 3 张识别失败；已完成 4\/5 张，结果已保留/);
+    assert.match(h.text, /第 3 张识别失败；已完成 4\/5 张，识别进度已保存，尚未生成可确认的账单/);
     assert.equal(h.value.messages.at(-1).drafts, undefined);
     h.restore(h.value);
     clickTextButton(h, '继续识别'); await h.flush();
@@ -906,9 +935,10 @@ test('image task UI displays real progress, retains completed images on retry an
     assert.equal(retry.body.attempt, 1);
     assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 1, 'Retry uses the accepted task without another image upload');
     h.patchTask({ image_progress: progress({ completed: 4, active: [3] }) }); await h.poll();
-    assert.match(h.text, /已完成 4\/5 张，正在识别第 3 张/);
+    assert.match(h.text, /已完成 4\/5 张 · 正在识别第 3 张/);
     h.patchTask({ image_progress: progress({ completed: 5, active: [], stage: 'merging' }) }); await h.poll();
-    assert.match(h.text, /已完成 5\/5 张，正在整理账目/);
+    assert.match(h.text, /已完成 5\/5 张/);
+    assert.match(h.text, /整理识别结果进行中/);
     assert.equal(h.value.messages.some(message => message.drafts?.length), false, 'Recognized image results alone never become confirmable cards');
     h.patchTask({ status: 'succeeded', result: { ...record, drafts: [row(130, 1200, member.id)], import_summary: { ...summary, image_count: 5 } } }); await h.poll();
     assert.deepEqual(visibleDraftNames(h), ['交易130']);
@@ -924,7 +954,7 @@ test('image task progress survives refresh and invalid remote counts never appea
   h.restore({ messages: [], input: '识别三张', images: [image('一'), image('二'), image('三')] });
   h.click('发送'); await h.flush();
   h.patchTask({ status: 'queued', image_progress: { total: 3, completed: 2, failed: [], active: [], stage: 'recognizing' } }); await h.poll();
-  assert.match(h.text, /已完成 2\/3 张，等待继续识别/);
+  assert.match(h.text, /等待处理… · 2\/3 张/);
   const stored = h.value;
   h.unmount();
   const restored = await ready({ taskStore });
@@ -934,7 +964,7 @@ test('image task progress survives refresh and invalid remote counts never appea
     assert.equal(restored.calls.filter(call => call.options.method === 'POST').length, 0);
     restored.patchTask({ status: 'running', image_progress: { total: 3, completed: 99, active: [], failed: [], stage: 'merging' } }); await restored.poll();
     assert.doesNotMatch(restored.text, /99\/3|正在整理账目/);
-    assert.match(restored.text, /正在识别截图/);
+    assert.match(restored.text, /截图识别…/);
     assert.equal(restored.value.messages[0].image_progress, null);
     restored.patchTask({ status: 'failed', error: '结果整理未完成。', image_progress: { total: 3, completed: 3, active: [], failed: [], stage: 'merging' } }); await restored.poll();
     assert.ok(restored.all(node => node.type === 'Button').some(node => text(node) === '重新整理结果'));
@@ -1137,4 +1167,553 @@ test('real draft hook acknowledges clear normalization and accepts the next mess
     assert.equal(savedConversation(storage).messages.length, 2);
     assert.equal(h.notices.some(notice => /本机对话无法保存|释放浏览器存储|空间不足/.test(notice.value)), false);
   } finally { h.unmount(); }
+});
+
+test('conversational approval executes a saved-data preview only after an explicit yes and cancels without writing', async () => {
+  const approval = { id: uuid(70), summary: '将删除 1 条记录：早餐。尚未执行。回复确认执行或取消。', count: 1, expires_at: '2099-10-09T00:00:00Z' };
+  for (const decision of ['确认执行', '取消']) {
+    const h = await ready({ post: async (url, body) => url.startsWith('/api/assistant/actions/')
+      ? response({ id: approval.id, status: body.decision === 'approve' ? 'succeeded' : 'cancelled', text: body.decision === 'approve' ? '已删除 1 条收支记录。' : '已取消本次操作。' })
+      : response({ action: 'manage', reply: approval.summary, drafts: [], query: null, approval }) });
+    h.control('记一笔，或问问账本').props.onChange({ target: { value: '删除已入账早餐' } }); h.render(); h.click('发送'); await h.flush();
+    assert.ok(h.text.includes('尚未执行'));
+    assert.equal(h.calls.filter(c => c.url.startsWith('/api/assistant/actions/')).length, 0);
+    h.control('记一笔，或问问账本').props.onChange({ target: { value: decision } }); h.render(); h.click('发送'); await h.flush();
+    const requests = h.calls.filter(c => c.url.startsWith('/api/assistant/actions/'));
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].body.decision, decision === '取消' ? 'cancel' : 'approve');
+    assert.equal(h.value.messages.some(m => m.approval), false);
+    assert.equal(h.value.messages.at(-1).localHandled, true);
+    const restored = h.restore(h.value);
+    assert.equal(restored.messages.at(-1).incomplete, undefined, 'approved and cancelled replies do not become unsent messages after refresh');
+  }
+});
+
+test('a conversational draft confirmation posts only the reviewed subset and preserves unselected rows', async () => {
+  const drafts = [datedDraft(101, '2026-10-09', member.id), datedDraft(102, '2026-10-08', member.id)];
+  const batch = draftGroup(60, drafts);
+  const h = await ready({ post: async (url, body) => url === '/api/assistant/confirm'
+    ? response({ count: body.drafts.length, transaction_ids: [uuid(99)] })
+    : response({ action: 'confirm', reply: '', drafts: [], query: null, confirm: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
+  h.restore({ messages: [batch], input: '', images: [] });
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '只把第一笔入账' } }); h.render(); h.click('发送'); await h.flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm').length, 0);
+  assert.ok(h.text.includes('准备将以下 1 笔草稿入账'));
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '确认执行' } }); h.render(); h.click('发送'); await h.flush();
+  const posts = h.calls.filter(c => c.url === '/api/assistant/confirm');
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].body.drafts.map(d => d.id), [drafts[0].id]);
+  assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts.map(d => d.id), [drafts[1].id]);
+  assert.ok(h.value.messages.some(m => m.status === 'saved' && m.drafts[0].id === drafts[0].id));
+  assert.ok(h.value.messages.some(m => m.role === 'user' && m.text === '确认执行' && m.localHandled));
+});
+
+test('changing a draft after preview invalidates conversational approval; no posting occurs', async () => {
+  const drafts = [datedDraft(101, '2026-10-09', member.id)];
+  const batch = draftGroup(60, drafts);
+  const h = await ready({ post: async () => response({ action: 'confirm', reply: '', drafts: [], query: null, confirm: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
+  h.restore({ messages: [batch], input: '', images: [] });
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '把这笔入账' } }); h.render(); h.click('发送'); await h.flush();
+  const snapshot = h.value;
+  snapshot.messages.find(m => m.id === batch.id).drafts[0].amount = '99.00';
+  h.restore(snapshot);
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '确认执行' } }); h.render(); h.click('发送'); await h.flush();
+  assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm').length, 0);
+  assert.ok(h.text.includes('草稿在确认期间已变化'));
+});
+
+test('event choices preserve context, a single approval completes both ledgers, and refresh keeps the saved event for correction', async () => {
+  const eventInput = require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event').validateLedgerEvent({ operation:'create',kind:'loan_lent',counterparty:'小王',amount_cents:50000,date:'2026-10-09' });
+  const choice = { label:'本人', input:{...eventInput,member_id:member.id} };
+  const approval = { id:uuid(710),summary:'准备记录借出500元；台账与流水一起保存。\n尚未执行。',count:1,expires_at:'2099-10-09T00:00:00Z' };
+  const storage=memoryStorage(),taskStore=new Map();
+  const options={ realDraft:true, storage, taskStore, post:async(url,body)=>{
+    if(url.startsWith('/api/assistant/actions/')) return response({id:approval.id,status:'succeeded',text:'台账、流水与关联已一起保存。',event_context:{status:'saved',event_id:uuid(711),input:{...choice.input,event_id:uuid(711)}}});
+    if(body.event_selection) return response({action:'event',event:body.event_selection,reply:approval.summary,drafts:[],query:null,approval,event_context:{status:'pending',event_id:null,input:body.event_selection},event_choices:[]});
+    return response({action:'event',event:eventInput,reply:'归属哪个成员？',drafts:[],query:null,event_context:{status:'pending',event_id:null,input:eventInput},event_choices:[choice]});
+  }};
+  const h=await ready(options);
+  writeComposer(h,'借给小王500元');h.click('发送');await settleDraft(h);
+  clickTextButton(h,'本人');await settleDraft(h);
+  const selected=h.calls.filter(c=>c.url==='/api/assistant/tasks').at(-1).body;
+  assert.equal(selected.event_selection.member_id,member.id);
+  assert.equal(selected.event_context.input.amount_cents,50000);
+  assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,0);
+  writeComposer(h,'确认执行');h.click('发送');await settleDraft(h);
+  assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,1);
+  assert.equal(h.value.messages.find(m=>m.eventContext?.status==='saved').eventContext.event_id,uuid(711));
+  h.unmount();
+  const restored=await ready(options);
+  assert.equal(restored.calls.filter(c=>c.options.method==='POST').length,0,'refresh must not replay approval');
+  writeComposer(restored,'刚才金额错了，改成300');restored.click('发送');await settleDraft(restored);
+  const sent=restored.calls.find(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').body;
+  assert.equal(sent.event_context.event_id,uuid(711));
+  assert.equal(sent.event_context.status,'saved');
+  restored.unmount();
+});
+
+test('saved correction syncs only the original saved card after approval and preserves its immutable undo snapshot', async () => {
+  const original = datedDraft(965, '2026-10-09'); original.amount = '20.00'; original.amount_cents = 2000;
+  const other = datedDraft(966, '2026-10-09');
+  const preview = { title: '修改已入账账目', approveLabel: '确认修改', metrics: [], sections: [], notices: [] };
+  const approval = { id: uuid(967), summary: '金额：20 → 22', preview, count: 1, expires_at: null };
+  const wait = deferred();
+  const h = await ready({ post: async () => wait.promise });
+  try {
+    h.restore({ messages: [draftGroup(968, [original], { status: 'saved', savedDrafts: [original] }), draftGroup(969, [other], { status: 'saved' }),
+      { id: uuid(970), role: 'assistant', text: approval.summary, approval }], input: '' });
+    clickTextButton(h, '确认修改'); await h.flush();
+    assert.equal(h.value.messages[0].drafts[0].amount, '20.00');
+    wait.resolve(response({ id: approval.id, status: 'succeeded', text: '已修改', transaction_updates: [{ batch_id: uuid(968), draft_id: original.id, transaction_id: uuid(971),
+      type: 'expense', amount_cents: 2200, category_id: category.id, member_id: member.id, transaction_date: '2026-10-09', description: original.description }] }));
+    await h.flush();
+    assert.equal(h.value.messages[0].drafts[0].amount, '22.00');
+    assert.equal(h.value.messages[0].savedDrafts[0].amount_cents, 2000);
+    assert.equal(h.value.messages[1].drafts[0].amount, other.amount);
+    h.restore(h.value);
+    assert.equal(h.value.messages[0].drafts[0].amount, '22.00');
+    assert.equal(h.calls.filter(call => call.body).length, 1);
+  } finally { h.unmount(); }
+});
+
+test('stale saved correction replaces the approval with a fresh preview and requires a new click after restore', async () => {
+  const preview = value => ({ title: '修改已入账账目', approveLabel: '确认修改', metrics: [], sections: [{ title: '金额', rows: [{ label: '金额', value }] }], notices: [] });
+  const approval = { id: uuid(973), summary: '20 → 22', preview: preview('20 → 22'), count: 1, expires_at: null };
+  const replacement = { ...approval, id: uuid(974), summary: '21 → 22', preview: preview('21 → 22') };
+  const h = await ready({ post: async url => response(url.endsWith(approval.id)
+    ? { id: approval.id, status: 'failed', text: '原记录已变化，请重新核对。', replacement_approval: replacement }
+    : { id: replacement.id, status: 'succeeded', text: '已修改。' }) });
+  try {
+    h.restore({ messages: [{ id: uuid(975), role: 'assistant', text: approval.summary, approval }], input: '' });
+    clickTextButton(h, '确认修改'); await h.flush();
+    assert.equal(h.value.messages[0].approval.id, replacement.id);
+    assert.equal(h.value.messages[0].actionResult.status, 'pending');
+    assert.ok(h.text.includes('21 → 22'));
+    h.restore(h.value); await h.flush();
+    assert.equal(h.calls.filter(call => call.body).length, 1);
+    clickTextButton(h, '确认修改'); await h.flush();
+    const writes = h.calls.filter(call => call.body);
+    assert.equal(writes.length, 2);
+    assert.ok(writes[1].url.endsWith(replacement.id));
+    assert.equal(h.value.messages[0].approval, undefined);
+  } finally { h.unmount(); }
+});
+
+test('ordinary acknowledgement after a summary or completed operation stays chat; pending approval still accepts it', async () => {
+  const approval = { id: uuid(961), summary: '将新增 1 条便利贴', count: 1, expires_at: null };
+  for (const status of ['none', 'succeeded', 'cancelled', 'pending']) {
+    const h = await ready({ post: async (url, body) => {
+      if (status === 'pending') {
+        assert.equal(url, `/api/assistant/actions/${approval.id}`);
+        assert.equal(body.decision, 'approve');
+        return response({ id: approval.id, status: 'succeeded', text: '已创建便利贴。' });
+      }
+      assert.equal(url, '/api/assistant/tasks');
+      assert.equal(body.message, '好的');
+      return response(chat('好的，有需要随时告诉我。'));
+    } });
+    try {
+      const previous = { id: uuid(962), role: 'assistant', text: '这些便利贴包括汽车保养安排和心情记录。' };
+      if (status === 'pending') previous.approval = approval;
+      else if (status !== 'none') previous.actionResult = { id: approval.id, status, text: '此前操作已结束。' };
+      h.restore({ messages: [previous], input: '' });
+      writeComposer(h, '好的'); h.click('发送'); await h.flush();
+      assert.equal(h.calls.filter(call => call.body).length, 1);
+      assert.equal(h.text.includes('当前没有待批准的操作'), false);
+      assert.ok(h.text.includes(status === 'pending' ? '已创建便利贴' : '有需要随时告诉我'));
+      assert.equal(h.calls.filter(call => call.url.startsWith('/api/assistant/actions/')).length, status === 'pending' ? 1 : 0);
+    } finally { h.unmount(); }
+  }
+});
+
+test('conversational draft removal requires explicit approval; cancellation and unrelated queries never delete', async () => {
+  for (const decision of ['确认删除', 'button', '取消', '查本月支出']) {
+    const drafts = [datedDraft(101, '2026-10-09', null), datedDraft(102, '2026-10-08', member.id)];
+    const batch = draftGroup(60, drafts);
+    const h = await ready({ post: async (_url, body) => response(body.message === '查本月支出' ? chat('查询结果')
+      : { action: 'remove', reply: '正在处理', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
+    try {
+      h.restore({ messages: [batch], input: '', images: [] });
+      writeComposer(h, '删除第一笔'); h.click('发送'); await h.flush();
+      assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts, drafts);
+      assert.ok(h.text.includes('删除 1 笔待确认草稿'));
+      assert.ok(h.text.includes('尚未删除'));
+      assert.ok(h.value.messages.some(m => m.removeChoice));
+      if (decision === 'button') clickTextButton(h, '确认执行');
+      else { writeComposer(h, decision); h.click('发送'); }
+      await h.flush();
+      const approved = decision === '确认删除' || decision === 'button';
+      assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts, approved ? [drafts[1]] : drafts);
+      assert.equal(h.value.messages.some(m => m.removeChoice), decision === '查本月支出');
+      assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm' || c.url.startsWith('/api/assistant/actions/')).length, 0);
+      if (approved) assert.ok(h.text.includes('已删除 1 笔待确认草稿'));
+      writeComposer(h, '确认删除'); h.click('发送'); await h.flush();
+      if (decision === '查本月支出') assert.ok(h.text.includes('已删除 1 笔待确认草稿'));
+      else assert.ok(h.text.includes('当前没有待批准的操作'));
+      assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts, approved || decision === '查本月支出' ? [drafts[1]] : drafts);
+    } finally { h.unmount(); }
+  }
+});
+
+test('editing a reviewed draft invalidates the whole deletion when approval is submitted', async () => {
+  const drafts = [datedDraft(101, '2026-10-09'), datedDraft(102, '2026-10-08')];
+  const batch = draftGroup(60, drafts);
+  const h = await ready({ post: async () => response({ action: 'remove', reply: '', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: drafts.map(d => d.id) } }) });
+  try {
+    h.restore({ messages: [batch], input: '', images: [] });
+    writeComposer(h, '这组全部删除'); h.click('发送'); await h.flush();
+    const changed = h.value;
+    changed.messages.find(m => m.id === batch.id).drafts[0].amount = '99.00';
+    h.restore(changed);
+    writeComposer(h, '确认删除'); h.click('发送'); await h.flush();
+    assert.equal(h.value.messages.find(m => m.id === batch.id).drafts.length, 2);
+    assert.ok(h.text.includes('草稿在确认期间已变化，本次未删除'));
+    assert.equal(h.value.messages.some(m => m.removeChoice), false);
+  } finally { h.unmount(); }
+});
+
+test('draft deletion preview survives refresh without execution and an approved deletion never replays', async () => {
+  const storage = memoryStorage(), taskStore = new Map();
+  const drafts = [datedDraft(101, '2026-10-09')];
+  const batch = draftGroup(60, drafts);
+  const options = { realDraft: true, storage, taskStore, post: async () => response({ action: 'remove', reply: '', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) };
+  const first = await ready(options);
+  first.restore({ messages: [batch], input: '', images: [] }); await settleDraft(first);
+  writeComposer(first, '删除这组'); first.click('发送'); await settleDraft(first);
+  assert.ok(first.value.messages.some(m => m.removeChoice));
+  first.unmount();
+  const restored = await ready(options);
+  assert.equal(restored.value.messages.find(m => m.id === batch.id).drafts.length, 1);
+  assert.ok(restored.value.messages.some(m => m.removeChoice));
+  assert.equal(restored.calls.filter(c => c.options.method === 'POST').length, 0);
+  writeComposer(restored, '确认删除'); restored.click('发送'); await settleDraft(restored);
+  assert.equal(restored.value.messages.find(m => m.id === batch.id).status, 'deleted');
+  assert.equal(restored.value.messages.some(m => m.removeChoice), false);
+  restored.unmount();
+  const final = await ready(options);
+  assert.equal(final.value.messages.find(m => m.id === batch.id).drafts.length, 0);
+  assert.equal(final.value.messages.some(m => m.removeChoice), false);
+  assert.equal(final.calls.filter(c => c.options.method === 'POST').length, 0);
+  final.unmount();
+});
+
+test('restored event member choices reuse the draft member card, actual payment and avatars, preserving mixed gift context', async () => {
+  const { validateLedgerEvent } = require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+  const input = validateLedgerEvent({operation:'create',kind:'gift_given',counterparty:'大伯',amount_cents:50000,transaction_amount_cents:60000,payment_recipient:'妈',occasion:'生日',items:[{item_name:'泡子',quantity:1,unit:'封',estimated_value:50}],date:'2026-10-09'});
+  const original = {id:uuid(870),role:'assistant',text:'这笔资金流水归属哪个成员？',eventContext:{status:'pending',event_id:null,input},eventChoices:[{label:member.name,input:{...input,member_id:member.id}}]};
+  const h = await ready({ post:async(_url,body)=>response({action:'event',reply:'已补充成员，请核对后确认。',drafts:[],query:null,event_context:{status:'pending',event_id:null,input:body.event_selection},event_choices:[]}) });
+  try {
+    h.restore({messages:[original],input:'',images:[]});
+    const picker=h.control('选择记账成员');
+    assert.ok(text(picker).includes('送礼 · 大伯'));
+    assert.ok(text(picker).includes('600.00'));
+    assert.equal(h.all(n=>n.props?.['aria-label']==='补充事项信息').length,0);
+    const option=nodes(picker).find(n=>n.type==='Button'&&text(n)===member.name);
+    assert.ok(option.props.className.includes('min-h-11'));
+    const label=option.props.children;
+    assert.ok(nodes(label.type(label.props)).some(n=>n.type==='MemberAvatar'&&n.props.memberId===member.id));
+    option.props.onClick(); h.render(); await h.flush();
+    const sent=h.calls.find(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').body;
+    assert.deepEqual(sent.event_selection,{...input,member_id:member.id});
+    assert.equal(sent.message,`支出人是「${member.name}」`);
+    assert.equal(h.value.messages.some(m=>m.eventChoices?.length),false);
+    assert.equal(h.calls.some(c=>c.url==='/api/assistant/confirm'||c.url.startsWith('/api/assistant/actions/')),false,'choosing a member never approves saving');
+  } finally {h.unmount();}
+});
+
+test('non-member event choices remain ordinary options even when their input already contains a member',async()=>{
+  const {validateLedgerEvent}=require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+  const input=validateLedgerEvent({operation:'create',kind:'loan_lent',counterparty:'小王',amount_cents:50000,date:'2026-10-09',member_id:member.id});
+  const h=await ready();
+  try {
+    h.restore({messages:[{id:uuid(871),role:'assistant',text:'关联已有流水？',eventContext:{status:'pending',event_id:null,input},eventChoices:[{label:'新建一笔流水',input:{...input,cashflow:'new'}}]}],input:''});
+    assert.equal(h.all(n=>n.props?.['aria-label']==='选择记账成员').length,0);
+    assert.ok(text(h.control('补充事项信息')).includes('新建一笔流水'));
+  } finally {h.unmount();}
+});
+
+test('note creation shortcut survives restore and approves the reviewed operation once with busy feedback', async () => {
+  const preview = { title: '创建便利贴', approveLabel: '创建便利贴', metrics: [], sections: [{ title: '便利贴内容', rows: [{ label: '内容', value: '2026-10-10：送车去保养' }] }], notices: [{ text: '不会定时提醒', tone: 'info' }] };
+  const approval = { id: uuid(879), summary: '将新增 1 条便利贴', preview, count: 1, expires_at: null };
+  const wait = deferred();
+  const h = await ready({ post: async (url, body) => {
+    assert.equal(url, `/api/assistant/actions/${approval.id}`);
+    assert.equal(body.decision, 'approve');
+    return wait.promise;
+  } });
+  try {
+    h.restore({ messages: [{ id: uuid(878), role: 'assistant', text: approval.summary, approval }], input: '' });
+    h.restore(h.value);
+    assert.equal(h.calls.filter(call => call.body).length, 0);
+    assert.ok(h.text.includes('2026-10-10：送车去保养'));
+    assert.ok(h.text.includes('不会定时提醒'));
+    clickTextButton(h, '创建便利贴');
+    const loading = h.find(node => node.type === 'Button' && text(node) === '正在执行…');
+    assert.equal(loading.props.disabled, true);
+    assert.equal(loading.props['aria-busy'], true);
+    await h.flush();
+    assert.equal(h.calls.filter(call => call.body).length, 1);
+    wait.resolve(response({ id: approval.id, status: 'succeeded', text: '已新增 1 条便利贴。', preview }));
+    await h.flush();
+    assert.ok(h.text.includes('已新增 1 条便利贴'));
+    assert.equal(h.all(node => node.type === 'Button' && text(node) === '创建便利贴').length, 0);
+  } finally { h.unmount(); }
+});
+
+test('approval, cancellation and status checks show distinct busy feedback immediately and reject duplicate clicks', async () => {
+  for (const [label, progress, status] of [['确认执行','正在执行…','succeeded'],['取消','正在取消…','cancelled'],['核对执行状态','正在核对…','pending']]) {
+    const wait=deferred(), approval={id:uuid(881),summary:'将修改 1 条记录：\n- 早餐：18 → 20\n尚未执行。',count:1,expires_at:null};
+    const h=await ready({post:async()=>wait.promise});
+    try {
+      h.restore({messages:[{id:uuid(880),role:'assistant',text:approval.summary,approval}],input:''});
+      const original=h.all(n=>n.type==='Button'&&text(n)===label)[0]; assert.ok(original);
+      original.props.onClick(); h.render();
+      const current=h.all(n=>n.type==='Button'&&text(n)===progress)[0]; assert.ok(current,progress);
+      assert.equal(current.props.disabled,true); assert.equal(current.props['aria-busy'],true);
+      assert.ok(nodes(current).some(n=>n.type==='Loader2'&&n.props.className.includes('animate-spin')));
+      assert.equal(h.control('记一笔，或问问账本').props.disabled,true);
+      original.props.onClick(); await h.flush();
+      assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,1);
+      wait.resolve(response({id:approval.id,status,text:status==='pending'?'仍未执行':status==='cancelled'?'已取消本次操作':'已完成修改'})); await h.flush();
+      assert.equal(h.all(n=>n.type==='Button'&&n.props['aria-busy']).length,0);
+      assert.ok(h.text.includes(status==='pending'?'尚未执行，等待你的确认':status==='cancelled'?'已取消本次操作':'已完成修改'));
+      assert.equal(h.control('记一笔，或问问账本').props.disabled,false);
+    } finally {h.unmount();}
+  }
+});
+
+test('failed approval retains its card and retry controls, clearing stale errors when checking status', async()=>{
+  const approval={id:uuid(891),summary:'将修改 1 条记录：\n- 早餐：20\n尚未执行。确认有效期为 15 分钟。',count:1,expires_at:'2000-01-01'};
+  let attempt=0;const next=deferred();
+  const h=await ready({post:async()=>++attempt===1?Promise.reject(new Error('连接断开，结果待核对')):next.promise});
+  try {
+    h.restore({messages:[{id:uuid(890),role:'assistant',text:approval.summary,approval}],input:''});
+    assert.equal(h.text.includes('15 分钟'),false);
+    clickTextButton(h,'确认执行');await h.flush();
+    assert.ok(h.text.includes('连接断开，结果待核对')); assert.ok(h.value.messages[0].approval);
+    clickTextButton(h,'核对执行状态');h.render();
+    assert.equal(h.text.includes('连接断开，结果待核对'),false);assert.ok(h.text.includes('正在核对…'));
+    next.resolve(response({id:approval.id,status:'succeeded',text:'已完成修改'}));await h.flush();
+    assert.equal(h.value.messages[0].approval,undefined);assert.ok(h.text.includes('已完成修改'));
+    assert.equal(h.all(n=>n.props?.['aria-label']==='操作确认卡片').length,1);
+  } finally {h.unmount();}
+});
+
+test('a new meal draft preserves the pending gift approval through restore and only its button executes it', async () => {
+  const preview={title:'记录送礼',metrics:[],sections:[],notices:[]};
+  const approval={id:uuid(901),summary:'准备记录给大伯送礼',count:1,expires_at:null,preview};
+  const h=await ready({post:async url=>url.startsWith('/api/assistant/actions/')
+    ? response({id:approval.id,status:'succeeded',text:'送礼已保存'}) : response({...record,drafts:[{...row(903,2000,member.id),description:'吃饭'}],import_summary:null})});
+  try {
+    h.restore({messages:[{id:uuid(902),role:'assistant',text:approval.summary,approval,actionPreview:preview}],input:''});
+    writeComposer(h,'今天吃饭花了20');h.click('发送');await h.flush();
+    const old=h.value.messages.find(m=>m.id===uuid(902));
+    assert.equal(old.approval.id,approval.id);assert.equal(old.actionResult,undefined);
+    assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,0);
+    assert.ok(h.value.messages.some(m=>m.status==='pending'&&m.drafts?.[0].description==='吃饭'));
+    h.restore(h.value);
+    assert.equal(h.text.includes('由新请求替代'),false);
+    assert.equal(h.all(n=>n.type==='Button'&&text(n)==='确认执行').length,1);
+    for(const decision of ['确认','确认入账','取消']) {
+      writeComposer(h,decision);h.click('发送');await h.flush();
+      assert.ok(h.text.includes('当前有多个待处理方案或账单'));
+      assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')||c.url==='/api/assistant/confirm').length,0);
+      assert.equal(h.calls.filter(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').length,1);
+      assert.equal(h.value.messages.find(m=>m.id===uuid(902)).approval.id,approval.id);
+    }
+    clickTextButton(h,'确认执行');await h.flush();
+    const actions=h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/'));
+    assert.equal(actions.length,1);assert.equal(actions[0].url,`/api/assistant/actions/${approval.id}`);
+    assert.equal(actions[0].body.decision,'approve');
+    assert.ok(h.value.messages.some(m=>m.status==='pending'&&m.drafts?.[0].description==='吃饭'));
+  } finally {h.unmount();}
+});
+
+test('multiple pending approvals survive new requests and cancelling one card preserves the other', async () => {
+  const gift={id:uuid(910),summary:'准备记录送礼',count:1,expires_at:null};
+  const note={id:uuid(911),summary:'准备创建便利贴',count:1,expires_at:null};
+  const h=await ready({post:async url=>url.startsWith('/api/assistant/actions/')
+    ? response({id:gift.id,status:'cancelled',text:'已取消送礼'})
+    : response({action:'manage',reply:note.summary,drafts:[],query:null,approval:note})});
+  try {
+    h.restore({messages:[{id:uuid(912),role:'assistant',text:gift.summary,approval:gift}],input:''});
+    writeComposer(h,'帮我记下买鸡蛋');h.click('发送');await h.flush();
+    h.restore(h.value);
+    assert.equal(h.value.messages.filter(m=>m.approval).length,2);
+    for(const decision of ['好的','确认执行','取消','核对执行状态']) {
+      writeComposer(h,decision);h.click('发送');await h.flush();
+      assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,0);
+      assert.equal(h.value.messages.filter(m=>m.approval).length,2);
+    }
+    const giftCard=h.find(n=>n.props?.['data-message-id']===uuid(912));
+    nodes(giftCard).find(n=>n.type==='Button'&&text(n)==='取消').props.onClick();await h.flush();
+    const actions=h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/'));
+    assert.equal(actions.length,1);assert.equal(actions[0].url,`/api/assistant/actions/${gift.id}`);
+    assert.equal(actions[0].body.decision,'cancel');
+    assert.deepEqual(h.value.messages.filter(m=>m.approval).map(m=>m.approval.id),[note.id]);
+  } finally {h.unmount();}
+});
+
+test('an unrelated request retains a reviewed draft confirmation without double-counting its source card', async () => {
+  const batch=draftGroup(920,[datedDraft(921,'2026-10-09',member.id)]);
+  const choice={batch_id:batch.id,draft_ids:[batch.drafts[0].id],snapshot:JSON.stringify(batch.drafts)};
+  const h=await ready({post:async url=>url==='/api/assistant/confirm'
+    ? response({count:1,transaction_ids:[uuid(923)]}) : response(chat('你好'))});
+  try {
+    h.restore({messages:[batch,{id:uuid(922),role:'assistant',text:'请核对后入账',confirmChoice:choice}],input:''});
+    writeComposer(h,'你好');h.click('发送');await h.flush();
+    h.restore(h.value);
+    assert.equal(h.value.messages.find(m=>m.id===uuid(922)).confirmChoice.batch_id,batch.id);
+    writeComposer(h,'确认执行');h.click('发送');await h.flush();
+    assert.equal(h.calls.filter(c=>c.url==='/api/assistant/confirm').length,1);
+    assert.equal(h.value.messages.find(m=>m.id===batch.id).status,'saved');
+  } finally {h.unmount();}
+});
+
+test('pending approvals and new drafts survive actual local draft persistence and a fresh page mount', async () => {
+  const storage=memoryStorage(),taskStore=new Map();
+  const approval={id:uuid(930),summary:'准备记录送礼',count:1,expires_at:null};
+  const options={realDraft:true,storage,taskStore,post:async()=>response({...record,drafts:[row(931,2000,member.id)],import_summary:null})};
+  const h=await ready(options);
+  try {
+    h.restore({messages:[{id:uuid(932),role:'assistant',text:approval.summary,approval}],input:''});await settleDraft(h);
+    writeComposer(h,'今天吃饭花了20');await settleDraft(h);h.click('发送');await settleDraft(h);
+    assert.equal(savedConversation(storage).messages.find(m=>m.id===uuid(932)).approval.id,approval.id);
+  } finally {h.unmount();}
+  const refreshed=await ready(options);
+  try {
+    await settleDraft(refreshed);
+    assert.equal(refreshed.value.messages.find(m=>m.id===uuid(932)).approval.id,approval.id);
+    assert.ok(refreshed.value.messages.some(m=>m.status==='pending'&&m.drafts?.[0].amount==='20.00'));
+    assert.equal(refreshed.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')&&c.options.method==='POST').length,0);
+  } finally {refreshed.unmount();}
+});
+
+test('statistics keep structured totals and the original analysis through conversation recovery',async()=>{
+  const replyView={title:'日常收支统计',subtitle:'2026-10-01 至 2026-10-09',metrics:[{label:'支出',value:'¥320.00',primary:true}],sections:[],notices:[],analysis:true};
+  const h=await ready({post:async()=>response({action:'query',reply:'本期主要用于餐饮。',drafts:[],query:null,reply_view:replyView})});
+  try {writeComposer(h,'查本月统计');h.click('发送');await h.flush();
+    assert.ok(h.text.includes('支出¥320.00'));assert.ok(h.text.includes('查看分析说明'));assert.ok(h.text.includes('本期主要用于餐饮'));
+    h.restore(h.value);assert.ok(h.text.includes('支出¥320.00'));
+    assert.equal(h.all(n=>n.type==='Button'&&text(n)==='确认执行').length,0);
+  } finally {h.unmount();}
+});
+
+test('record replies fold long lists, preserve exports, and recover old structured record contexts',async()=>{
+  const rows=Array.from({length:8},(_,i)=>({id:uuid(920+i),type:'expense',description:`测试消费${i}`,amount:'12.50',transaction_date:'2026-10-09'}));
+  const h=await ready({post:async()=>response({action:'manage',reply:'旧的长文本',drafts:[],query:null,record_context:{resource:'transactions',rows},export_file:{name:'收支.csv',csv:'日期,金额'}})});
+  try {writeComposer(h,'导出本月账目');h.click('发送');await h.flush();
+    assert.ok(h.text.includes('展开其余 3 条'));assert.ok(h.text.includes('本次支出¥100.00'));assert.ok(h.text.includes('下载 收支.csv'));
+    assert.equal(h.text.includes('旧的长文本'),false);assert.equal(h.text.includes(rows[0].id),false);
+    h.restore({messages:[{id:uuid(919),role:'assistant',text:'旧回复',ledgerContext:{resource:'transactions',rows}}],input:''});
+    assert.ok(h.text.includes('测试消费0'));assert.ok(h.text.includes('展开其余 3 条'));
+  } finally {h.unmount();}
+});
+
+test('pure explanation stays prose and structured choices reuse the shared response shell',async()=>{
+  const h=await ready();
+  try {h.restore({messages:[{id:uuid(931),role:'assistant',text:'这是一段普通解释。'}],input:''});
+    assert.equal(h.all(n=>n.props?.['aria-label']==='结构化回复').length,0);assert.ok(h.text.includes('这是一段普通解释'));
+    h.restore({messages:[{id:uuid(932),role:'assistant',text:'请选择需要关联的流水',eventChoices:[{label:'关联 10 月 9 日 600 元支出',input:{operation:'create',kind:'gift_given'}}]}],input:''});
+    assert.ok(h.text.includes('请选择下一步'));assert.ok(h.text.includes('关联 10 月 9 日 600 元支出'));
+    assert.equal(h.all(n=>n.props?.['aria-label']==='补充事项信息').length,1);
+  } finally {h.unmount();}
+});
+
+
+test('ordinary agent replies and clarification questions follow a quiet process row before and after restoration', async () => {
+  const h = await ready();
+  try {
+    const messages = [
+      { id: uuid(940), role: 'user', text: '你好' },
+      { id: uuid(941), role: 'assistant', text: '你好！可以帮你记账或查询收支。',
+        agent: { goal_id: uuid(941), goal: '你好', status: 'completed', steps: 1, tool_calls: 0 },
+        process: { status: 'succeeded', phase: 'thinking', attempt: 1, hasReply: true, action: 'chat', draftCount: 0,
+          execution: [{ id: 'reply', label: '理解请求', kind: 'model', state: 'done', startedAt: 1000, finishedAt: 2000, details: [] }] } },
+      { id: uuid(942), role: 'user', text: '送礼500，转给妈600' },
+      { id: uuid(943), role: 'assistant', text: '转给妈妈的600元，是代付这次礼金吗？',
+        agent: { goal_id: uuid(943), goal: '送礼500，转给妈600', status: 'needs_input', steps: 1, tool_calls: 0 },
+        process: { status: 'succeeded', phase: 'thinking', attempt: 1, hasReply: true, action: 'chat', draftCount: 0 } },
+    ];
+    for (const snapshot of [{ messages, input: '' }, null]) {
+      h.restore(snapshot || h.value);
+      assert.ok(h.text.includes('转给妈妈的600元，是代付这次礼金吗？'));
+      assert.doesNotMatch(h.text, /任务完成|处理完成|重新提出请求|需要补充信息|修改请求/);
+      assert.equal(h.all(node => node.props?.['data-assistant-agent-status'] !== undefined).length, 0);
+      assert.equal(h.all(node => node.type?.name === 'AssistantProcessingDetails').length, 2);
+      const replies = h.all(node => node.props?.['data-message-role'] === 'assistant');
+      assert.equal(replies.length, 2);
+      assert.ok(text(replies[0]).indexOf('处理过程') < text(replies[0]).indexOf('你好！'));
+      assert.ok(text(replies[1]).indexOf('处理过程') < text(replies[1]).indexOf('转给妈妈的600元'));
+    }
+  } finally { h.unmount(); }
+});
+
+test('completed ledger work retains a folded process before its answer without a second completion label', async () => {
+  const h = await ready();
+  try {
+    h.restore({ messages: [{ id: uuid(944), role: 'assistant', text: '本月餐饮支出共52元。',
+      agent: { goal_id: uuid(944), goal: '本月餐饮花了多少', status: 'completed', steps: 2, tool_calls: 1 },
+      process: { status: 'succeeded', phase: 'query', attempt: 1, hasReply: true, action: 'query', draftCount: 0,
+        execution: [{ id: 'read', label: '查询账本记录', kind: 'tool', state: 'done', startedAt: 1000, finishedAt: 2000, details: ['匹配3笔餐饮记录'] }] } }], input: '' });
+    assert.ok(h.text.indexOf('处理过程') < h.text.indexOf('本月餐饮支出共52元。'));
+    assert.match(h.text, /查询账本记录.*匹配3笔餐饮记录/);
+    assert.doesNotMatch(h.text, /任务完成|处理完成/);
+    const component = h.find(node => node.type?.name === 'AssistantProcessingDetails');
+    const process = component.type(component.props);
+    assert.equal(process.type, 'details');
+    assert.equal(process.props.open, undefined);
+    assert.equal(h.all(node => node.props?.['data-assistant-agent-status'] !== undefined).length, 0);
+  } finally { h.unmount(); }
+});
+
+test('pending agent approval keeps preview controls and a quiet stop action beside the result after reload', async () => {
+  const h = await ready();
+  try {
+    const approval = { id: uuid(947), summary: '创建测试便利贴', expires_at: null,
+      preview: { title: '新建便利贴', metrics: [], sections: [{ title: '内容', rows: [{ label: '正文', value: '测试提醒' }] }], notices: [] } };
+    h.restore({ messages: [{ id: uuid(946), role: 'assistant', text: approval.summary, approval,
+      agent: { goal_id: uuid(946), goal: '记个测试提醒', status: 'waiting_approval', steps: 1, tool_calls: 1, pending_action_id: approval.id } }], input: '' });
+    h.restore(h.value);
+    assert.ok(h.text.includes('新建便利贴'));
+    assert.ok(h.text.includes('测试提醒'));
+    assert.equal(h.control('停止任务').props.disabled, false);
+    assert.equal(h.all(node => node.props?.['data-assistant-agent-status'] !== undefined).length, 1);
+    assert.doesNotMatch(h.text, /请核对下方方案|等待你的确认|处理结果见下方/);
+    assert.ok(h.all(node => node.props?.onClick && text(node) === '取消').length);
+    assert.equal(h.calls.filter(call => call.url.startsWith('/api/assistant/actions/') && call.options?.method === 'POST').length, 0);
+  } finally { h.unmount(); }
+});
+
+test('member selection places the review after the answer while retaining the exact confirmation batch, including agent drafts', async () => {
+  for (const agentFlow of [false, true]) {
+    const id = uuid(970), draft = datedDraft(971, '2026-10-09', null);
+    const agent = { goal_id: id, goal: '吃饭20', status: 'waiting_approval', steps: 1, tool_calls: 0, pending_batch_id: id };
+    const h = await ready({ post: async (url, body) => {
+      if (url === '/api/assistant') return response({ draft_id: body.draft_id, member });
+      assert.equal(url, '/api/assistant/confirm');
+      assert.equal(body.batch_id, id, 'member selection must preserve the confirmation identity');
+      assert.equal(body.drafts[0].id, draft.id);
+      assert.equal(body.drafts[0].member_id, member.id);
+      return response({ count: 1 });
+    } });
+    h.restore({ messages: [draftGroup(970, [draft], { memberFlow: true, taskApplied: true,
+      ...(agentFlow ? { agent, taskId: id, taskStatus: 'succeeded', taskAttempt: 1 } : {}) })], input: '' });
+    nodes(h.control('选择记账成员')).find(node => node.type === 'Button' && text(node) === member.name).props.onClick();
+    await h.flush();
+    const selected = h.value;
+    assert.deepEqual(selected.messages.map(m => m.role), ['assistant', 'user', 'assistant']);
+    assert.equal(selected.messages[0].drafts, undefined);
+    assert.match(selected.messages[0].text, /支出人是谁/);
+    assert.match(selected.messages[1].text, /支出人是「本人」/);
+    assert.equal(selected.messages[2].id, id);
+    assert.equal(selected.messages[2].drafts[0].id, draft.id);
+    assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 0);
+    h.restore(selected); await h.flush();
+    assert.deepEqual(h.value.messages.map(m => m.id), selected.messages.map(m => m.id), 'restoration retains conversational order');
+    clickTextButton(h, '确认 1 笔'); await h.flush();
+    assert.equal(h.value.messages[2].status, 'saved');
+    assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 1);
+    h.unmount();
+  }
 });

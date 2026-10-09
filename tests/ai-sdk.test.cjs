@@ -12,7 +12,7 @@ function loadModule(file, dependencies = {}) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText, { exports, Date, Number, JSON, Error,
-    require: id => { assert.ok(id in dependencies, `Unexpected module dependency ${id}`); return dependencies[id]; },
+    require: id => { const contract = require('./helpers/assistant-contracts.cjs')(id); if (contract) return contract; assert.ok(id in dependencies, `Unexpected module dependency ${id}`); return dependencies[id]; },
   });
   return exports;
 }
@@ -338,7 +338,7 @@ test('real SDK preserves a structured member choice with a null member without i
   const f = fixture(completion(JSON.stringify(valid)));
   const value = await f.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
     schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' });
-  assert.deepEqual(Object.keys(value).sort(), ['action', 'drafts', 'query', 'reply', 'undo', 'update']);
+  assert.deepEqual(Object.keys(value).sort(), ['action', 'command', 'confirm', 'drafts', 'edit', 'event', 'navigation', 'query', 'remove', 'reply', 'undo', 'update']);
   assert.equal(value.action, 'update');
   assert.deepEqual(value.update, valid.update);
   assert.equal(value.undo, null);
@@ -358,7 +358,7 @@ test('real SDK transports structured undo targets without asserting a successful
   const f = fixture(completion(JSON.stringify(valid)));
   const value = await f.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
     schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' });
-  assert.deepEqual(Object.keys(value).sort(), ['action', 'drafts', 'query', 'reply', 'undo', 'update']);
+  assert.deepEqual(Object.keys(value).sort(), ['action', 'command', 'confirm', 'drafts', 'edit', 'event', 'navigation', 'query', 'remove', 'reply', 'undo', 'update']);
   assert.equal(value.action, 'undo');
   assert.equal(value.reply, '准备撤销入账');
   assert.deepEqual(value.undo, valid.undo);
@@ -769,4 +769,20 @@ test('caller cancellation interrupts a pending SDK stream rather than completing
   await assert.rejects(next);
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].init.signal.aborted, true);
+});
+
+test('real SDK carries draft removal targets separately from saved-transaction undo', async () => {
+  const valid = { action: 'remove', reply: '准备更新草稿', drafts: [], query: null,
+    remove: { batch_id: '00000000-0000-4000-8000-000000000003', draft_ids: ['00000000-0000-4000-8000-000000000004'] } };
+  const f = fixture(completion(JSON.stringify(valid)));
+  const value = await f.adapter.bailianObject({ model: 'fixture-model', messages: prompt,
+    schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA, schemaName: 'ledger_plan' });
+  assert.equal(value.action, 'remove');
+  assert.deepEqual(value.remove, valid.remove);
+  assert.equal(value.undo, null);
+  assert.equal(value.update, null);
+  const schema = f.calls[0].body.response_format.json_schema.schema;
+  assert.ok(schema.properties.action.enum.includes('remove'));
+  assert.ok('remove' in schema.properties);
+  assert.equal(f.calls.length, 1);
 });

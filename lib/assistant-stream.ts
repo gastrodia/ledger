@@ -1,3 +1,6 @@
+import { ledgerEventSchema, eventContextSchema } from "@/lib/ledger-event";
+import { commandSchema } from "@/lib/assistant-commands";
+import { draftEditSchema, draftConfirmSchema, navigationSchema } from "@/lib/assistant-draft-actions";
 import type { AssistantPlan } from "@/lib/assistant";
 
 export type AssistantProgressEvent =
@@ -31,7 +34,7 @@ function target(value: unknown): value is Record<string, unknown> {
 // The server owns financial validation. This transport guard only accepts a
 // complete, usable plan so interrupted/partial JSON can never create cards.
 function plan(value: unknown): AssistantPlan {
-  if (!object(value) || !["record", "query", "chat", "update", "undo"].includes(value.action as string)
+  if (!object(value) || !["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event"].includes(value.action as string)
     || typeof value.reply !== "string" || value.reply.length > MAX_REPLY_LENGTH
     || !Array.isArray(value.drafts) || value.drafts.length > 20) throw new Error(INVALID_RESPONSE);
   for (const draft of value.drafts) {
@@ -47,6 +50,7 @@ function plan(value: unknown): AssistantPlan {
     || !nullableString(value.query.keyword))) throw new Error(INVALID_RESPONSE);
   if (value.update != null && (!target(value.update) || !nullableString(value.update.member_id))) throw new Error(INVALID_RESPONSE);
   if (value.undo != null && !target(value.undo)) throw new Error(INVALID_RESPONSE);
+  if (value.remove != null && !target(value.remove)) throw new Error(INVALID_RESPONSE);
   if ((value.action === "record" && (!value.drafts.length || value.query !== null))
     || (value.action !== "record" && value.drafts.length)
     || (value.action === "query" && value.query === null)
@@ -54,7 +58,15 @@ function plan(value: unknown): AssistantPlan {
     || (value.action === "update" && value.update == null)
     || (value.action !== "update" && value.update != null)
     || (value.action === "undo" && value.undo == null)
-    || (value.action !== "undo" && value.undo != null)) throw new Error(INVALID_RESPONSE);
+    || (value.action !== "undo" && value.undo != null)
+    || (value.action === "remove" && value.remove == null)
+    || (value.action !== "remove" && value.remove != null)) throw new Error(INVALID_RESPONSE);
+  for (const [action, key, schema] of [["event", "event", ledgerEventSchema], ["manage", "command", commandSchema], ["edit", "edit", draftEditSchema], ["confirm", "confirm", draftConfirmSchema], ["navigate", "navigation", navigationSchema]] as const) {
+    if (value.action === action ? !schema.safeParse(value[key]).success : value[key] != null) throw new Error(INVALID_RESPONSE);
+  }
+  if (value.event_context != null && !eventContextSchema.safeParse(value.event_context).success) throw new Error(INVALID_RESPONSE);
+  if (value.event_choices != null && (!Array.isArray(value.event_choices) || value.event_choices.length > 20 || value.event_choices.some(c => !object(c) || typeof c.label !== "string" || !ledgerEventSchema.safeParse(c.input).success))) throw new Error(INVALID_RESPONSE);
+  if (value.approval != null && (!object(value.approval) || typeof value.approval.id !== "string" || typeof value.approval.summary !== "string" || typeof value.approval.expires_at !== "string")) throw new Error(INVALID_RESPONSE);
   if (value.import_summary !== undefined) {
     const summary = value.import_summary;
     if (!object(summary) || !["image_count", "extracted_count", "removed_duplicates", "retained_count"]

@@ -1,3 +1,6 @@
+import { ledgerEventSchema } from "@/lib/ledger-event";
+import { commandSchema } from "@/lib/assistant-commands";
+import { draftEditSchema, draftConfirmSchema, navigationSchema } from "@/lib/assistant-draft-actions";
 import { jsonSchema } from "ai";
 import { z } from "zod";
 
@@ -10,7 +13,12 @@ const imageSource = z.object({
   kind: z.enum(["statement", "receipt", "unknown"]).optional(),
 }).strict();
 const assistantOutput = z.object({
-  action: z.enum(["record", "query", "chat", "update", "undo"]),
+  action: z.enum(["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event"]).describe("query只用于普通收支统计；钱款送收礼和借还的记录/整体修改/撤销选event；其他台账查询管理选manage，并填写command，query置null。"),
+  event: ledgerEventSchema.nullable().optional().default(null),
+  command: commandSchema.nullable().optional().default(null),
+  edit: draftEditSchema.nullable().optional().default(null),
+  confirm: draftConfirmSchema.nullable().optional().default(null),
+  navigation: navigationSchema.nullable().optional().default(null),
   reply: z.string(),
   drafts: z.array(z.object({
     type: z.enum(["income", "expense"]), amount_cents: z.number().int(),
@@ -20,14 +28,18 @@ const assistantOutput = z.object({
     source: imageSource.nullable().optional(),
   }).strict()),
   query: z.object({
+    scope: z.enum(["daily", "cashflow"]).optional(),
     start_date: z.string(), end_date: z.string(),
     type: z.enum(["income", "expense"]).nullable(),
     category_id: nullableString, member_id: nullableString, keyword: nullableString,
-  }).strict().nullable(),
+  }).strict().nullable().describe("仅action=query时填写完整普通收支统计条件；其他动作包括借还查询均必须为null"),
   update: z.object({
     batch_id: z.string(), draft_ids: z.array(z.string()), member_id: nullableString,
   }).strict().nullable().optional().default(null),
   undo: z.object({
+    batch_id: z.string(), draft_ids: z.array(z.string()),
+  }).strict().nullable().optional().default(null),
+  remove: z.object({
     batch_id: z.string(), draft_ids: z.array(z.string()),
   }).strict().nullable().optional().default(null),
 }).strict();

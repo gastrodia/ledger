@@ -10,7 +10,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/assistant-stream.ts',
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText, {
   exports: exportsObject, TextDecoder, DOMException, Error,
-  require: name => { throw new Error(`Unexpected runtime dependency: ${name}`); },
+  require: name => { const contract = require('./helpers/assistant-contracts.cjs')(name); if (contract) return contract; throw new Error(`Unexpected runtime dependency: ${name}`); },
 });
 const { readAssistantStream } = exportsObject;
 const encoder = new TextEncoder();
@@ -158,4 +158,15 @@ test('exceptions in consumer rendering cancel the stream and propagate to the ca
   feed.send(line({ type: 'delta', text: 'hello' }));
   await assert.rejects(pending, /render failed/);
   assert.equal(feed.cancelled, true);
+});
+
+test('draft removal requires a complete exclusive target in both JSON and streaming responses', async () => {
+  const removal = { action: 'remove', reply: '正在更新草稿', drafts: [], query: null, remove: { batch_id: 'batch', draft_ids: ['draft'] } };
+  for (const type of ['application/json', 'application/x-ndjson']) {
+    const response = new Response(type === 'application/json' ? JSON.stringify(removal) : line({ type: 'result', plan: removal }), { headers: { 'content-type': type } });
+    assert.deepEqual(plain(await readAssistantStream(response, () => {})), removal);
+  }
+  for (const patch of [{ remove: null }, { remove: { batch_id: 'batch', draft_ids: [] } }, { action: 'chat' }, { drafts: [draft] }, { undo: removal.remove }]) {
+    await assert.rejects(readAssistantStream(new Response(JSON.stringify({ ...removal, ...patch })), () => {}), /格式无效/);
+  }
 });

@@ -11,7 +11,7 @@ function load(file, deps = {}) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText, { exports, Date, JSON, Number, Error,
-    require: id => { assert.ok(id in deps, id); return deps[id]; },
+    require: id => { const contract = require('./helpers/assistant-contracts.cjs')(id); if (contract) return contract; assert.ok(id in deps, id); return deps[id]; },
   });
   return exports;
 }

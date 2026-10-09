@@ -12,6 +12,7 @@ export type TransactionType = 'income' | 'expense';
 
 // 交易记录
 export interface Transaction {
+  flow_kind?: "daily" | "loan";
   id: string;
   user_id: string;
   category_id?: string;

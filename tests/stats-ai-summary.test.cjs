@@ -205,7 +205,8 @@ function api({ authenticated = true, key = 'fixture-key', model, create, count =
     'next/server': { NextResponse }, '@/lib/bailian': bailian,
     '@/lib/auth': { getSession: async () => authenticated ? { userId: 'owner' } : null },
     '@/lib/stats-period': periods, '@/lib/stats-ai-summary': helper,
-    '@/lib/db': { sql: async (strings, ...params) => {
+    '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
+      '@/lib/db': { sql: async (strings, ...params) => {
       const text = strings.join('?'); queries.push({ text, params });
       if (text.includes('"elapsedIncome"')) return [{ totalIncome: '200', totalExpense: '100', count, elapsedIncome: '200', elapsedExpense: '70', elapsedCount: 4 }];
       if (text.includes('"totalIncome"')) return [{ totalIncome: '100', totalExpense: '100', count: 4 }];

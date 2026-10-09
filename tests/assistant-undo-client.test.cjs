@@ -16,6 +16,7 @@ function load(filename) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(source, { exports, JSON, Date, require(name) {
+    if (name === 'zod') return require('zod');
     assert.ok(name.startsWith('@/lib/'), `Unexpected dependency ${name}`);
     return load(`${name.slice(2)}.ts`);
   } });

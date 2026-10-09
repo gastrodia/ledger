@@ -76,7 +76,7 @@ function zeroAmountRow(row: ImageRow): boolean {
     && (row.payment_method === null || typeof row.payment_method === "string") && typeof row.note === "string";
 }
 
-/** Only join a previous image's suffix to the next image's prefix.
+/** Join adjacent screenshot boundaries in either upload direction.
  * No historical draft, saved transaction or same-image row is removed.
  * Zero-amount image rows are omitted; other rows with missing, conflicting or
  * ambiguous provenance remain intact for review.
@@ -153,23 +153,35 @@ export function mergeAssistantImageImport(raw: unknown, imageCount: number): { o
   for (let index = 1; index < eligibleGroups.length; index++) {
     const previous = eligibleGroups[index - 1], current = eligibleGroups[index];
     const limit = Math.min(previous.length, current.length);
-    let overlap = 0;
-    for (let length = limit; length > 0; length--) {
-      const suffix = previous.slice(previous.length - length), prefix = current.slice(0, length);
-      if (suffix.some((row, offset) => samePrintedTransaction(row, prefix[offset], imageCount) && conflictingDetails(row, prefix[offset]))) {
-        warn("相邻截图中的相似交易存在支付方式或成员冲突，已保留，请逐笔核对。");
+    const boundary = (reverse: boolean): ImageRow[] | null => {
+      for (let length = limit; length > 0; length--) {
+        const left = reverse ? previous.slice(0, length) : previous.slice(previous.length - length);
+        const right = reverse ? current.slice(current.length - length) : current.slice(0, length);
+        if (left.some((row, offset) => samePrintedTransaction(row, right[offset], imageCount) && conflictingDetails(row, right[offset]))) {
+          warn("相邻截图中的相似交易存在支付方式或成员冲突，已保留，请逐笔核对。");
+        }
+        if (!left.every((row, offset) => sameTransaction(row, right[offset], imageCount))) continue;
+        // Repeated fully identical rows within either original screenshot make
+        // this boundary ambiguous even if their minute and amount match.
+        if (left.some((row, offset) => previous.filter(candidate => sameTransaction(row, candidate, imageCount)).length !== 1
+          || current.filter(candidate => sameTransaction(right[offset], candidate, imageCount)).length !== 1)) {
+          warn("相邻截图中存在同时间、同金额的多笔相似交易，已保留，请逐笔核对。");
+          return null;
+        }
+        return right;
       }
-      if (!suffix.every((row, offset) => sameTransaction(row, prefix[offset], imageCount))) continue;
-      // Repeated fully identical rows within either original screenshot make
-      // this boundary ambiguous even if their minute and amount match.
-      if (suffix.some((row, offset) => previous.filter(candidate => sameTransaction(row, candidate, imageCount)).length !== 1
-        || current.filter(candidate => sameTransaction(prefix[offset], candidate, imageCount)).length !== 1)) {
-        warn("相邻截图中存在同时间、同金额的多笔相似交易，已保留，请逐笔核对。");
-        break;
-      }
-      overlap = length; break;
+      return [];
+    };
+    const forward = boundary(false), backward = boundary(true);
+    if (!forward || !backward) continue;
+    // Identical complete images match both directions. Different matches at
+    // both ends do not establish a unique scrolling relationship.
+    if (forward.length && backward.length && (forward.length !== backward.length
+      || forward.some((row, offset) => row !== backward[offset]))) {
+      warn("相邻截图的重叠方向无法确定，已保留相似账目，请逐笔核对。");
+      continue;
     }
-    for (const row of current.slice(0, overlap)) removed.add(row);
+    for (const row of forward.length ? forward : backward) removed.add(row);
   }
   return finish();
 }

@@ -101,7 +101,7 @@ function SummaryCards({
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
-                <p className="text-sm font-medium text-muted-foreground">总收入</p>
+                <p className="text-sm font-medium text-muted-foreground">资金流入</p>
                 <Button
                   type="button"
                   variant="ghost"
@@ -128,7 +128,7 @@ function SummaryCards({
         <CardContent className="pt-4 sm:pt-5">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
-              <p className="text-sm font-medium text-muted-foreground">总支出</p>
+              <p className="text-sm font-medium text-muted-foreground">资金流出</p>
               <p className="text-2xl font-bold text-red-600">{formatCurrency(summary.totalExpense)}</p>
             </div>
             <div className="flex items-center justify-center w-10 h-10 rounded-md bg-red-100">
@@ -239,6 +239,7 @@ function DashboardContent() {
   if (startDate) params.set("startDate", startDate);
   if (endDate) params.set("endDate", endDate);
   if (searchText.trim()) params.set("q", searchText.trim());
+  if (navigation.filters.flowKind) params.set("flowKind", navigation.filters.flowKind);
   const query = params.toString();
   const loader = useJsonLoader<TransactionList>(`/api/transactions?${query}`);
   const deleting = usePendingRows();
@@ -440,6 +441,7 @@ function DashboardContent() {
           />
         </div>
 
+        {navigation.filters.flowKind && <p className="text-sm text-muted-foreground">当前仅显示{navigation.filters.flowKind === "daily" ? "日常收支（不含借还往来）" : "借还往来"}。<Button variant="link" size="sm" onClick={() => navigation.setFilters(current => ({ ...current, flowKind: undefined }))}>查看全部资金流水</Button></p>}
         {/* Transactions */}
         <Card>
           <CardHeader className="border-b">
@@ -689,7 +691,7 @@ function DashboardContent() {
                               variant="outline"
                               className="font-normal"
                             >
-                              {transaction.type === "income" ? "收入" : "支出"}
+                              {transaction.flow_kind === "loan" ? transaction.type === "income" ? "借还流入" : "借还流出" : transaction.type === "income" ? "收入" : "支出"}
                             </Badge>
                           </td>
                           <td className="p-4">
@@ -811,7 +813,7 @@ function DashboardContent() {
                                 variant="outline"
                                 className="text-xs shrink-0"
                               >
-                                {transaction.type === "income" ? "收入" : "支出"}
+                                {transaction.flow_kind === "loan" ? transaction.type === "income" ? "借还流入" : "借还流出" : transaction.type === "income" ? "收入" : "支出"}
                               </Badge>
                             </div>
                             {/* 操作按钮 */}

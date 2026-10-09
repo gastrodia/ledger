@@ -1,3 +1,4 @@
+import { ensureCashflowSchema } from "@/lib/ledger-event-schema";
 import { validateAttachment } from "@/lib/attachments";
 import { NextRequest, NextResponse } from 'next/server';
 import { sql } from '@/lib/db';
@@ -45,6 +46,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: '开始日期不能晚于结束日期' }, { status: 400 });
     }
 
+    await ensureCashflowSchema();
     // 列表与摘要共用同一组条件，备注搜索按字面子串匹配。
     const params: unknown[] = [session.userId];
     const conditions = ['t.user_id = $1'];
@@ -52,6 +54,8 @@ export async function GET(request: NextRequest) {
       params.push(value);
       conditions.push(expression.replace('?', `$${params.length}`));
     };
+    const flowKind = searchParams.get('flowKind');
+    if (flowKind === 'daily' || flowKind === 'loan') addCondition('t.flow_kind = ?', flowKind);
     if (type === 'income' || type === 'expense') addCondition('t.type = ?', type);
     if (categoryId === 'none') conditions.push('t.category_id IS NULL');
     else if (categoryId) addCondition('t.category_id = ?', categoryId);
@@ -64,7 +68,7 @@ export async function GET(request: NextRequest) {
     const [transactions, summaryResult] = await Promise.all([
       sql.query(`
         SELECT
-          t.id, t.user_id, t.category_id, t.member_id, t.type, t.amount,
+          t.id, t.user_id, t.category_id, t.member_id, t.type, t.amount, t.flow_kind,
           t.description, t.attachment_key, t.attachment_name, t.attachment_type,
           t.transaction_date, t.created_at, t.updated_at,
           c.name as category_name, c.icon as category_icon, c.color as category_color, c.type as category_type,
@@ -92,6 +96,7 @@ export async function GET(request: NextRequest) {
       category_id: t.category_id,
       member_id: t.member_id,
       type: t.type,
+      flow_kind: t.flow_kind,
       amount: parseFloat(String(t.amount)),
       description: t.description,
       attachment_key: t.attachment_key,
