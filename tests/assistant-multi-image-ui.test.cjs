@@ -886,6 +886,62 @@ test('assistant UI displays cards only after task success and still requires exp
   h.unmount();
 });
 
+test('image task UI displays real progress, retains completed images on retry and waits for merged final cards', async () => {
+  const h = await ready();
+  const progress = extra => ({ total: 5, completed: 0, failed: [], active: [1, 2], stage: 'recognizing', ...extra });
+  try {
+    h.restore({ messages: [], input: '识别这些账单', images: Array.from({ length: 5 }, (_, index) => image(`截图${index + 1}`)) });
+    h.click('发送'); await h.flush();
+    h.patchTask({ image_progress: progress() }); await h.poll();
+    assert.match(text(h.find(node => node.props?.['data-reply-status'] !== undefined)), /已完成 0\/5 张，正在识别第 1、2 张/);
+    h.patchTask({ image_progress: progress({ completed: 2, active: [3, 4] }) }); await h.poll();
+    assert.match(h.text, /已完成 2\/5 张，正在识别第 3、4 张/);
+    assert.equal(h.value.messages.some(message => message.drafts?.length), false);
+    h.patchTask({ status: 'failed', error: '识别超时，请重试。', image_progress: progress({ completed: 4, active: [], failed: [3] }) }); await h.poll();
+    assert.match(h.text, /第 3 张识别失败；已完成 4\/5 张，结果已保留/);
+    assert.equal(h.value.messages.at(-1).drafts, undefined);
+    h.restore(h.value);
+    clickTextButton(h, '继续识别'); await h.flush();
+    const retry = h.calls.find(call => call.body?.action === 'retry');
+    assert.equal(retry.body.attempt, 1);
+    assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 1, 'Retry uses the accepted task without another image upload');
+    h.patchTask({ image_progress: progress({ completed: 4, active: [3] }) }); await h.poll();
+    assert.match(h.text, /已完成 4\/5 张，正在识别第 3 张/);
+    h.patchTask({ image_progress: progress({ completed: 5, active: [], stage: 'merging' }) }); await h.poll();
+    assert.match(h.text, /已完成 5\/5 张，正在整理账目/);
+    assert.equal(h.value.messages.some(message => message.drafts?.length), false, 'Recognized image results alone never become confirmable cards');
+    h.patchTask({ status: 'succeeded', result: { ...record, drafts: [row(130, 1200, member.id)], import_summary: { ...summary, image_count: 5 } } }); await h.poll();
+    assert.deepEqual(visibleDraftNames(h), ['交易130']);
+    assert.equal(h.value.messages.at(-1).status, 'pending');
+    assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 0);
+    assert.doesNotMatch(text(h.find(node => node.props?.['data-reply-status'] !== undefined)), /已完成|正在整理/);
+  } finally { h.unmount(); }
+});
+
+test('image task progress survives refresh and invalid remote counts never appear as completed work', async () => {
+  const taskStore = new Map();
+  const h = await ready({ taskStore });
+  h.restore({ messages: [], input: '识别三张', images: [image('一'), image('二'), image('三')] });
+  h.click('发送'); await h.flush();
+  h.patchTask({ status: 'queued', image_progress: { total: 3, completed: 2, failed: [], active: [], stage: 'recognizing' } }); await h.poll();
+  assert.match(h.text, /已完成 2\/3 张，等待继续识别/);
+  const stored = h.value;
+  h.unmount();
+  const restored = await ready({ taskStore });
+  try {
+    restored.restore(stored); await restored.flush(); await restored.poll();
+    assert.match(restored.text, /已完成 2\/3 张/);
+    assert.equal(restored.calls.filter(call => call.options.method === 'POST').length, 0);
+    restored.patchTask({ status: 'running', image_progress: { total: 3, completed: 99, active: [], failed: [], stage: 'merging' } }); await restored.poll();
+    assert.doesNotMatch(restored.text, /99\/3|正在整理账目/);
+    assert.match(restored.text, /正在识别截图/);
+    assert.equal(restored.value.messages[0].image_progress, null);
+    restored.patchTask({ status: 'failed', error: '结果整理未完成。', image_progress: { total: 3, completed: 3, active: [], failed: [], stage: 'merging' } }); await restored.poll();
+    assert.ok(restored.all(node => node.type === 'Button').some(node => text(node) === '重新整理结果'));
+    assert.equal(restored.value.messages.at(-1).drafts, undefined);
+  } finally { restored.unmount(); }
+});
+
 test('stopped and failed tasks remain incomplete and retry the same server task without resending images', async () => {
   for (const interruption of ['stop', 'error']) {
     const h = await ready();

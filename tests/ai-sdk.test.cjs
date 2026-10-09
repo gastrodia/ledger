@@ -23,7 +23,7 @@ const assistantImageImport = loadModule('lib/assistant-image-import.ts', {
   '@/lib/assistant': assistant, '@/lib/assistant-images': assistantImages,
 });
 
-function loadAdapter(fetchImpl, env = {}, logs = []) {
+function loadAdapter(fetchImpl, env = {}, logs = [], globals = {}) {
   const exports = {};
   const code = ts.transpileModule(fs.readFileSync('lib/bailian.ts', 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
@@ -31,7 +31,7 @@ function loadAdapter(fetchImpl, env = {}, logs = []) {
   vm.runInNewContext(code, {
     exports, process: { env: { DASHSCOPE_API_KEY: 'secret-fixture', ...env } }, fetch: fetchImpl,
     URL, Headers, Request, Response, ReadableStream, TransformStream, TextEncoder, TextDecoder,
-    AbortController, AbortSignal, Buffer, Uint8Array, Error, TypeError, setTimeout, clearTimeout,
+    AbortController, AbortSignal, Buffer, Uint8Array, Error, TypeError, setTimeout, clearTimeout, ...globals,
     console: { error() {}, warn() {}, log() {}, info: (...args) => logs.push(args) },
     require: id => {
       if (id === 'ai') return ai;
@@ -48,12 +48,12 @@ function completion(content = '可读回答', finish_reason = 'stop', extra = {}
     choices: [{ message: { role: 'assistant', content, reasoning_content: 'hidden reasoning' }, finish_reason }],
     usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 }, ...extra });
 }
-function fixture(reply, env) {
+function fixture(reply, env, globals) {
   const calls = [], logs = [];
   const adapter = loadAdapter(async (url, init) => {
     calls.push({ url: String(url), init, body: JSON.parse(init.body) });
     return typeof reply === 'function' ? reply(calls.at(-1)) : reply;
-  }, env, logs);
+  }, env, logs, globals);
   return { adapter, calls, logs };
 }
 function sse(events, { done = true, bytewise = false } = {}) {
@@ -94,6 +94,74 @@ test('SDK configuration rejects missing credentials and unsafe endpoints before 
   const f = fixture(completion(), { DASHSCOPE_WORKSPACE_ID: 'workspace-fixture' });
   assert.equal(await f.adapter.bailianText({ model: 'fixture-model', messages: prompt }), '可读回答');
   assert.equal(f.calls[0].url, 'https://workspace-fixture.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions');
+});
+
+test('SDK request budgets default to 90 seconds, allow bounded overrides and never enter the provider body', async () => {
+  for (const [timeoutMs, expected] of [[undefined, 90_000], [180_000, 180_000], [1, 1]]) {
+    const budgets = [];
+    const f = fixture(completion(), {}, { AbortSignal: {
+      any: signals => AbortSignal.any(signals),
+      timeout: ms => { budgets.push(ms); return new AbortController().signal; },
+    } });
+    await f.adapter.bailianText({ model: 'fixture-model', messages: prompt, timeoutMs });
+    assert.deepEqual(budgets, [expected]);
+    assert.equal(f.calls[0].body.timeoutMs, undefined);
+    assert.equal(f.calls[0].body.timeout_ms, undefined);
+    assert.equal(f.logs.at(-1)[1].timeoutMs, expected);
+  }
+  for (const timeoutMs of [0, -1, NaN, Infinity, 180_001, 1.5]) {
+    const f = fixture(() => assert.fail('invalid timeout must not incur an HTTP request'));
+    await assert.rejects(f.adapter.bailianText({ model: 'fixture-model', messages: prompt, timeoutMs }), error => {
+      assert.equal(error.code, 'invalid_timeout');
+      assert.equal(f.adapter.bailianFailure(error).status, 503);
+      return true;
+    });
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test('SDK telemetry accepts only UUID correlation IDs and never sends them to the provider', async () => {
+  for (const telemetryId of ['00000000-0000-4000-8000-000000000001', 'private-response-secret https://private.example/secret-fixture']) {
+    const f = fixture(completion());
+    await f.adapter.bailianText({ model: 'fixture-model', messages: prompt, telemetryId });
+    assert.equal(f.logs[0][1].telemetryId, telemetryId.startsWith('00000000-') ? telemetryId : undefined);
+    assert.ok(!JSON.stringify(f.calls[0].body).includes(telemetryId));
+    assert.ok(!JSON.stringify(f.logs).includes('private-response-secret'));
+    assert.ok(!JSON.stringify(f.logs).includes('https://'));
+  }
+});
+
+test('an expired custom budget aborts actual SDK work and records a single safe timeout', async () => {
+  const deadline = new AbortController();
+  let started;
+  const requested = new Promise(resolve => { started = resolve; });
+  const f = fixture(({ init }) => new Promise((resolve, reject) => {
+    void resolve;
+    init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    started();
+  }), {}, { AbortSignal: {
+    any: signals => AbortSignal.any(signals),
+    timeout: ms => { assert.equal(ms, 180_000); return deadline.signal; },
+  } });
+  const pending = f.adapter.bailianText({ model: 'fixture-model', messages: prompt, timeoutMs: 180_000 });
+  const rejected = assert.rejects(pending, error => {
+    assert.equal(f.adapter.bailianFailure(error).status, 504);
+    assert.equal(error.code, 'timeout');
+    return true;
+  });
+  await requested;
+  deadline.abort(new DOMException('private-response-secret secret-fixture', 'TimeoutError'));
+  await rejected;
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].init.signal.aborted, true);
+  assert.equal(f.logs.length, 1);
+  assert.equal(f.logs[0][0], 'AI request failed');
+  assert.equal(f.logs[0][1].failure, 'timeout');
+  assert.equal(f.logs[0][1].status, 504);
+  assert.equal(f.logs[0][1].timeoutMs, 180_000);
+  assert.equal(f.logs[0][1].firstOutputMs, undefined);
+  assert.ok(!JSON.stringify(f.logs).includes('private-response-secret'));
+  assert.ok(!JSON.stringify(f.logs).includes('secret-fixture'));
 });
 
 test('real SDK sends structured schema and image content while preserving Bailian thinking and token settings', async () => {
@@ -144,6 +212,7 @@ test('SDK text generation exposes only the final answer and retains summary reas
   assert.equal(metadata.outputTokens, 6);
   assert.equal(metadata.totalTokens, 18);
   assert.ok(metadata.durationMs >= 0);
+  assert.equal(metadata.timeoutMs, 90_000);
   const logged = JSON.stringify(f.logs);
   for (const sensitive of ['secret-fixture', '今天花了多少', '账本支出为10元', 'hidden reasoning']) assert.ok(!logged.includes(sensitive));
 });
@@ -153,6 +222,8 @@ test('SDK text and object results reject truncation, empty answers and malformed
     const f = fixture(response);
     await assert.rejects(f.adapter.bailianText({ model: 'fixture-model', messages: prompt }));
     assert.equal(f.calls.length, 1);
+    assert.equal(f.logs.length, 1);
+    assert.equal(f.logs[0][0], 'AI request failed', 'validation failures must not be logged as completed');
   }
   const schema = ai.jsonSchema({ type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] });
   for (const [response, status] of [
@@ -166,6 +237,10 @@ test('SDK text and object results reject truncation, empty answers and malformed
       return true;
     });
     assert.equal(f.calls.length, 1);
+    assert.equal(f.logs.length, 1);
+    assert.equal(f.logs[0][0], 'AI request failed');
+    assert.equal(f.logs[0][1].failure, status === 422 ? 'invalid_output' : 'truncated');
+    assert.ok(!JSON.stringify(f.logs).includes('private-response-secret'));
   }
 });
 
@@ -382,6 +457,50 @@ test('SDK streams retain token-limit finish reasons so route callers can label p
   const chunks = await collect(await f.adapter.bailianStream({ model: 'fixture-model', messages: prompt }));
   assert.equal(chunks.filter(chunk => chunk.type === 'text-delta').map(chunk => chunk.text).join(''), '部分总结');
   assert.ok(chunks.some(chunk => chunk.type === 'finish' && chunk.finishReason === 'length'));
+  assert.equal(f.logs.length, 2);
+  assert.equal(f.logs[0][0], 'AI request first output');
+  assert.equal(f.logs[1][0], 'AI request failed');
+  assert.equal(f.logs[1][1].failure, 'truncated');
+});
+
+test('SDK failure telemetry records one allowlisted terminal classification without raw provider errors', async t => {
+  const rawLogs = [];
+  t.mock.method(console, 'error', (...args) => rawLogs.push(args));
+  const providerError = { code: 'private-response-secret', message: 'secret-fixture financial data https://private.example' };
+  for (const operation of ['text', 'stream', 'object-stream']) {
+    const f = fixture(() => operation === 'text'
+      ? Response.json({ error: providerError }, { status: 500 })
+      : sse([...(operation === 'stream' ? [textChunk('sensitive partial text')] : []), { error: providerError }]));
+    const request = { model: 'fixture-model', messages: prompt };
+    await assert.rejects(async () => {
+      if (operation === 'text') return f.adapter.bailianText(request);
+      if (operation === 'stream') return collect(await f.adapter.bailianStream(request));
+      return f.adapter.bailianObjectStream({ ...request, schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA }, () => {});
+    });
+    const failures = f.logs.filter(([event]) => event === 'AI request failed');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0][1].operation, operation);
+    assert.equal(failures[0][1].failure, 'unavailable');
+    assert.equal(f.logs.filter(([event]) => event === 'AI request completed').length, 0);
+    for (const sensitive of ['private-response-secret', 'secret-fixture', 'financial data', 'https://', 'sensitive partial text', '今天花了多少']) {
+      assert.ok(!JSON.stringify(f.logs).includes(sensitive));
+    }
+  }
+  assert.equal(rawLogs.length, 0, 'SDK default logging must not expose raw provider errors');
+});
+
+test('unsupported workspace models surface a deployment-range error without exposing provider details', async () => {
+  const f = fixture(() => Response.json({ error: { code: 'Model.Unsupported', message: 'private-response-secret secret-fixture' } }, { status: 400 }));
+  await assert.rejects(f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt, schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA }, () => {}), error => {
+    const failure = f.adapter.bailianFailure(error);
+    assert.equal(failure.status, 503);
+    assert.match(failure.message, /部署范围不支持/);
+    assert.ok(!failure.message.includes('private-response-secret'));
+    assert.ok(!failure.message.includes('secret-fixture'));
+    return true;
+  });
+  assert.equal(f.calls.length, 1, 'configuration failures must not be retried automatically');
+  assert.equal(f.logs.at(-1)[1].failure, 'configuration');
 });
 
 test('SDK streaming HTTP failures remain errors before a successful response is returned', async () => {
@@ -448,12 +567,16 @@ test('SDK requests propagate caller cancellation to the actual provider fetch wi
     if (init.signal.aborted) reject(init.signal.reason);
     else init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
   }));
-  const pending = f.adapter.bailianText({ model: 'fixture-model', messages: prompt }, controller.signal);
+  const pending = f.adapter.bailianText({ model: 'fixture-model', messages: prompt, timeoutMs: 180_000 }, controller.signal);
   await new Promise(resolve => setImmediate(resolve));
   controller.abort();
   await assert.rejects(pending);
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].init.signal.aborted, true);
+  assert.equal(f.logs.length, 1);
+  assert.equal(f.logs[0][0], 'AI request failed');
+  assert.equal(f.logs[0][1].failure, 'cancelled');
+  assert.equal(f.logs[0][1].timeoutMs, 180_000);
 });
 
 test('structured SDK streaming delivers reply snapshots before completion, then validates the final ledger plan', async () => {
@@ -482,6 +605,10 @@ test('structured SDK streaming delivers reply snapshots before completion, then 
   assert.equal(settled, false, 'partial replies must arrive while provider generation is still pending');
   assert.equal(partials.at(-1).reply, '你好');
   assert.equal(partials.at(-1).drafts, undefined, 'partial fields must not be invented');
+  assert.equal(f.logs.length, 1, 'first partial timing is recorded while generation is pending');
+  assert.equal(f.logs[0][0], 'AI request first output');
+  assert.equal(f.logs[0][1].outputKind, 'partial');
+  assert.ok(f.logs[0][1].firstOutputMs >= 0);
   send(textChunk('，可以帮你记账。","drafts":[],"query":null}'));
   send(finishChunk('stop'));
   send('[DONE]', true);
@@ -494,8 +621,11 @@ test('structured SDK streaming delivers reply snapshots before completion, then 
   assert.equal(f.calls[0].body.stream, true);
   assert.equal(f.calls[0].body.enable_thinking, false);
   assert.equal(f.calls[0].body.response_format.json_schema.name, 'ledger_plan');
-  assert.equal(f.logs.length, 1);
-  assert.equal(f.logs[0][1].operation, 'object-stream');
+  assert.equal(f.logs.length, 2);
+  assert.equal(f.logs[1][0], 'AI request completed');
+  assert.equal(f.logs[1][1].operation, 'object-stream');
+  assert.equal(f.logs[1][1].firstOutputMs, f.logs[0][1].firstOutputMs);
+  assert.ok(f.logs[1][1].durationMs >= f.logs[0][1].firstOutputMs);
   for (const sensitive of ['secret-fixture', 'private-response-secret', 'hidden reasoning']) {
     assert.ok(!JSON.stringify(partials).includes(sensitive));
     assert.ok(!JSON.stringify(f.logs).includes(sensitive));
@@ -620,6 +750,10 @@ test('ending a streaming consumer aborts the actual SDK fetch and releases the u
   await stream.return();
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].init.signal.aborted, true);
+  assert.equal(f.logs.length, 2);
+  assert.equal(f.logs[0][0], 'AI request first output');
+  assert.equal(f.logs[1][0], 'AI request failed');
+  assert.equal(f.logs[1][1].failure, 'cancelled');
 });
 
 test('caller cancellation interrupts a pending SDK stream rather than completing partial text', async () => {

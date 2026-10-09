@@ -1,7 +1,7 @@
 import { applyDraftMemberUpdate, memberBatchQuestionText, unassignedMemberDrafts, validateAssistantUndo, UUID_PATTERN, type AssistantDraft, type AssistantDraftMemberChoice, type AssistantMember, type AssistantPlan, type AssistantUndo } from "@/lib/assistant";
 import { restoreAssistantImages, restoreAssistantImportSummary, type AssistantImage } from "@/lib/assistant-images";
 import { sortedAssistantDrafts, type AssistantDraftSort } from "@/lib/assistant-draft-sort";
-import { assistantTaskActive, type AssistantTask } from "@/lib/assistant-task-types";
+import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask } from "@/lib/assistant-task-types";
 
 export type EditableAssistantDraft = AssistantDraft & { amount: string; ignored?: boolean };
 export type AssistantConversationMessage = {
@@ -19,9 +19,27 @@ export type AssistantConversationMessage = {
   taskId?: string;
   taskStatus?: AssistantTask["status"] | "submitting" | "missing";
   taskAttempt?: number;
+  image_progress?: AssistantImageProgress | null;
   /** Remains set after editing/deleting/moving drafts so recovery cannot replay them. */
   taskApplied?: boolean;
 };
+
+export function assistantImageProgressText(progress: AssistantImageProgress, status: AssistantTask["status"] | "recovering") {
+  const completed = `已完成 ${progress.completed}/${progress.total} 张`;
+  if (status === "recovering") return `上次进度：${completed}，正在恢复处理进度…`;
+  if (status === "failed" || status === "cancelled") return `${progress.failed.length ? `第 ${progress.failed.join("、")} 张识别失败；` : ""}${completed}${progress.completed > 0 ? "，结果已保留" : ""}`;
+  if (progress.stage === "merging") return `${completed}，正在整理账目…`;
+  if (status === "queued") return `${completed}，等待继续识别…`;
+  if (progress.active.length) return `${completed}，正在识别第 ${progress.active.join("、")} 张…`;
+  return `${completed}，正在准备识别…`;
+}
+
+export function assistantTaskRetryLabel(message: Pick<AssistantConversationMessage, "taskId" | "taskStatus" | "image_progress">) {
+  if (!message.taskId) return "重新发送";
+  if (message.taskStatus === "missing") return "重试发送";
+  const progress = restoreAssistantImageProgress(message.image_progress);
+  return progress ? progress.completed === progress.total ? "重新整理结果" : "继续识别" : "重新处理";
+}
 
 export function assistantMemberChoiceTarget(choice: AssistantDraftMemberChoice | undefined, messages: AssistantConversationMessage[]) {
   if (!choice || choice.member_id !== null || !UUID_PATTERN.test(choice.batch_id)
@@ -44,15 +62,17 @@ export function mergeAssistantTasks(
   for (const task of tasks) {
     if (task.conversation_id !== conversationId || !UUID_PATTERN.test(task.id) || !UUID_PATTERN.test(task.user_message_id)) continue;
     const user = next.find(message => message.id === task.user_message_id);
+    if (user?.taskId === task.id && (user.taskAttempt || 0) > task.attempt) continue;
+    const imageProgress = restoreAssistantImageProgress(task.image_progress);
     if (!user && !task.input) continue;
     if (!user) next = [...next, { id: task.user_message_id, role: "user", text: task.input!.display_text,
       images: restoreAssistantImages(task.input!.display_images, undefined, true), taskId: task.id, taskStatus: task.status, taskAttempt: task.attempt }];
     const incomplete = task.status === "succeeded" ? undefined : task.status === "cancelled" ? "stopped" : "interrupted";
     const currentUser = user || next[next.length - 1];
     if (currentUser.taskId !== task.id || currentUser.taskStatus !== task.status || currentUser.taskAttempt !== task.attempt
-      || currentUser.incomplete !== incomplete || currentUser.error !== undefined) {
+      || currentUser.incomplete !== incomplete || currentUser.error !== undefined || !sameTaskValue(currentUser.image_progress || null, imageProgress)) {
       next = next.map(message => message.id === task.user_message_id
-        ? { ...message, taskId: task.id, taskStatus: task.status, taskAttempt: task.attempt, incomplete, error: undefined } : message);
+        ? { ...message, taskId: task.id, taskStatus: task.status, taskAttempt: task.attempt, incomplete, error: undefined, ...(imageProgress || currentUser.image_progress ? { image_progress: imageProgress } : {}) } : message);
     }
     // This flag is persisted on the stable reply, even when its drafts were moved
     // into a later member-selection card or removed by the user.
@@ -63,13 +83,14 @@ export function mergeAssistantTasks(
       continue;
     }
     let reply: AssistantConversationMessage = { id: task.id, role: "assistant", text: task.text,
-      taskId: task.id, taskAttempt: task.attempt, taskStatus: task.status };
+      taskId: task.id, taskAttempt: task.attempt, taskStatus: task.status, ...(imageProgress ? { image_progress: imageProgress } : {}) };
     if (task.status !== "succeeded" || !task.result) {
       reply = { ...reply, incomplete: task.status === "cancelled" ? "stopped" : "interrupted",
         error: task.error || (task.status === "cancelled" ? "已停止处理，可以重新识别。" : "处理未完成，请重试原请求。") };
       if (previousReply && previousReply.text === reply.text && previousReply.taskId === reply.taskId
         && previousReply.taskStatus === reply.taskStatus && previousReply.taskAttempt === reply.taskAttempt
-        && previousReply.incomplete === reply.incomplete && previousReply.error === reply.error) continue;
+        && previousReply.incomplete === reply.incomplete && previousReply.error === reply.error
+        && sameTaskValue(previousReply.image_progress || null, reply.image_progress || null)) continue;
     } else {
       const result = task.result;
       reply = { ...reply, text: result.reply, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
@@ -151,13 +172,17 @@ export function reconcileAssistantTaskSnapshots(current: AssistantTask[], receiv
     const input = task.input || previous?.input;
     const stableInput = previous && sameTaskValue(previous.input, input) ? previous.input : input;
     const result = previous && sameTaskValue(previous.result, task.result) ? previous.result : task.result;
+    const imageProgress = restoreAssistantImageProgress(task.image_progress);
+    const stableProgress = previous && sameTaskValue(previous.image_progress || null, imageProgress) ? previous.image_progress : imageProgress;
     if (previous && previous.conversation_id === task.conversation_id && previous.user_message_id === task.user_message_id
       && previous.status === task.status && previous.phase === task.phase && previous.text === task.text
       && previous.error === task.error && previous.attempt === task.attempt && previous.created_at === task.created_at
-      && previous.updated_at === task.updated_at && previous.result === result && previous.input === stableInput) continue;
+      && previous.updated_at === task.updated_at && previous.result === result && previous.input === stableInput
+      && sameTaskValue(previous.image_progress || null, stableProgress || null)) continue;
     // Heartbeats still advance updated_at so an older response cannot overwrite
     // newer progress, while the unchanged result/input retain their references.
-    byId.set(task.id, { ...task, result, ...(stableInput ? { input: stableInput } : {}) });
+    byId.set(task.id, { ...task, result, ...(stableInput ? { input: stableInput } : {}),
+      ...(Object.hasOwn(task, "image_progress") || previous?.image_progress ? { image_progress: stableProgress || null } : {}) });
     changed = true;
   }
   return changed ? [...byId.values()].sort((left, right) => left.created_at.localeCompare(right.created_at)) : current;
@@ -205,7 +230,10 @@ export function subscribeAssistantTasks(options: {
       };
       await Promise.all(Array.from({ length: Math.min(3, pending.length) }, recover));
       if (stopped || activeController.signal.aborted) return;
-      const recovered = tasks.map(task => withInput.get(task.id) || task);
+      const recovered = tasks.map(task => {
+        const recovered = withInput.get(task.id) || task;
+        return Object.hasOwn(recovered, "image_progress") ? { ...recovered, image_progress: restoreAssistantImageProgress(recovered.image_progress) } : recovered;
+      });
       options.onTasks(recovered);
       if (!recovered.some(assistantTaskActive)) delay = options.idleInterval ?? 15000;
     } catch (error) {

@@ -1,0 +1,381 @@
+{
+  "local_tests": {
+    "passed": 531,
+    "failed": 0,
+    "includes": "PGlite database, real AI SDK mocked transport, UI harness, continuation callbacks"
+  },
+  "typecheck": "passed",
+  "lint": "passed",
+  "production_build": "passed",
+  "preview_url": "https://ledger-24f56yoyu-deno-me.vercel.app",
+  "preview_status": "ready; user-configured qwen3.8-max and global-scope Hong Kong endpoint; deployment-only temporary preview JWT secret",
+  "live_smoke": {
+    "fixture": "synthetic PNG statements, three rows per image, adjacent overlap and October-to-September transition",
+    "model": "qwen3.5-flash",
+    "earlier_run": [
+      {
+        "count": 1,
+        "status": "succeeded",
+        "serverTaskMs": 5912,
+        "elapsedMs": 15651,
+        "draftCount": 3,
+        "exactAmountsAndDates": true,
+        "error": null,
+        "summary": null
+      },
+      {
+        "count": 3,
+        "status": "succeeded",
+        "serverTaskMs": 29130,
+        "elapsedMs": 35149,
+        "draftCount": 7,
+        "exactAmountsAndDates": true,
+        "error": null,
+        "summary": {
+          "warnings": [],
+          "image_count": 3,
+          "retained_count": 7,
+          "extracted_count": 9,
+          "review_required": false,
+          "removed_duplicates": 2
+        }
+      },
+      {
+        "count": 5,
+        "status": "failed",
+        "serverTaskMs": 43067,
+        "elapsedMs": 50244,
+        "draftCount": 0,
+        "exactAmountsAndDates": false,
+        "error": "第 4 张截图：AI 识别到的金额或日期无效，请补充信息后重试。",
+        "summary": null
+      }
+    ],
+    "final_five_initial": [
+      {
+        "count": 5,
+        "status": "failed",
+        "serverTaskMs": 39909,
+        "elapsedMs": 54404,
+        "draftCount": 0,
+        "exactAmountsAndDates": false,
+        "error": "第 2 张截图：AI 识别到的金额或日期无效，请补充信息后重试。\n第 4 张截图：AI 识别到的金额或日期无效，请补充信息后重试。",
+        "summary": null
+      }
+    ],
+    "final_five_retry_2": {
+      "attempt": 2,
+      "status": "failed",
+      "server_retry_ms": 39220,
+      "completed": 4,
+      "failed": [
+        5
+      ],
+      "error": "AI 返回格式异常，请重试。"
+    },
+    "final_five_retry_3": {
+      "count": 5,
+      "attempt": 3,
+      "status": "succeeded",
+      "elapsedMs": 15959,
+      "serverRetryMs": 5799,
+      "draftCount": 11,
+      "exactAmountsAndDates": true,
+      "error": null,
+      "summary": {
+        "warnings": [],
+        "image_count": 5,
+        "retained_count": 11,
+        "extracted_count": 15,
+        "review_required": false,
+        "removed_duplicates": 4
+      }
+    },
+    "field_validation": [
+      {
+        "images": 1,
+        "status": "succeeded",
+        "countCorrect": true,
+        "descriptions": true,
+        "allExpense": true,
+        "datesAndAmounts": true,
+        "categoriesCorrect": true,
+        "membersCorrect": true
+      },
+      {
+        "images": 3,
+        "status": "succeeded",
+        "countCorrect": true,
+        "descriptions": true,
+        "allExpense": true,
+        "datesAndAmounts": true,
+        "categoriesCorrect": true,
+        "membersCorrect": true
+      },
+      {
+        "images": 5,
+        "status": "succeeded",
+        "countCorrect": true,
+        "descriptions": true,
+        "allExpense": true,
+        "datesAndAmounts": true,
+        "categoriesCorrect": true,
+        "membersCorrect": true
+      }
+    ],
+    "limitation": "Five-image final run required two manual retries. Model output reliability not accepted as production-ready. Preview continuation used authenticated GET recovery because deployment protection blocks server callbacks; closed-page continuation not verified. Some optional payment_method fields incorrectly used 人民币."
+  },
+  "production": "not deployed",
+  "test_transactions_created": 0,
+  "configuration_followup": {
+    "production_preview_same_key": true,
+    "production_preview_same_endpoint": true,
+    "qwen3_5_flash_probe": {
+      "status": 403,
+      "code": "access_denied",
+      "message": "Model access denied"
+    },
+    "pending": "Production configuration unchanged. Improve model output stability before release.",
+    "confirmed_workspace_scope": "中国香港",
+    "model_permission_query": {
+      "model": "qwen3.5-flash",
+      "http_status": 200,
+      "inference": true,
+      "fine_tune": false,
+      "deploy": false
+    },
+    "permission_change": "qwen3.5-flash inference enabled after explicit user authorization, verified through GET",
+    "direct_image_probe": {
+      "model": "qwen3.5-flash",
+      "images": 1,
+      "drafts": 3,
+      "model_duration_ms": 10516,
+      "first_output_ms": 4498,
+      "status": "success"
+    }
+  },
+  "code_fixes_from_live_test": [
+    "Sequential date-context propagation within bounded two-target waves",
+    "Retry invalidates all results after the earliest incomplete image, including results with null context input",
+    "Clarify original versus request-local image numbering and month evidence in prompt"
+  ],
+  "cleanup": {
+    "synthetic_account_deleted": true,
+    "test_transactions_created": 0,
+    "temporary_local_credentials_removed": true
+  },
+  "global_migration": {
+    "target_model": "qwen3.8-max",
+    "workspace_region": "cn-hongkong",
+    "workspace_scope": "全球",
+    "existing_workspace_id": "ws-wwuqtw9cae0o3q8t",
+    "local_default_updated": true,
+    "focused_tests_passed": 86,
+    "cloud_configuration_owner": "user opted to create API key and configure Vercel themselves",
+    "status": "preview real-provider verification passed; production not deployed",
+    "preview_url": "https://ledger-24f56yoyu-deno-me.vercel.app",
+    "preview_ready": true,
+    "function_regions": [
+      "hkg1"
+    ],
+    "endpoint": "https://ws-wwuqtw9cae0o3q8t.cn-hongkong.maas.aliyuncs.com/compatible-mode/v1",
+    "key_verified": true,
+    "model_verified": "qwen3.8-max",
+    "validation_date": "2026-10-09",
+    "image_cases": [
+      {
+        "count": 1,
+        "status": "succeeded",
+        "serverTaskMs": 9016,
+        "elapsedMs": 24257,
+        "draftCount": 3,
+        "exactAmountsAndDates": true,
+        "error": null,
+        "summary": null
+      },
+      {
+        "count": 3,
+        "status": "succeeded",
+        "serverTaskMs": 28907,
+        "elapsedMs": 37572,
+        "draftCount": 7,
+        "exactAmountsAndDates": true,
+        "error": null,
+        "summary": {
+          "warnings": [],
+          "image_count": 3,
+          "retained_count": 7,
+          "extracted_count": 9,
+          "review_required": false,
+          "removed_duplicates": 2
+        }
+      },
+      {
+        "count": 5,
+        "status": "succeeded",
+        "serverTaskMs": 48400,
+        "elapsedMs": 61562,
+        "draftCount": 11,
+        "exactAmountsAndDates": true,
+        "error": null,
+        "summary": {
+          "warnings": [],
+          "image_count": 5,
+          "retained_count": 11,
+          "extracted_count": 15,
+          "review_required": false,
+          "removed_duplicates": 4
+        }
+      }
+    ],
+    "field_validation": [
+      {
+        "images": 1,
+        "status": "succeeded",
+        "countCorrect": true,
+        "descriptions": true,
+        "allExpense": true,
+        "datesAndAmounts": true,
+        "categoriesCorrect": true,
+        "membersCorrect": true
+      },
+      {
+        "images": 3,
+        "status": "succeeded",
+        "countCorrect": true,
+        "descriptions": true,
+        "allExpense": true,
+        "datesAndAmounts": true,
+        "categoriesCorrect": true,
+        "membersCorrect": true
+      },
+      {
+        "images": 5,
+        "status": "succeeded",
+        "countCorrect": true,
+        "descriptions": true,
+        "allExpense": true,
+        "datesAndAmounts": true,
+        "categoriesCorrect": true,
+        "membersCorrect": true
+      }
+    ],
+    "all_image_tasks_first_attempt": true,
+    "payment_methods_correctly_unspecified": true,
+    "chat_cases": [
+      {
+        "case": "review_before_posting",
+        "elapsedMs": 10630,
+        "firstDeltaMs": 7375,
+        "streamedReply": "上传截图后，账目不会直接入账。系统会先识别图片中的交易信息并生成待确认的草稿账单，展示给您核对。\n\n如果金额识别错了，您可以直接在页面上编辑对应的草稿卡片，手动修改为正确的金额。确认所有信息无误后，再点击“确认”按钮完成入账即可。",
+        "plan": {
+          "action": "chat",
+          "reply": "上传截图后，账目不会直接入账。系统会先识别图片中的交易信息并生成待确认的草稿账单，展示给您核对。\n\n如果金额识别错了，您可以直接在页面上编辑对应的草稿卡片，手动修改为正确的金额。确认所有信息无误后，再点击“确认”按钮完成入账即可。",
+          "drafts": [],
+          "query": null,
+          "update": null,
+          "undo": null
+        },
+        "error": null
+      },
+      {
+        "case": "context_followup",
+        "elapsedMs": 8805,
+        "firstDeltaMs": 7096,
+        "streamedReply": "如果只是想改支出人，同样可以在待确认的草稿卡片上直接编辑，选择正确的成员即可。修改完成后，再点击“确认”按钮完成入账。目前您没有待确认的账单，如果有需要修改的账单，请先上传截图或提供账单信息生成草稿后再操作。",
+        "plan": {
+          "action": "chat",
+          "reply": "如果只是想改支出人，同样可以在待确认的草稿卡片上直接编辑，选择正确的成员即可。修改完成后，再点击“确认”按钮完成入账。目前您没有待确认的账单，如果有需要修改的账单，请先上传截图或提供账单信息生成草稿后再操作。",
+          "drafts": [],
+          "query": null,
+          "update": null,
+          "undo": null
+        },
+        "error": null
+      },
+      {
+        "case": "ledger_query_empty_account",
+        "elapsedMs": 11816,
+        "firstDeltaMs": 10977,
+        "streamedReply": "**本月（2026年10月）没有已入账的餐饮支出记录。**\n\n查询范围内餐饮类账单为 0 笔，金额为 0 元，因此无法进一步分析去向。",
+        "plan": {
+          "action": "query",
+          "reply": "**本月（2026年10月）没有已入账的餐饮支出记录。**\n\n查询范围内餐饮类账单为 0 笔，金额为 0 元，因此无法进一步分析去向。",
+          "drafts": [],
+          "query": {
+            "start_date": "2026-10-01",
+            "end_date": "2026-10-31",
+            "type": "expense",
+            "category_id": "4a59f68d-3933-4798-9264-41788c5f61ea",
+            "member_id": null,
+            "keyword": null
+          },
+          "update": null,
+          "undo": null
+        },
+        "error": null
+      },
+      {
+        "case": "natural_language_two_transactions",
+        "elapsedMs": 11569,
+        "plan": {
+          "action": "record",
+          "reply": "已为您生成两笔餐饮支出草稿，请核对：\n1. 2026-10-08 午饭 28元（本人）\n2. 2026-10-09 早餐 12.5元（本人）\n确认无误后请点击卡片上的确认按钮入账。",
+          "drafts": [
+            {
+              "id": "de902a4a-d7d1-492d-9bbb-4c0389690526",
+              "type": "expense",
+              "amount_cents": 2800,
+              "category_id": "4a59f68d-3933-4798-9264-41788c5f61ea",
+              "member_id": "e97b23de-9a8f-409f-8d8e-35817bc9650b",
+              "transaction_date": "2026-10-08",
+              "description": "午饭",
+              "payment_method": null,
+              "note": ""
+            },
+            {
+              "id": "ca034154-587a-4138-a92f-183f17500b99",
+              "type": "expense",
+              "amount_cents": 1250,
+              "category_id": "4a59f68d-3933-4798-9264-41788c5f61ea",
+              "member_id": "e97b23de-9a8f-409f-8d8e-35817bc9650b",
+              "transaction_date": "2026-10-09",
+              "description": "早餐",
+              "payment_method": null,
+              "note": ""
+            }
+          ],
+          "query": null,
+          "update": null,
+          "undo": null
+        }
+      }
+    ],
+    "async_chat": {
+      "status": "succeeded",
+      "attempt": 1,
+      "serverTaskMs": 5432,
+      "elapsedMs": 10430,
+      "firstPartialMs": null,
+      "result": {
+        "undo": null,
+        "query": null,
+        "reply": "截图识别后，系统会生成待确认的账单草稿卡片。您可以直接在卡片上核对每笔交易的日期、金额、分类和备注等信息。\n\n如果发现金额或其他信息有误，可以直接在待确认的草稿卡片上进行修改，确认无误后再点击“确认入账”按钮保存。\n\n请注意：一旦账单已确认入账，如需撤销或修改，需要向我发送明确的指令（如“撤销这笔账”），我会协助您将其恢复为待确认状态后再进行编辑。",
+        "action": "chat",
+        "drafts": [],
+        "update": null
+      },
+      "error": null
+    },
+    "limitations": [
+      "Synthetic screenshots used, not a broad real-world accuracy benchmark.",
+      "Image serverTaskMs excludes local CLI startup, network and result polling; elapsedMs includes them.",
+      "Preview protection still requires authenticated polling for continuation; closed-page continuation was not verified."
+    ],
+    "cleanup": {
+      "synthetic_account_deleted": true,
+      "test_transactions_created": 0,
+      "temporary_local_credentials_removed": true
+    }
+  }
+}

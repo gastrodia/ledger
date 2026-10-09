@@ -3,7 +3,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
 // Server-side only. Never return this configuration or provider payloads to the client.
 export const BAILIAN_SUMMARY_MODEL = "qwen3.8-max";
-export const BAILIAN_ASSISTANT_MODEL = "qwen3.7-plus";
+export const BAILIAN_ASSISTANT_MODEL = "qwen3.8-max";
 export const BAILIAN_ASR_MODEL = "qwen3-asr-flash";
 
 export class BailianError extends Error {
@@ -38,6 +38,7 @@ function providerError(error: unknown): BailianError {
   };
   if (e.finishReason === "length") return new BailianError(502, "truncated");
   if (e.name === "TimeoutError") return new BailianError(504, "timeout");
+  if (e.name === "AbortError") return new BailianError(502, "cancelled");
   if (e.name === "AI_NoOutputGeneratedError") return new BailianError(502, "empty");
   // Output.object wraps parsing and schema errors in its own error. Preserve
   // that classification instead of treating its parser cause as a network error.
@@ -68,7 +69,9 @@ export function bailianFailure(error: unknown): { status: number; message: strin
   const e = providerError(error);
   if (e.code === "missing_key") return { status: 503, message: "百炼尚未配置，请设置服务端 DASHSCOPE_API_KEY。" };
   if (e.code === "invalid_endpoint") return { status: 503, message: "百炼地址配置无效，请检查服务端配置。" };
+  if (e.code === "invalid_timeout") return { status: 503, message: "AI 请求时限配置无效，请检查服务端配置。" };
   if (e.code === "invalid_output") return { status: 422, message: "AI 返回格式异常，请重试。" };
+  if (e.code === "Model.Unsupported") return { status: 503, message: "当前百炼工作空间的部署范围不支持所选模型，请检查模型配置。" };
   if (e.status === 402 || /Arrearage|InsufficientBalance/i.test(e.code)) return { status: 503, message: "百炼余额或额度不足，请检查账户。" };
   if (e.status === 401 || e.status === 403) return { status: 503, message: "百炼暂不可用，请检查 API Key 的地域和模型权限。" };
   if (e.status === 429) return { status: 429, message: "百炼请求过于频繁或额度受限，请稍后重试。" };
@@ -82,6 +85,11 @@ export type BailianRequest = {
   messages: ModelMessage[];
   temperature?: number;
   maxOutputTokens?: number;
+  // Interactive routes keep the 90-second default. Longer background image
+  // work may opt into a bounded budget within the surrounding task deadline.
+  timeoutMs?: number;
+  // Optional server-generated correlation ID; never forwarded to the provider.
+  telemetryId?: string;
   thinking?: boolean;
   reasoningEffort?: string;
   asrOptions?: { language?: string; enable_itn?: boolean };
@@ -135,10 +143,24 @@ function requireCompletedTransport(body: ReadableStream<Uint8Array>) {
   }));
 }
 
-function requestSettings(request: BailianRequest, externalSignal?: AbortSignal) {
+type BailianOperation = "text" | "object" | "stream" | "object-stream";
+
+function failureClassification(error: BailianError) {
+  if (["timeout", "cancelled", "invalid_output", "truncated", "empty", "incomplete", "incomplete_stream"].includes(error.code)) return error.code;
+  if (error.status === 402 || /Arrearage|InsufficientBalance/i.test(error.code)) return "billing";
+  if (error.status === 401 || error.status === 403) return "credentials";
+  if (error.status === 429) return "rate_limited";
+  if (error.status === 400 || error.status === 404 || ["missing_key", "invalid_endpoint", "invalid_timeout"].includes(error.code)) return "configuration";
+  if (error.status === 504) return "timeout";
+  return "unavailable";
+}
+
+function requestSettings(request: BailianRequest, operation: BailianOperation, externalSignal?: AbortSignal) {
+  const timeoutMs = request.timeoutMs ?? 90_000;
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 180_000) throw new BailianError(503, "invalid_timeout");
   const config = bailianConfig();
   const controller = new AbortController();
-  const signal = AbortSignal.any([AbortSignal.timeout(90_000), controller.signal, ...(externalSignal ? [externalSignal] : [])]);
+  const signal = AbortSignal.any([...(externalSignal ? [externalSignal] : []), AbortSignal.timeout(timeoutMs), controller.signal]);
   const provider = createOpenAICompatible({
     name: "bailian", ...config, supportsStructuredOutputs: true, includeUsage: true,
     transformRequestBody: transformBailianBody,
@@ -149,14 +171,38 @@ function requestSettings(request: BailianRequest, externalSignal?: AbortSignal) 
     },
   });
   const startedAt = Date.now();
-  const recordUsage = (operation: "text" | "object" | "stream" | "object-stream", usage: LanguageModelUsage) => {
+  const telemetryId = typeof request.telemetryId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.telemetryId)
+    ? request.telemetryId : undefined;
+  let firstOutputMs: number | undefined;
+  let terminalRecorded = false;
+  const metadata = () => ({ model: request.model, operation, timeoutMs, durationMs: Date.now() - startedAt, firstOutputMs,
+    ...(telemetryId ? { telemetryId } : {}),
+  });
+  const recordFirstOutput = (kind: "text" | "partial") => {
+    if (firstOutputMs !== undefined || terminalRecorded) return;
+    firstOutputMs = Date.now() - startedAt;
+    console.info("AI request first output", { ...metadata(), outputKind: kind });
+  };
+  const recordUsage = (usage: LanguageModelUsage) => {
+    if (terminalRecorded) return;
+    terminalRecorded = true;
     console.info("AI request completed", {
-      model: request.model, operation, durationMs: Date.now() - startedAt,
+      ...metadata(),
       inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, totalTokens: usage.totalTokens,
     });
   };
+  const recordFailure = (error: unknown) => {
+    const failure = requestFailure(error, signal);
+    if (!terminalRecorded) {
+      terminalRecorded = true;
+      // Provider codes, payloads and error messages can contain sensitive data.
+      // Record only our allowlisted classification and public HTTP status.
+      console.info("AI request failed", { ...metadata(), failure: failureClassification(failure), status: bailianFailure(failure).status });
+    }
+    return failure;
+  };
   return {
-    controller, signal, recordUsage,
+    controller, signal, recordUsage, recordFirstOutput, recordFailure,
     settings: {
       model: provider(request.model),
       instructions: request.messages.filter(message => message.role === "system"),
@@ -184,25 +230,29 @@ function checkFinish(finishReason: string, text: string) {
 }
 
 export async function bailianText(request: BailianRequest, signal?: AbortSignal): Promise<string> {
-  const runtime = requestSettings(request, signal);
+  const runtime = requestSettings(request, "text", signal);
   try {
-    const result = await generateText({ ...runtime.settings, onFinish: ({ totalUsage }) => runtime.recordUsage("text", totalUsage) });
+    const result = await generateText(runtime.settings);
     checkFinish(result.finishReason, result.text);
+    runtime.signal.throwIfAborted();
+    runtime.recordUsage(result.totalUsage);
     return result.text.trim();
-  } catch (error) { throw requestFailure(error, runtime.signal); }
+  } catch (error) { throw runtime.recordFailure(error); }
   finally { runtime.controller.abort(); }
 }
 
 export async function bailianObject<T>(request: BailianRequest & { schema: FlexibleSchema<T>; schemaName?: string }, signal?: AbortSignal): Promise<T> {
-  const runtime = requestSettings(request, signal);
+  const runtime = requestSettings(request, "object", signal);
   try {
     const result = await generateText({
       ...runtime.settings, output: Output.object({ schema: request.schema, name: request.schemaName }),
-      onFinish: ({ totalUsage }) => runtime.recordUsage("object", totalUsage),
     });
     checkFinish(result.finishReason, result.text);
-    return result.output;
-  } catch (error) { throw requestFailure(error, runtime.signal); }
+    const output = result.output;
+    runtime.signal.throwIfAborted();
+    runtime.recordUsage(result.totalUsage);
+    return output;
+  } catch (error) { throw runtime.recordFailure(error); }
   finally { runtime.controller.abort(); }
 }
 
@@ -213,10 +263,9 @@ export async function bailianObjectStream<T>(
   onPartial: (partial: unknown) => void,
   signal?: AbortSignal,
 ): Promise<T> {
-  const runtime = requestSettings(request, signal);
+  const runtime = requestSettings(request, "object-stream", signal);
   const result = streamText({
     ...runtime.settings, output: Output.object({ schema: request.schema, name: request.schemaName }),
-    onFinish: ({ totalUsage }) => runtime.recordUsage("object-stream", totalUsage),
     // Partial-output streams omit SDK error events. Abort with the original
     // error so failures cannot be mistaken for a successfully validated object.
     onError: ({ error }) => { runtime.controller.abort(error); },
@@ -227,13 +276,15 @@ export async function bailianObjectStream<T>(
       const next = await iterator.next();
       runtime.signal.throwIfAborted();
       if (next.done) break;
+      if (next.value && typeof next.value === "object" && Object.keys(next.value).length > 0) runtime.recordFirstOutput("partial");
       onPartial(next.value);
     }
     checkFinish(await result.finishReason, await result.text);
     const output = await result.output;
     runtime.signal.throwIfAborted();
+    runtime.recordUsage(await result.totalUsage);
     return output;
-  } catch (error) { throw requestFailure(error, runtime.signal); }
+  } catch (error) { throw runtime.recordFailure(error); }
   finally {
     // Abort before returning the iterator: cancelling only one SDK tee branch
     // may otherwise wait forever for the still-open provider response.
@@ -243,9 +294,9 @@ export async function bailianObjectStream<T>(
 }
 
 export async function bailianStream(request: BailianRequest, signal?: AbortSignal): Promise<AsyncGenerator<BailianStreamPart>> {
-  const runtime = requestSettings(request, signal);
+  const runtime = requestSettings(request, "stream", signal);
   const result = streamText({
-    ...runtime.settings, onFinish: ({ totalUsage }) => runtime.recordUsage("stream", totalUsage),
+    ...runtime.settings,
     // The SDK default callback logs raw provider errors. Public errors are
     // normalized below, without recording prompts, responses or credentials.
     onError: () => {},
@@ -258,12 +309,14 @@ export async function bailianStream(request: BailianRequest, signal?: AbortSigna
     let prefix = "";
     while (true) {
       first = await iterator.next();
+      runtime.signal.throwIfAborted();
       if (first.done) throw new BailianError(502, "empty");
       if (first.value.type === "error") throw first.value.error;
       if (first.value.type === "abort") throw runtime.signal.reason;
       if (first.value.type === "finish") throw new BailianError(502, "empty");
       if (first.value.type === "text-delta") {
         if (first.value.text.trim()) {
+          runtime.recordFirstOutput("text");
           first = { done: false, value: { ...first.value, text: prefix + first.value.text } };
           break;
         }
@@ -271,7 +324,7 @@ export async function bailianStream(request: BailianRequest, signal?: AbortSigna
       }
     }
   } catch (error) {
-    const failure = requestFailure(error, runtime.signal);
+    const failure = runtime.recordFailure(error);
     runtime.controller.abort();
     await iterator.return?.();
     throw failure;
@@ -282,6 +335,7 @@ export async function bailianStream(request: BailianRequest, signal?: AbortSigna
     let hasText = false, finishReason: string | undefined;
     try {
       while (!next.done) {
+        runtime.signal.throwIfAborted();
         const chunk = next.value;
         if (chunk.type === "error") throw chunk.error;
         if (chunk.type === "abort") throw runtime.signal.reason;
@@ -294,8 +348,15 @@ export async function bailianStream(request: BailianRequest, signal?: AbortSigna
       }
       if (!finishReason || !["stop", "length"].includes(finishReason)) throw new BailianError(502, "incomplete_stream");
       if (!hasText) throw new BailianError(502, "empty");
+      runtime.signal.throwIfAborted();
+      if (finishReason === "length") runtime.recordFailure(new BailianError(502, "truncated"));
+      else runtime.recordUsage(await result.totalUsage);
       yield { type: "finish", finishReason };
-    } catch (error) { throw requestFailure(error, runtime.signal); }
-    finally { runtime.controller.abort(); await iterator.return?.(); }
+    } catch (error) { throw runtime.recordFailure(error); }
+    finally {
+      runtime.recordFailure(new BailianError(502, "cancelled"));
+      runtime.controller.abort();
+      await iterator.return?.();
+    }
   })();
 }

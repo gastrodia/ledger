@@ -1,9 +1,9 @@
 import { sql } from "@/lib/db";
 
 export async function ensureAssistantTaskSchema() {
-  try { await sql.query("SELECT t.id FROM assistant_tasks t, assistant_task_conversations c LIMIT 0"); }
+  try { await sql.query("SELECT t.id,t.image_progress,t.image_checkpoint,t.run_token FROM assistant_tasks t, assistant_task_conversations c LIMIT 0"); }
   catch (error) {
-    if ((error as { code?: string }).code !== "42P01") throw error;
+    if (!["42P01", "42703"].includes((error as { code?: string }).code ?? "")) throw error;
     await sql.query(`-- A cleared conversation stays closed even when an earlier POST arrives late.
 CREATE TABLE IF NOT EXISTS assistant_task_conversations (
   user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -27,10 +27,17 @@ CREATE TABLE IF NOT EXISTS assistant_tasks (
   error TEXT,
   attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
   lease_until TIMESTAMPTZ,
+  run_token VARCHAR(36),
+  image_progress JSONB,
+  image_checkpoint JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id,id)
 )`);
+    await sql.query(`ALTER TABLE assistant_tasks
+      ADD COLUMN IF NOT EXISTS run_token VARCHAR(36),
+      ADD COLUMN IF NOT EXISTS image_progress JSONB,
+      ADD COLUMN IF NOT EXISTS image_checkpoint JSONB`);
     await sql.query(`CREATE INDEX IF NOT EXISTS assistant_tasks_conversation_idx ON assistant_tasks (user_id,conversation_id,created_at)`);
   }
 }

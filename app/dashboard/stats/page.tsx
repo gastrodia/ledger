@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ChevronDown, ChevronLeft, ChevronRight, Eye, EyeOff, ArrowUpRight, CalendarDays } from "lucide-react";
@@ -163,16 +163,24 @@ function StatsHeader() {
   </header>;
 }
 
+function StatsPeriodToolbar({ mode, navigation, reset }: { mode: ReactNode; navigation: ReactNode; reset: ReactNode }) {
+  return <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 sm:flex sm:gap-2 sm:rounded-lg sm:border sm:bg-card sm:p-2">
+    <div className="flex min-w-0">{mode}</div>
+    <div className="order-3 col-span-2 grid min-w-0 grid-cols-[2.25rem_minmax(0,1fr)_2.25rem] items-center rounded-md border bg-card p-0.5 sm:order-none sm:flex sm:gap-1 sm:border-0 sm:bg-transparent sm:p-0">{navigation}</div>
+    {reset}
+  </div>;
+}
+
 function StatsPageSkeleton() {
   return <DashboardLayout>
     <div className="space-y-5">
       <StatsHeader />
       <SkeletonRegion label="正在加载统计周期…">
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
-          <Skeleton className="h-9 w-[6.375rem]" />
-          <div className="order-3 flex w-full items-center gap-1 sm:order-none sm:w-auto"><Skeleton className="size-8" /><Skeleton className="h-9 w-40" /><Skeleton className="size-8" /></div>
-          <Skeleton className="ml-auto h-8 w-18" />
-        </div>
+        <StatsPeriodToolbar
+          mode={<Skeleton className="h-9 w-[6.375rem]" />}
+          navigation={<><Skeleton className="size-9 sm:size-8" /><Skeleton className="h-9 w-full min-w-0 sm:w-40" /><Skeleton className="size-9 sm:size-8" /></>}
+          reset={<Skeleton className="ml-auto h-8 w-18" />}
+        />
       </SkeletonRegion>
       <StatsSkeleton />
     </div>
@@ -262,19 +270,19 @@ function StatsContent() {
     <div className="space-y-5">
       <StatsHeader />
 
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
-        <Segment value={view} label="统计周期" options={[{ value: "month", label: "按月" }, { value: "year", label: "按年" }]} onChange={value => navigate({ view: value })} />
-        <div className="order-3 flex w-full min-w-0 items-center gap-1 sm:order-none sm:w-auto">
-          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label={view === "month" ? "上个月" : "上一年"} disabled={!previousDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, -1) || current.date }))}><ChevronLeft /></Button>
-          {view === "month" ? <Input type="month" aria-label="选择月份" value={date} min="0002-01" max="9998-12" className="h-9 w-40 min-w-0 text-sm" onInput={event => isStatsMonth(event.currentTarget.value) && navigate({ date: event.currentTarget.value })} onChange={event => isStatsMonth(event.target.value) && navigate({ date: event.target.value })} /> :
+      <StatsPeriodToolbar
+        mode={<Segment value={view} label="统计周期" options={[{ value: "month", label: "按月" }, { value: "year", label: "按年" }]} onChange={value => navigate({ view: value })} />}
+        navigation={<>
+          <Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 sm:size-8" aria-label={view === "month" ? "上个月" : "上一年"} disabled={!previousDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, -1) || current.date }))}><ChevronLeft /></Button>
+          {view === "month" ? <Input type="month" aria-label="选择月份" value={date} min="0002-01" max="9998-12" className="relative h-9 min-w-0 border-transparent bg-transparent px-2 text-center text-sm hover:border-transparent focus-visible:ring-inset max-sm:[&::-webkit-datetime-edit]:w-full max-sm:[&::-webkit-datetime-edit-fields-wrapper]:flex max-sm:[&::-webkit-datetime-edit-fields-wrapper]:justify-center max-sm:[&::-webkit-calendar-picker-indicator]:absolute max-sm:[&::-webkit-calendar-picker-indicator]:right-2 sm:w-40 sm:border-input sm:bg-background sm:px-3 sm:text-left sm:hover:border-slate-300" onInput={event => isStatsMonth(event.currentTarget.value) && navigate({ date: event.currentTarget.value })} onChange={event => isStatsMonth(event.target.value) && navigate({ date: event.target.value })} /> :
             <Select value={year} onValueChange={value => navigate(current => ({ date: `${value}-${current.date.slice(5)}` }))}>
-              <SelectTrigger aria-label="选择年份" className="h-9 w-40 text-sm"><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="选择年份" className="relative h-9 min-w-0 border-transparent bg-transparent px-2 text-sm hover:border-transparent focus:ring-inset [&>span]:flex-1 [&>span]:text-center [&>svg]:absolute [&>svg]:right-2 sm:w-40 sm:border-input sm:bg-background sm:px-3 sm:hover:border-slate-300 sm:[&>span]:text-left sm:[&>svg]:static"><SelectValue /></SelectTrigger>
               <SelectContent>{years.map(value => <SelectItem key={value} value={String(value).padStart(4, "0")}>{value} 年</SelectItem>)}</SelectContent>
             </Select>}
-          <Button type="button" variant="ghost" size="icon" className="size-8 shrink-0" aria-label={view === "month" ? "下个月" : "下一年"} disabled={!nextDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, 1) || current.date }))}><ChevronRight /></Button>
-        </div>
-        <Button type="button" variant="ghost" size="sm" className="ml-auto h-8 text-muted-foreground" disabled={currentPeriod} onClick={() => navigate({ date: asOfDate.slice(0, 7) })}>{view === "month" ? "回到本月" : "回到今年"}</Button>
-      </div>
+          <Button type="button" variant="ghost" size="icon" className="size-9 shrink-0 sm:size-8" aria-label={view === "month" ? "下个月" : "下一年"} disabled={!nextDate} onClick={() => navigate(current => ({ date: stepStatsDate(current.date, current.view, 1) || current.date }))}><ChevronRight /></Button>
+        </>}
+        reset={<Button type="button" variant="ghost" size="sm" className="ml-auto h-8 text-muted-foreground" disabled={currentPeriod} onClick={() => navigate({ date: asOfDate.slice(0, 7) })}>{view === "month" ? "回到本月" : "回到今年"}</Button>}
+      />
 
       {loading ? <StatsSkeleton periodLabel={periodLabel} mode={view} period={getStatsPeriod(view, view === "month" ? date : year, asOfDate)} showIncome={showIncome} /> : error ? <div role="alert" className="rounded-lg border bg-card px-4 py-12 text-center"><p className="mb-4 text-sm">{error}</p><Button variant="outline" onClick={() => setReload(value => value + 1)}>重新加载</Button></div> : data ? <>
         <section aria-label={`${periodLabel}收支总览`} className="rounded-lg border bg-card p-4 sm:p-5">

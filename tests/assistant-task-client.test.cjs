@@ -50,6 +50,7 @@ function task(extra = {}) {
     text: '', result: plan(), error: null, attempt: 1, created_at: '2026-10-08T01:00:00.000Z',
     updated_at: '2026-10-08T01:01:00.000Z', ...extra };
 }
+const imageProgress = (extra = {}) => ({ total: 5, completed: 2, failed: [], active: [3, 4], stage: 'recognizing', ...extra });
 function user(extra = {}) { return { id: uuid(20), role: 'user', text: '识别这张截图', ...extra }; }
 function deferred() {
   let resolve, reject;
@@ -342,6 +343,83 @@ test('real response text and retry attempts still publish updated task snapshots
   assert.equal(resumed[0].attempt, 2);
   assert.equal(resumed[0].status, 'running');
   assert.equal(resumed[0].error, null);
+});
+
+test('image progress advances without publishing drafts and survives failed-task recovery', () => {
+  const running = task({ status: 'running', result: null, image_progress: imageProgress() });
+  const first = client.mergeAssistantTasks([user()], [running], conversationId, members);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].drafts, undefined);
+  assert.deepEqual(plain(first[0].image_progress), imageProgress());
+  const next = { ...running, image_progress: imageProgress({ completed: 3, active: [4, 5] }), updated_at: '2026-10-08T01:02:00.000Z' };
+  const advanced = client.reconcileAssistantTaskSnapshots([running], [next]);
+  assert.notEqual(advanced[0], running);
+  assert.deepEqual(plain(advanced[0].image_progress), next.image_progress);
+  assert.equal(client.reconcileAssistantTaskSnapshots(advanced, [plain(next)]), advanced);
+  const failed = { ...next, status: 'failed', error: '识别超时', image_progress: imageProgress({ completed: 4, failed: [5], active: [] }) };
+  const recovered = client.mergeAssistantTasks(plain(first), [failed], conversationId, members);
+  assert.equal(recovered.length, 2);
+  assert.deepEqual(plain(recovered[1].image_progress), failed.image_progress);
+  assert.equal(recovered[1].drafts, undefined);
+  assert.equal(recovered[1].taskApplied, undefined);
+  assert.equal(client.mergeAssistantTasks(recovered, [plain(failed)], conversationId, members), recovered);
+  assert.equal(client.assistantTaskRetryLabel(recovered[1]), '继续识别');
+  assert.match(client.assistantImageProgressText(recovered[1].image_progress, 'failed'), /第 5 张识别失败；已完成 4\/5 张，结果已保留/);
+});
+
+test('invalid image progress is dropped without losing the task or producing misleading completion', () => {
+  for (const invalid of [
+    [], '5/5', imageProgress({ total: 0 }), imageProgress({ total: 6 }), imageProgress({ total: '5' }),
+    imageProgress({ completed: -1 }), imageProgress({ completed: 1.5 }), imageProgress({ completed: 6 }),
+    imageProgress({ completed: NaN }), imageProgress({ active: [0] }), imageProgress({ active: [6] }),
+    imageProgress({ active: ['3'] }), imageProgress({ active: [3, 3] }), imageProgress({ failed: [4, 4], active: [] }),
+    imageProgress({ failed: [3] }), imageProgress({ completed: 4 }), imageProgress({ failed: null }),
+    imageProgress({ stage: 'completed' }), imageProgress({ stage: 'merging' }),
+    imageProgress({ stage: 'merging', completed: 5, active: [], failed: [1] }),
+  ]) {
+    const remote = task({ status: 'running', result: null, image_progress: invalid });
+    const reconciled = client.reconcileAssistantTaskSnapshots([], [remote]);
+    assert.equal(reconciled[0].id, remote.id);
+    assert.equal(reconciled[0].image_progress, null);
+    const merged = client.mergeAssistantTasks([user()], [remote], conversationId, members);
+    assert.equal(merged[0].image_progress, undefined);
+    assert.equal(merged[0].drafts, undefined);
+    assert.equal(client.assistantTaskRetryLabel({ taskId: remote.id, taskStatus: 'failed', image_progress: invalid }), '重新处理');
+  }
+});
+
+test('stale image attempts cannot overwrite retained results or retry progress', () => {
+  const resumed = task({ status: 'running', result: null, attempt: 2,
+    image_progress: imageProgress({ completed: 4, active: [5] }), updated_at: '2026-10-08T01:04:00.000Z' });
+  const current = [resumed];
+  const messages = client.mergeAssistantTasks([user()], current, conversationId, members);
+  const late = task({ status: 'failed', result: null, attempt: 1,
+    image_progress: imageProgress({ completed: 2, active: [], failed: [3, 4, 5] }), updated_at: '2026-10-08T01:05:00.000Z' });
+  assert.equal(client.reconcileAssistantTaskSnapshots(current, [late]), current);
+  assert.equal(client.mergeAssistantTasks(messages, [late], conversationId, members), messages);
+  assert.equal(messages[0].image_progress.completed, 4);
+});
+
+test('queued, active, merging and recovered image labels describe observed progress only', () => {
+  assert.equal(client.assistantImageProgressText(imageProgress({ active: [] }), 'queued'), '已完成 2/5 张，等待继续识别…');
+  assert.equal(client.assistantImageProgressText(imageProgress(), 'running'), '已完成 2/5 张，正在识别第 3、4 张…');
+  assert.equal(client.assistantImageProgressText(imageProgress(), 'recovering'), '上次进度：已完成 2/5 张，正在恢复处理进度…');
+  const merged = imageProgress({ completed: 5, active: [], stage: 'merging' });
+  assert.equal(client.assistantImageProgressText(merged, 'running'), '已完成 5/5 张，正在整理账目…');
+  assert.equal(client.assistantTaskRetryLabel({ taskId: uuid(30), taskStatus: 'failed', image_progress: merged }), '重新整理结果');
+  assert.equal(client.assistantTaskRetryLabel({ taskId: uuid(30), taskStatus: 'failed' }), '重新处理');
+  assert.equal(client.assistantTaskRetryLabel({ taskId: uuid(30), taskStatus: 'missing', image_progress: merged }), '重试发送');
+});
+
+test('polling sanitizes image progress before publishing remote snapshots', async () => {
+  const remote = task({ status: 'running', result: null, image_progress: imageProgress({ completed: 99 }) });
+  const polling = pollFixture(async () => response({ tasks: [remote] }));
+  try {
+    await flush();
+    assert.equal(polling.received.length, 1);
+    assert.equal(polling.received[0][0].image_progress, null);
+    assert.equal(polling.errors.length, 0);
+  } finally { polling.subscription.stop(); }
 });
 
 test('stopping a page subscription only aborts its GET and cannot cancel the durable task', async () => {

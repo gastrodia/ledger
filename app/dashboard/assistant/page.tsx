@@ -25,8 +25,8 @@ import { savedDraftSnapshot, undoRecoverySnapshots, validateUndoResult, type Ass
 import { MAX_AUDIO_SECONDS, recordingToWav } from "@/lib/assistant-audio";
 import { startSpeechRecording, type SpeechPhase, type SpeechRecording } from "@/lib/assistant-speech";
 import { appendSpeechTranscript } from "@/lib/assistant-speech-transcript";
-import { assistantMemberChoiceTarget as memberChoiceTarget, assistantTaskJson, AssistantTaskRequestError, mergeAssistantTasks, reconcileAssistantTaskSnapshots, subscribeAssistantTasks, type EditableAssistantDraft as EditableDraft, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
-import { assistantTaskActive, type AssistantTask, type AssistantTaskRequest } from "@/lib/assistant-task-types";
+import { assistantMemberChoiceTarget as memberChoiceTarget, assistantImageProgressText, assistantTaskRetryLabel, assistantTaskJson, AssistantTaskRequestError, mergeAssistantTasks, reconcileAssistantTaskSnapshots, subscribeAssistantTasks, type EditableAssistantDraft as EditableDraft, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
+import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask, type AssistantTaskRequest } from "@/lib/assistant-task-types";
 import { ASSISTANT_DRAFT_SORT_LABELS, assistantDraftSort, nextAssistantDraftSort, sortedAssistantDrafts } from "@/lib/assistant-draft-sort";
 import { appendAssistantImages, clipboardImages, restoreAssistantImages, restoreAssistantImportSummary, prepareAssistantMessageImage, MAX_ASSISTANT_IMAGES, MAX_ASSISTANT_IMAGE_LENGTH, MAX_ASSISTANT_MESSAGE_IMAGE_LENGTH, type AssistantImage } from "@/lib/assistant-images";
 import { localCalendarDate } from "@/lib/stats-period";
@@ -34,7 +34,7 @@ import { getDraftEpoch, subscribeDraftLogout } from "@/lib/form-drafts";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
-type StreamingReply = { text: string; phase: AssistantTask["phase"] };
+type StreamingReply = { text: string; phase: AssistantTask["phase"]; image_progress?: AssistantImageProgress | null };
 type Confirmation = { id: string; drafts: AssistantDraft[]; error?: string };
 type Conversation = { conversationId?: string; messages: Message[]; input: string; images?: AssistantImage[]; image?: AssistantImage | null; confirmations?: Confirmation[]; undos?: AssistantUndoRecovery[]; outbox?: AssistantTaskRequest | null };
 
@@ -179,7 +179,7 @@ export default function AssistantPage() {
         return { ...m, drafts: remaining, image: undefined, images: restoreAssistantImages(m.images, m.image, true), importSummary: restoreAssistantImportSummary(m.importSummary) };
       }), input: value.input.slice(0, 4000), images: restoreAssistantImages(value.images, value.image), confirmations: confirmationSnapshots(value), undos: undoRecoverySnapshots(value.undos) };
       if (restored.messages.at(-1)?.role === "user" && !restored.messages.at(-1)?.taskId) restored.messages[restored.messages.length - 1].incomplete = "interrupted";
-      restored.messages = restored.messages.map(m => ({ ...m, draftSort: assistantDraftSort(m.draftSort), memberChoice: m.role === "assistant" && memberChoiceTarget(m.memberChoice, restored.messages) ? m.memberChoice : undefined }));
+      restored.messages = restored.messages.map(m => ({ ...m, ...(Object.hasOwn(m, "image_progress") ? { image_progress: restoreAssistantImageProgress(m.image_progress) } : {}), draftSort: assistantDraftSort(m.draftSort), memberChoice: m.role === "assistant" && memberChoiceTarget(m.memberChoice, restored.messages) ? m.memberChoice : undefined }));
       setMessages(restored.messages); setInput(restored.input); setImages(restored.images || []);
       confirmationsRef.current = restored.confirmations || []; setConfirmations(confirmationsRef.current);
       undosRef.current = restored.undos || []; setUndos(undosRef.current);
@@ -250,14 +250,18 @@ export default function AssistantPage() {
   }, [validationTarget]);
 
   const activeTask = tasks.find(assistantTaskActive);
-  const activeTaskId = activeTask?.id || messages.find(message => message.role === "user" && (message.taskStatus === "queued" || message.taskStatus === "running"))?.taskId;
+  const storedActiveMessage = messages.find(message => message.role === "user" && (message.taskStatus === "queued" || message.taskStatus === "running"));
+  const activeTaskId = activeTask?.id || storedActiveMessage?.taskId;
   const taskBusy = !!activeTaskId;
   const recoveringTasks = !!conversationId && !tasksReady;
+  const activeImageProgress = streamingReply?.image_progress || (recoveringTasks ? storedActiveMessage?.image_progress : null);
+  const imageProgressText = activeImageProgress ? assistantImageProgressText(activeImageProgress,
+    recoveringTasks ? "recovering" : activeTask?.status || "running") : null;
   // Keep the new text and its scroll position in the same paint. A passive
   // effect briefly shows the old position on every streamed update.
   useLayoutEffect(() => {
     if (followReply.current) feed.current?.scrollTo({ top: feed.current.scrollHeight, behavior: "instant" });
-  }, [messages.length, sending, taskBusy, recoveringTasks, streamingReply?.text]);
+  }, [messages.length, sending, taskBusy, recoveringTasks, streamingReply?.text, imageProgressText]);
   const requestBusy = sending || taskBusy || recoveringTasks || transcribing || voiceBusy || preparingImage;
   const busy = requestBusy || !!outbox;
   const unresolved = messages.filter(m => m.status === "pending").reduce((n, m) => n + (m.drafts?.filter(d => !d.ignored).length || 0), 0);
@@ -322,7 +326,8 @@ export default function AssistantPage() {
     });
     const pending = valid.find(assistantTaskActive);
     setStreamingReply(current => pending
-      ? current?.text === pending.text && current.phase === pending.phase ? current : { text: pending.text, phase: pending.phase }
+      ? current?.text === pending.text && current.phase === pending.phase && current.image_progress === pending.image_progress
+        ? current : { text: pending.text, phase: pending.phase, image_progress: pending.image_progress }
       : null);
     if (outboxRef.current && valid.some(task => task.id === outboxRef.current!.id)) { outboxRef.current = null; setOutbox(null); }
     setTaskConnectionError(""); setTasksReady(true);
@@ -870,7 +875,8 @@ export default function AssistantPage() {
           </div>
           {message.incomplete && ((message.role === "assistant") || (!message.taskId && message.role === "user") || message.taskStatus === "missing") && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
             <span>{message.error || (message.incomplete === "stopped" ? "已停止生成" : "上次处理未完成")}</span>
-            <Button type="button" variant="ghost" className={cn(buttonClass, "text-xs text-primary underline")} disabled={requestBusy || savingId !== null || draft.hasDraft || draftChecking} onClick={() => void retryTask(message)}>{message.taskId ? message.taskStatus === "missing" ? "重试发送" : "重新处理" : "重新发送"}</Button>
+            {message.image_progress && (message.taskStatus === "failed" || message.taskStatus === "cancelled") && <span>{assistantImageProgressText(message.image_progress, message.taskStatus)}</span>}
+            <Button type="button" variant="ghost" className={cn(buttonClass, "text-xs text-primary underline")} disabled={requestBusy || savingId !== null || draft.hasDraft || draftChecking} onClick={() => void retryTask(message)}>{assistantTaskRetryLabel(message)}</Button>
           </div>}
           {message.undoChoice && <div className="mt-2 flex items-center gap-3 text-xs">
             <Button type="button" variant="outline" size="sm" disabled={composerDisabled} onClick={() => { const target = messages.find(item => item.id === message.undoChoice!.batch_id); void undoSaved(target, message.undoChoice!.draft_ids); patchMessage(message.id, { undoChoice: undefined }); }}>确认撤销 {message.undoChoice.draft_ids.length} 笔</Button>
@@ -978,7 +984,7 @@ export default function AssistantPage() {
         </div>
       </div>; })}
       {/* Contain the rotating SVG so its transformed bounds cannot change the feed's scrollHeight. */}
-      <div className="min-h-5" data-reply-status>{(sending || taskBusy || recoveringTasks) && <div className="flex items-center gap-2 text-[13px] text-muted-foreground" role="status"><span className="grid size-5 shrink-0 place-items-center overflow-hidden" aria-hidden="true"><Loader2 size={17} className="animate-spin" /></span>{recoveringTasks ? "正在恢复处理进度…" : sending && !taskBusy ? "正在发送…" : streamingReply?.text ? "正在回复…" : streamingReply?.phase === "images" ? "正在识别截图…" : streamingReply?.phase === "query" ? "正在查询账本…" : "正在整理…"}{taskBusy && <span className="text-[11px]">离开页面后会继续处理</span>}</div>}</div>
+      <div className="min-h-5" data-reply-status>{(sending || taskBusy || recoveringTasks) && <div className="flex flex-wrap items-center gap-2 text-[13px] text-muted-foreground" role="status"><span className="grid size-5 shrink-0 place-items-center overflow-hidden" aria-hidden="true"><Loader2 size={17} className="animate-spin" /></span>{imageProgressText || (recoveringTasks ? "正在恢复处理进度…" : sending && !taskBusy ? "正在发送…" : streamingReply?.text ? "正在回复…" : streamingReply?.phase === "images" ? "正在识别截图…" : streamingReply?.phase === "query" ? "正在查询账本…" : "正在整理…")}{taskBusy && <span className="text-[11px]">离开页面后会继续处理</span>}</div>}</div>
       </div>
     </div>
     <footer className={cn(contentWidthClass, "shrink-0 pt-3")}>

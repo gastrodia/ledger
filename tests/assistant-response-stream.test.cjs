@@ -20,12 +20,19 @@ function load(file, dependencies = {}) {
 const assistant = load('lib/assistant.ts');
 const images = load('lib/assistant-images.ts');
 const imageImport = load('lib/assistant-image-import.ts', { '@/lib/assistant': assistant, '@/lib/assistant-images': images });
+const imageRecognition = load('lib/assistant-image-recognition.ts', { ai: require('ai'), zod: require('zod'),
+  '@/lib/assistant': assistant, '@/lib/assistant-images': images });
 const uuid = value => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
 const categoryId = uuid(1), memberId = uuid(2), batchId = uuid(3), draftId = uuid(4);
 const row = { id: draftId, type: 'expense', amount_cents: 1200, category_id: categoryId, member_id: memberId,
   transaction_date: '2026-10-08', description: '午餐', payment_method: null, note: '' };
 const chat = { action: 'chat', reply: '可以把收支发给我。', drafts: [], query: null };
 const record = { action: 'record', reply: '请核对后确认入账。', drafts: [row], query: null };
+const imagePlan = value => ({ action: value.action, reply: value.reply, drafts: value.drafts.map(draft => ({
+  type: draft.type, amount_cents: draft.amount_cents, category: draft.category_id === null ? null : 1,
+  member: draft.member_id === null ? null : 1, date: draft.transaction_date, description: draft.description,
+  payment_method: draft.payment_method, note: draft.note, source: draft.source ?? null,
+})) });
 const query = { start_date: '2026-10-01', end_date: '2026-10-08', type: 'expense',
   category_id: categoryId, member_id: memberId, keyword: '午餐' };
 const queryPlan = { action: 'query', reply: '不应显示这个未查询的金额 999 元', drafts: [], query };
@@ -66,6 +73,7 @@ function fixture(provider = {}, session = { userId: 'authorized-user' }) {
     'next/server': { NextResponse }, 'node:crypto': crypto,
     '@/lib/auth': { getSession: async () => session }, '@/lib/db': { sql }, '@/lib/assistant': assistant,
     '@/lib/assistant-output': { ASSISTANT_OUTPUT_SCHEMA: {} }, '@/lib/assistant-image-import': imageImport,
+    '@/lib/assistant-image-recognition': imageRecognition,
     '@/lib/bailian': {
       BAILIAN_ASSISTANT_MODEL: 'fixture-object', BAILIAN_SUMMARY_MODEL: 'fixture-summary', BailianError,
       bailianConfig: () => ({}), bailianFailure: error => ({ status: error.status || 502,
@@ -139,7 +147,7 @@ test('chat status and incremental text reach the reader before complete structur
 test('record, member update and undo expose no provisional cards or operation replies before account validation', async () => {
   const targets = { batch_id: batchId, draft_ids: [draftId] };
   const scenarios = [
-    { plan: record, body: { images: ['data:image/png;base64,YWJj'] }, phase: 'images' },
+    { plan: imagePlan(record), body: { images: ['data:image/png;base64,YWJj'] }, phase: 'images' },
     { plan: { ...chat, action: 'update', reply: '已修改', update: { ...targets, member_id: memberId } },
       body: { draft_batch: { batch_id: batchId, status: 'pending', drafts: [row] } }, phase: 'thinking' },
     { plan: { ...chat, action: 'undo', reply: '已撤销', undo: targets },
@@ -181,7 +189,7 @@ test('foreign update targets fail validation and never become actionable termina
 });
 
 test('streamed screenshot output discards a zero-value row only after completion and retains paid cents', async () => {
-  const output = { ...record, reply: '识别到3笔', drafts: [row, { ...row, amount_cents: 0 }, { ...row, amount_cents: 1 }] };
+  const output = imagePlan({ ...record, reply: '识别到3笔', drafts: [row, { ...row, amount_cents: 0 }, { ...row, amount_cents: 1 }] });
   const gate = deferred();
   const { route, statements } = fixture({ bailianObjectStream: async (_settings, partial) => {
     partial(output); await gate.promise; return output;
@@ -195,6 +203,25 @@ test('streamed screenshot output discards a zero-value row only after completion
   assert.deepEqual(events[1].plan.drafts.map(d => d.amount_cents), [1200, 1]);
   assert.equal(events[1].plan.import_summary.skipped_zero_amounts, 1);
   assert.equal(statements.length, 2, 'generation only reads account options');
+});
+
+test('invalid compact screenshot references expose neither provisional cards nor a terminal plan', async () => {
+  for (const patch of [{ category: 2 }, { member: memberId }, { amount_cents: 1.5 }]) {
+    const output = imagePlan(record);
+    output.drafts[0] = { ...output.drafts[0], ...patch };
+    const gate = deferred();
+    const { route, statements } = fixture({ bailianObjectStream: async (_settings, partial) => {
+      partial(output); await gate.promise; return output;
+    } });
+    const watched = observe(await route.POST(request({ images: ['data:image/png;base64,YWJj'] })));
+    await tick();
+    assert.deepEqual(watched.events, [{ type: 'status', phase: 'images' }]);
+    gate.resolve();
+    const events = await watched.done;
+    assert.deepEqual(events.map(event => event.type), ['status', 'error']);
+    assert.match(events.at(-1).message, /截图识别格式|引用无效/);
+    assert.equal(statements.length, 2);
+  }
 });
 
 test('query summary starts only after user-scoped SQL facts and streams the second model response', async () => {

@@ -20,6 +20,8 @@ const output = load('lib/assistant-output.ts', { ai: require('ai'), zod: require
 const audio = load('lib/assistant-audio.ts');
 const images = load('lib/assistant-images.ts');
 const imageImport = load('lib/assistant-image-import.ts', { '@/lib/assistant': helper, '@/lib/assistant-images': images });
+const imageRecognition = load('lib/assistant-image-recognition.ts', { ai: require('ai'), zod: require('zod'),
+  '@/lib/assistant': helper, '@/lib/assistant-images': images });
 const categoryId = '00000000-0000-4000-8000-000000000001';
 const memberId = '00000000-0000-4000-8000-000000000002';
 const batchId = '00000000-0000-4000-8000-000000000003';
@@ -27,6 +29,9 @@ const categories = [{ id: categoryId, type: 'expense', name: '餐饮' }];
 const members = [{ id: memberId, name: '本人' }];
 const row = { type: 'expense', amount_cents: 6800, category_id: categoryId, member_id: memberId, transaction_date: '2026-09-30', description: '买菜', payment_method: null, note: '' };
 const plan = { action: 'record', reply: '待确认', drafts: [row], query: null };
+const imagePlan = (value = plan) => ({ action: value.action, reply: value.reply,
+  drafts: value.drafts.map(({ category_id, member_id, transaction_date, ...draft }) => ({ ...draft,
+    category: category_id === null ? null : 1, member: member_id === null ? null : 1, date: transaction_date })) });
 
 test('image paste takes binary clipboard files, leaves plain text alone, and supports the file-list fallback', () => {
   const file = { type: 'image/png', name: 'screenshot.png' };
@@ -216,8 +221,9 @@ function routes({ session = { userId: 'owner' }, provider = JSON.stringify(plan)
     '@/lib/auth': { getSession: async () => session }, '@/lib/db': { sql }, '@/lib/assistant': helper,
     '@/lib/assistant-output': output,
     '@/lib/assistant-image-import': imageImport,
+    '@/lib/assistant-image-recognition': imageRecognition,
     '@/lib/assistant-schema': { ensureAssistantSchema: async () => {} }, '@/lib/assistant-audio': audio,
-    '@/lib/bailian': { BAILIAN_ASSISTANT_MODEL: 'qwen3.7-plus', BAILIAN_SUMMARY_MODEL: 'qwen3.8-max', BAILIAN_ASR_MODEL: 'qwen3-asr-flash',
+    '@/lib/bailian': { BAILIAN_ASSISTANT_MODEL: 'qwen3.8-max', BAILIAN_SUMMARY_MODEL: 'qwen3.8-max', BAILIAN_ASR_MODEL: 'qwen3-asr-flash',
       bailianConfig: () => {}, bailianFailure: () => ({ status: 502, message: '服务暂不可用' }),
       bailianObject: async (...args) => { calls.push(args); if (providerError) throw providerError; return JSON.parse(provider); },
       bailianText: async (...args) => { calls.push(args); if (providerError) throw providerError; return textProvider; } },
@@ -225,7 +231,8 @@ function routes({ session = { userId: 'owner' }, provider = JSON.stringify(plan)
   const globals = { process: { env: {} } };
   deps['@/lib/assistant-generation'] = load('lib/assistant-generation.ts', deps, globals);
   return { assistant: load('app/api/assistant/route.ts', deps, globals), confirm: load('app/api/assistant/confirm/route.ts', deps, globals),
-    transcribe: load('app/api/assistant/transcribe/route.ts', deps, globals), calls, queries, transactions };
+    transcribe: load('app/api/assistant/transcribe/route.ts', deps, globals),
+    prepare: deps['@/lib/assistant-generation'].prepareAssistantGeneration, calls, queries, transactions };
 }
 const request = body => ({ json: async () => body, signal: new AbortController().signal });
 
@@ -265,7 +272,7 @@ test('malformed requests and arbitrary image URLs never call a provider', async 
 });
 
 test('multiple screenshots are sent as numbered original files in one paid request and keep unresolved members', async () => {
-  const f = routes({ provider: JSON.stringify({ ...plan, drafts: [{ ...row, member_id: null }] }) });
+  const f = routes({ provider: JSON.stringify(imagePlan({ ...plan, drafts: [{ ...row, member_id: null }] })) });
   const images = ['data:image/png;base64,YWJj', 'data:image/jpeg;base64,YWJk'];
   const response = await f.assistant.POST(request({ message: '请合并截图', today: '2026-09-30', images }));
   assert.equal(response.status, 200);
@@ -275,9 +282,9 @@ test('multiple screenshots are sent as numbered original files in one paid reque
   assert.equal(body.import_summary.removed_duplicates, 0);
   assert.equal(body.import_summary.review_required, true);
   const content = f.calls[0][0].messages.at(-1).content;
-  assert.match(content[1].text, /第 1 张截图（共 2 张）/);
+  assert.match(content[1].text, /source.image_index=1/);
   assert.equal(content[2].data, images[0]);
-  assert.match(content[3].text, /第 2 张截图（共 2 张）/);
+  assert.match(content[3].text, /source.image_index=2/);
   assert.equal(content[4].data, images[1]);
   assert.equal(f.calls.length, 1);
   assert.equal(f.transactions.length, 0);
@@ -287,7 +294,7 @@ test('a statement containing a zero-value refunded order retains five pending ex
   const drafts = [2000, 1, 0, 33150, 1000, 980].map((amount_cents, index) => ({ ...row, amount_cents,
     description: `截图交易 ${index + 1}`, member_id: null, transaction_date: '2026-10-02',
     note: index === 2 ? '有退款' : index === 1 ? '等待确认收货' : '' }));
-  const f = routes({ provider: JSON.stringify({ ...plan, reply: '识别到6笔支出', drafts }) });
+  const f = routes({ provider: JSON.stringify(imagePlan({ ...plan, reply: '识别到6笔支出', drafts })) });
   const response = await f.assistant.POST(request({ message: '识别这张截图', today: '2026-10-08', image: 'data:image/jpeg;base64,YWJj' }));
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -302,23 +309,89 @@ test('a statement containing a zero-value refunded order retains five pending ex
   assert.equal(f.transactions.length, 0);
 });
 
-test('recognition uses typed image parts, retains bounded history and propagates request cancellation', async () => {
-  const f = routes();
+test('image recognition uses compact account references, omits previous conversation and propagates request cancellation', async () => {
+  const f = routes({ provider: JSON.stringify(imagePlan()) });
   const image = 'data:image/png;base64,YWJj';
   const controller = new AbortController();
   const body = { message: '请识别截图', today: '2026-09-30', image,
-    history: Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `历史 ${index}` })) };
+    history: Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `旧消息 ${index}` })),
+    draft_batch: { batch_id: batchId, status: 'pending', drafts: [{ ...row, id: crypto.randomUUID(), description: '旧草稿内容' }] },
+    saved_batch: { batch_id: crypto.randomUUID(), status: 'saved', drafts: [{ ...row, id: crypto.randomUUID(), description: '旧已入账内容' }] } };
   const response = await f.assistant.POST({ ...request(body), signal: controller.signal });
   assert.equal(response.status, 200);
   const [options, signal] = f.calls[0];
   assert.equal(signal, controller.signal);
+  assert.equal(options.schemaName, 'ledger_image_import');
+  assert.equal(options.timeoutMs, undefined, 'the legacy synchronous route keeps the default provider budget');
   assert.equal(options.maxOutputTokens, 5000);
-  assert.equal(options.messages.length, 10);
-  assert.equal(options.messages[1].content, '历史 2');
+  assert.equal(options.messages.length, 2);
+  const serialized = JSON.stringify(options.messages);
+  for (const removed of ['旧消息', '旧草稿内容', '旧已入账内容', 'draft_batch', 'saved_batch', categoryId, memberId]) {
+    assert.equal(serialized.includes(removed), false, removed);
+  }
+  const context = JSON.parse(options.messages[0].content.split('\n可用数据：')[1]);
+  assert.deepEqual(context, { today: body.today, categories: [{ ref: 1, name: '餐饮', type: 'expense' }], members: [{ ref: 1, name: '本人' }] });
   assert.equal(options.messages.at(-1).content[0].type, 'text');
-  assert.equal(options.messages.at(-1).content[1].type, 'file');
-  assert.equal(options.messages.at(-1).content[1].mediaType, 'image/png');
-  assert.equal(options.messages.at(-1).content[1].data, image);
+  assert.equal(options.messages.at(-1).content[0].text, body.message);
+  assert.equal(options.messages.at(-1).content[2].type, 'file');
+  assert.equal(options.messages.at(-1).content[2].mediaType, 'image/png');
+  assert.equal(options.messages.at(-1).content[2].data, image);
+  const result = await response.json();
+  assert.equal(result.drafts[0].category_id, categoryId);
+  assert.equal(result.drafts[0].member_id, memberId);
+  assert.equal(f.transactions.length, 0);
+});
+
+test('text recognition keeps bounded history and only background image work receives a longer provider budget', async () => {
+  for (const background of [false, true]) {
+    for (const hasImage of [false, true]) {
+      const f = routes({ provider: JSON.stringify(hasImage ? imagePlan() : plan) });
+      const raw = { message: '买菜68元', today: '2026-09-30', timeoutMs: 999999,
+        history: Array.from({ length: 10 }, (_, index) => ({ role: 'user', content: `历史 ${index}` })),
+        ...(hasImage ? { image: 'data:image/png;base64,YWJj' } : {}) };
+      const generation = await f.prepare('owner', raw, { background });
+      await generation.generate(new AbortController().signal);
+      const settings = f.calls[0][0];
+      assert.equal(settings.timeoutMs, background && hasImage ? 180000 : undefined);
+      assert.equal(settings.messages.length, hasImage ? 2 : 10);
+      if (!hasImage) {
+        assert.equal(settings.schemaName, 'ledger_plan');
+        assert.equal(settings.messages[1].content, '历史 2');
+      }
+      assert.equal(f.transactions.length, 0);
+    }
+  }
+});
+
+test('invalid screenshot references, amounts and old-operation outputs never become actionable plans', async () => {
+  const valid = imagePlan();
+  const candidates = [
+    ...[{ category: 2 }, { member: 2 }, { category: categoryId }, { member: -1 }, { amount_cents: 0.5 }]
+      .map(patch => ({ ...valid, drafts: [{ ...valid.drafts[0], ...patch }] })),
+    { ...valid, action: 'undo' },
+  ];
+  for (const candidate of candidates) {
+    const f = routes({ provider: JSON.stringify(candidate) });
+    const response = await f.assistant.POST(request({ message: '识别截图', today: '2026-09-30', image: 'data:image/png;base64,YWJj' }));
+    assert.equal(response.status, 422);
+    assert.equal((await response.json()).drafts, undefined);
+    assert.equal(f.transactions.length, 0);
+  }
+});
+
+test('compact screenshot provenance still deduplicates adjacent overlap before issuing pending drafts', async () => {
+  const source = (image_index, row_index, time) => ({ image_index, row_index, time, transaction_id: null, kind: 'statement' });
+  const drafts = [{ ...row, description: '早餐', source: source(1, 1, '08:00') },
+    { ...row, description: '午餐', source: source(1, 2, '12:00') },
+    { ...row, description: '午餐', source: source(2, 1, '12:00') },
+    { ...row, description: '晚餐', source: source(2, 2, '18:00') }];
+  const f = routes({ provider: JSON.stringify(imagePlan({ ...plan, drafts })) });
+  const response = await f.assistant.POST(request({ message: '识别截图', today: '2026-09-30',
+    images: ['data:image/png;base64,YWJj', 'data:image/png;base64,YWJk'] }));
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(result.drafts.map(draft => draft.description), ['早餐', '午餐', '晚餐']);
+  assert.equal(result.import_summary.removed_duplicates, 1);
   assert.equal(f.transactions.length, 0);
 });
 

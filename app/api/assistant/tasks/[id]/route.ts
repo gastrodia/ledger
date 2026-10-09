@@ -1,6 +1,7 @@
 import { after, NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { AssistantTaskError, changeAssistantTask, getAssistantTask, runAssistantTask } from "@/lib/assistant-tasks";
+import { runAndContinueAssistantTask } from "@/lib/assistant-task-dispatch";
+import { AssistantTaskError, changeAssistantTask, getAssistantTask } from "@/lib/assistant-tasks";
 
 export const maxDuration = 300;
 const headers = { "Cache-Control": "no-store" };
@@ -15,7 +16,7 @@ export async function GET(request: NextRequest, context: Context) {
     const session = await getSession();
     if (!session) return NextResponse.json({ error: "未登录" }, { status: 401, headers });
     const task = await getAssistantTask(session.userId, (await context.params).id, request.nextUrl.searchParams.get("include_input") === "1");
-    if (task.status === "queued") after(() => runAssistantTask(session.userId, task.id));
+    if (task.status === "queued") after(() => runAndContinueAssistantTask(session.userId, task.id));
     return NextResponse.json({ task }, { headers });
   } catch (error) { return failure(error); }
 }
@@ -26,7 +27,7 @@ export async function PATCH(request: NextRequest, context: Context) {
     const body = await request.json();
     if (!body || !["cancel", "retry"].includes(body.action)) throw new AssistantTaskError(400, "任务操作无效。");
     const task = await changeAssistantTask(session.userId, (await context.params).id, body.action, body.attempt);
-    if (task.status === "queued") after(() => runAssistantTask(session.userId, task.id));
+    if (task.status === "queued") after(() => runAndContinueAssistantTask(session.userId, task.id));
     return NextResponse.json({ task }, { headers });
   } catch (error) { return failure(error); }
 }
