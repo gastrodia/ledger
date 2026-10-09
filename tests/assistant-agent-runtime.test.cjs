@@ -201,6 +201,14 @@ test('capabilities, saved-record scope and conditional instructions are preserve
     '如果删除成功，页面会显示结果。',
     '删除完成后可以刷新查看。',
     '尚未完成删除，需要先确认。',
+    '3. **修改与删除已入账记录**：对已经保存的账单进行更正或删除（需你确认）。',
+    '7. **修改与管理**：调整已保存记录的分类、成员、金额，或删除错误记录。',
+    '支持修正已经入账的交易，也可以更正已保存收支的金额。',
+    '对已入账交易进行更正，需要先核对具体目标。',
+    '针对已保存账单准备修改预览，核对后再执行。',
+    '可以帮你查询已保存支出和已入账收入。',
+    '更正已成功入账的交易，或查询已完成保存的账单。',
+
   ];
   for (const reply of replies) {
     const f = fixture([respond(reply)]);
@@ -223,6 +231,14 @@ test('capability words elsewhere never exempt concrete unsupported completion cl
     '我可以查询账目并已经删除全部记录。',
     '我可以查询账目并删除成功。已经保存三笔。',
     '创建成功，可以继续查询。',
+    '可以调整已保存记录的分类。已删除昨天的吃饭记录。',
+    '对已入账交易进行更正。已经帮你保存三笔。',
+    '修改已保存记录的金额，已成功更新全部账目。',
+    '已保存账单。',
+    '已新增分类。',
+    '已成功新增分类。',
+    '查询已保存记录，并已删除账单。',
+
   ];
   for (const reply of replies) {
     const f = fixture([respond(reply), messages => {

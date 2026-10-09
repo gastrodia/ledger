@@ -83,16 +83,21 @@ export function assistantAgentMetadata(c: AssistantAgentCheckpoint): AssistantAg
 function hasWriteCompletionClaim(reply: string) {
   // Check each clause independently: a capability elsewhere cannot authorize a write.
   const clauses = reply.replace(/[*_`]/g, "").split(/[。！？!?；;\n，,]/);
-  const claims = /(?:(已(?:经)?|成功|完成)[^。！？!?；;\n，,]{0,8}(保存|创建|新增|入账|修改|删除|撤销|执行|更新)|(保存|创建|新增|入账|修改|删除|撤销|执行|更新)[^。！？!?；;\n，,]{0,6}(成功|完成))/g;
+  const claims = /(?:(已(?:经)?|成功|完成)[^。！？!?；;\n，,]{0,8}?(保存|创建|新增|入账|修改|删除|撤销|执行|更新)|(保存|创建|新增|入账|修改|删除|撤销|执行|更新)[^。！？!?；;\n，,]{0,6}?(成功|完成))/g;
+  const recordNoun = "(?:账目|账单|记录|交易|流水|数据|收支|收入|支出|消费|便利贴|便签|备忘|分类|成员|借还|礼簿|台账|事项)";
+  const recordReference = new RegExp(`^(?:的)?${recordNoun}`);
+  const coordinatedReference = new RegExp(`^(?:的)?${recordNoun}(?:和|及|与|、|以及)$`);
   for (const clause of clauses) {
+    let previousReferenceEnd = -1;
     for (const match of clause.matchAll(claims)) {
       const before = clause.slice(0, match.index).trim();
       const after = clause.slice(match.index + match[0].length).trim();
-      // “修改已保存记录的金额” describes the target, not a completed save.
-      const savedTarget = /^已(?:经)?(?:保存|创建|新增|入账|修改|删除|撤销|执行|更新)$/.test(match[0])
-        && /^(?:的)?(?:账目|账单|记录|流水|数据|收支|便利贴|分类|成员|借还|礼簿|台账|事项)/.test(after)
-        && (after.startsWith("的") || /(?:查询|查看|读取|核对|检查|统计|分析|汇总|整理|修改|更新|编辑|删除|撤销|管理|筛选|搜索|关联)(?:任意|这些|你的|您的|指定|已有|所有|全部|当前)?$/.test(before));
-      if (savedTarget) continue;
+      // Match the nearest verb so “已入账记录：对已经保存的账单”
+      // remains two record-state references, not one fabricated write claim.
+      const savedTarget = /^已(?:经)?(?:成功|完成)?(?:保存|创建|新增|入账|修改|删除|撤销|执行|更新)$/.test(match[0])
+        && recordReference.test(after)
+        && (after.startsWith("的") || (previousReferenceEnd >= 0 && coordinatedReference.test(clause.slice(previousReferenceEnd, match.index).trim())) || /(?:查询|查看|读取|核对|检查|统计|分析|汇总|整理|修改|更新|编辑|调整|更正|修正|删除|撤销|管理|筛选|搜索|关联|对|针对|关于)(?:任意|这些|你的|您的|指定|已有|所有|全部|当前)?$/.test(before));
+      if (savedTarget) { previousReferenceEnd = match.index + match[0].length; continue; }
       if (/(?:尚未|还未|未|没有|没|并未|不曾|不会|不能|无法|不得)(?:帮你|为你)?$/.test(before)
         || /(?:如果|假如|一旦|若)[^。！？!?；;\n，,]*$/.test(before) || /^(?:后|时|之后|以后)/.test(after)) continue;
       const explicitPast = match[1]?.startsWith("已") || /已(?:经)?(?:完成|成功)/.test(match[0]);
