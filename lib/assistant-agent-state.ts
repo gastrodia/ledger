@@ -37,7 +37,7 @@ export function assistantAgentApprovalIds(checkpoint: AssistantAgentCheckpoint):
 export function assistantAgentMetadata(checkpoint: AssistantAgentCheckpoint | null): AssistantAgentMetadata | undefined {
   if (!checkpoint) return undefined;
   return { goal_id: checkpoint.goal_id, goal: checkpoint.goal, status: checkpoint.status,
-    steps: checkpoint.steps, tool_calls: checkpoint.tool_results.filter(tool => ["query", "records", "command_preview", "event_preview", "target_verification"].includes(tool.name)).length,
+    steps: checkpoint.steps, tool_calls: checkpoint.tool_results.filter(tool => ["query", "records", "draft_matches", "command_preview", "event_preview", "target_verification"].includes(tool.name)).length,
     ...(checkpoint.pending_approval ? { pending_action_id: checkpoint.pending_approval.action_id } : {}),
     ...(checkpoint.pending_batch ? { pending_batch_id: checkpoint.pending_batch.batch_id } : {}) };
 }

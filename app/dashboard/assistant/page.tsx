@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
+import { assistantCardTarget, reconcileAssistantCardHistory, relocateAssistantCard, linkAssistantEventCards } from "@/lib/assistant-card-updates";
+import { AssistantDraftMatchCard } from "@/components/assistant/draft-match-card";
 import { AssistantDraftCard, AssistantDraftRow } from "@/components/assistant/draft-card";
 import { AssistantReplyShell, AssistantReplyCard, AssistantReplyNotice, assistantChoiceClass } from "@/components/assistant/reply-primitives";
 import { draftReplyView, recordReplyView, resultReplyView } from "@/lib/assistant-reply-view";
 import { approvalDecision, isActionStatusRequest, type AssistantActionResult } from "@/lib/assistant-commands";
 import NextImage from "next/image";
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type ClipboardEvent } from "react";
-import { ArrowLeftRight, ArrowUp, BarChart3, Check, Copy, Gift, ImagePlus, LayoutGrid, Loader2, MessageCircle, Mic, Plus, Search, Square, StickyNote, Trash2, Undo2, Users } from "lucide-react";
+import { ArrowDown, ArrowLeftRight, ArrowUp, BarChart3, Check, Copy, Gift, ImagePlus, LayoutGrid, Loader2, MessageCircle, Mic, Plus, Search, Square, StickyNote, Trash2, Undo2, Users } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
@@ -35,7 +37,7 @@ import { savedDraftSnapshot, undoRecoverySnapshots, validateUndoResult, type Ass
 import { MAX_AUDIO_SECONDS, recordingToWav } from "@/lib/assistant-audio";
 import { startSpeechRecording, type SpeechPhase, type SpeechRecording } from "@/lib/assistant-speech";
 import { appendSpeechTranscript } from "@/lib/assistant-speech-transcript";
-import { assistantAgentWaiting, assistantAgentActionSettled, resumeAssistantAgentTask, cancelAssistantTaskCheckpoint, restoreAssistantAgent, restoreAssistantApprovalHistory, restoreAssistantTaskHistory, syncSavedTransactionCards, completeAssistantMemberSelection, approveAssistantDraftRemoval, assistantMemberChoiceTarget as memberChoiceTarget, assistantImageProgressText, assistantTaskRetryLabel, assistantTaskJson, AssistantTaskRequestError, mergeAssistantTasks, reconcileAssistantTaskSnapshots, subscribeAssistantTasks, type EditableAssistantDraft as EditableDraft, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
+import { assistantAgentWaiting, assistantAgentActionSettled, resumeAssistantAgentTask, cancelAssistantTaskCheckpoint, restoreAssistantAgent, restoreAssistantApprovalHistory, restoreAssistantTaskHistory, syncSavedTransactionCards, completeAssistantMemberSelection, relocateAssistantDraftCard, approveAssistantDraftRemoval, setAssistantDraftRemoval, migrateAssistantDraftRemovalPreviews, toggleAssistantDraftRemoval, assistantDraftMatchTarget, resolveAssistantDraftMatch, assistantMemberChoiceTarget as memberChoiceTarget, assistantImageProgressText, assistantTaskRetryLabel, assistantTaskJson, AssistantTaskRequestError, mergeAssistantTasks, reconcileAssistantTaskSnapshots, subscribeAssistantTasks, type EditableAssistantDraft as EditableDraft, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
 import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask, type AssistantTaskRequest } from "@/lib/assistant-task-types";
 import { assistantDraftSort, nextAssistantDraftSort, sortedAssistantDrafts } from "@/lib/assistant-draft-sort";
 import { appendAssistantImages, clipboardImages, restoreAssistantImages, restoreAssistantImportSummary, prepareAssistantMessageImage, MAX_ASSISTANT_IMAGES, MAX_ASSISTANT_IMAGE_LENGTH, MAX_ASSISTANT_MESSAGE_IMAGE_LENGTH, type AssistantImage } from "@/lib/assistant-images";
@@ -93,7 +95,7 @@ function invalidDraftFields(draft: EditableDraft, categories: AssistantCategory[
 }
 
 function submittedDrafts(drafts: EditableDraft[]): AssistantDraft[] {
-  return drafts.filter(d => !d.ignored).map(d => {
+  return drafts.filter(d => !d.ignored && !d.softRemoved).map(d => {
     if (!/^\d{1,10}(\.\d{1,2})?$/.test(d.amount)) throw new Error("请填写大于0、最多两位小数的金额。");
     return { id: d.id, type: d.type, amount_cents: Math.round(Number(d.amount) * 100), category_id: d.category_id, member_id: d.member_id,
       transaction_date: d.transaction_date, description: d.description, payment_method: d.payment_method, note: d.note };
@@ -147,6 +149,7 @@ export default function AssistantPage() {
   const [undoingIds, setUndoingIds] = useState<string[]>([]);
   const [expandedDrafts, setExpandedDrafts] = useState<Record<string, boolean>>({});
   const [validationTarget, setValidationTarget] = useState<{ draftId: string; field: DraftValidationField } | null>(null);
+  const [highlightedCard, setHighlightedCard] = useState<string | null>(null);
   const feed = useRef<HTMLDivElement>(null);
   const followReply = useRef(true);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -196,7 +199,11 @@ export default function AssistantPage() {
         return { ...m, drafts: remaining, image: undefined, images: restoreAssistantImages(m.images, m.image, true), importSummary: restoreAssistantImportSummary(m.importSummary) };
       }), input: value.input.slice(0, 4000), images: restoreAssistantImages(value.images, value.image), confirmations: confirmationSnapshots(value), undos: undoRecoverySnapshots(value.undos) };
       if (restored.messages.at(-1)?.role === "user" && !restored.messages.at(-1)?.taskId && !restored.messages.at(-1)?.localHandled) restored.messages[restored.messages.length - 1].incomplete = "interrupted";
-      restored.messages = restored.messages.map(m => ({ ...m, agent: restoreAssistantAgent(m.agent), ...(m.approvalHistory ? { approvalHistory: restoreAssistantApprovalHistory(m.approvalHistory) } : {}), ...(m.taskHistory ? { taskHistory: restoreAssistantTaskHistory(m.taskHistory) } : {}), process: restoreAssistantProcess(m.process), ...(Object.hasOwn(m, "image_progress") ? { image_progress: restoreAssistantImageProgress(m.image_progress) } : {}), draftSort: assistantDraftSort(m.draftSort), memberChoice: m.role === "assistant" && memberChoiceTarget(m.memberChoice, restored.messages) ? m.memberChoice : undefined }));
+      restored.messages = restored.messages.map(m => ({ ...m, agent: restoreAssistantAgent(m.agent), ...(m.approvalHistory ? { approvalHistory: restoreAssistantApprovalHistory(m.approvalHistory) } : {}), ...(m.taskHistory ? { taskHistory: restoreAssistantTaskHistory(m.taskHistory) } : {}), process: restoreAssistantProcess(m.process), ...(Object.hasOwn(m, "image_progress") ? { image_progress: restoreAssistantImageProgress(m.image_progress) } : {}), draftSort: assistantDraftSort(m.draftSort), memberChoice: m.role === "assistant" && memberChoiceTarget(m.memberChoice, restored.messages) ? m.memberChoice : undefined,
+        cardUpdatedLink: m.role === "assistant" && typeof m.cardUpdatedLink === "string" && UUID_PATTERN.test(m.cardUpdatedLink) && restored.messages.some(target => target.id === m.cardUpdatedLink && target.role === "assistant" && !assistantCardTarget(target)) ? m.cardUpdatedLink : undefined,
+        supersededApproval: m.role === "assistant" && m.cardUpdatedLink && m.supersededApproval && UUID_PATTERN.test(m.supersededApproval.id) ? m.supersededApproval : undefined,
+        draftCardLink: m.role === "assistant" && typeof m.draftCardLink === "string" && UUID_PATTERN.test(m.draftCardLink) && restored.messages.some(target => target.id === m.draftCardLink && target.role === "assistant" && !assistantCardTarget(target)) ? m.draftCardLink : undefined }));
+      restored.messages = reconcileAssistantCardHistory(migrateAssistantDraftRemovalPreviews(restored.messages));
       setMessages(restored.messages); setInput(restored.input); setImages(restored.images || []);
       confirmationsRef.current = restored.confirmations || []; setConfirmations(confirmationsRef.current);
       undosRef.current = restored.undos || []; setUndos(undosRef.current);
@@ -247,6 +254,23 @@ export default function AssistantPage() {
   useEffect(() => { if (voiceBusy && composer.current) composer.current.scrollTop = composer.current.scrollHeight; }, [input, voiceBusy]);
 
   useEffect(() => {
+    if (!highlightedCard) return;
+    const timer = setTimeout(() => setHighlightedCard(null), 2000);
+    return () => clearTimeout(timer);
+  }, [highlightedCard]);
+
+  function jumpToDraftCard(batchId: string) {
+    const scroller = feed.current;
+    const target = scroller && Array.from(scroller.querySelectorAll<HTMLElement>("[data-message-id]")).find(element => element.dataset.messageId === batchId);
+    if (!scroller || !target) return;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const top = scroller.scrollTop + target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 12;
+    scroller.scrollTo({ top: Math.max(0, top), behavior: reducedMotion ? "instant" : "smooth" });
+    target.focus({ preventScroll: true });
+    setHighlightedCard(batchId);
+  }
+
+  useEffect(() => {
     if (!validationTarget) return;
     let animation: Animation | undefined;
     const frame = requestAnimationFrame(() => {
@@ -281,7 +305,7 @@ export default function AssistantPage() {
   }, [messages.length, sending, taskBusy, recoveringTasks, streamingReply?.text, imageProgressText]);
   const requestBusy = sending || taskBusy || recoveringTasks || transcribing || voiceBusy || preparingImage;
   const busy = requestBusy || !!outbox;
-  const unresolved = messages.filter(m => m.status === "pending").reduce((n, m) => n + (m.drafts?.filter(d => !d.ignored).length || 0), 0);
+  const unresolved = messages.filter(m => m.status === "pending").reduce((n, m) => n + (m.drafts?.filter(d => !d.ignored && !d.softRemoved).length || 0), 0);
   const newController = (conversationRequest = true) => {
     const c = new AbortController(); controllers.current.add(c);
     if (conversationRequest) conversationControllers.current.add(c);
@@ -297,7 +321,40 @@ export default function AssistantPage() {
     undosRef.current = [...undosRef.current.filter(item => item.id !== id), ...(next ? [next] : [])];
     setUndos(undosRef.current);
   };
-  const patchMessage = (id: string, update: Partial<Message>) => setMessages(current => current.map(m => m.id === id ? { ...m, ...update } : m));
+  const patchMessage = (id: string, update: Partial<Message>) => setMessages(current => {
+    const old = current.find(m => m.id === id);
+    if (old && assistantCardTarget(old)) return current;
+    const next = current.map(m => m.id === id ? { ...m, ...update } : m);
+    const changed = ["status", "approval", "eventContext", "actionPreview", "replyView", "actionResult"].some(key => key in update && JSON.stringify(old?.[key as keyof Message]) !== JSON.stringify(update[key as keyof Message]));
+    return changed && old ? relocateAssistantCard(next,id,next.at(-1)!.id) : next;
+  });
+
+  const revokingApprovals = useRef(new Set<string>());
+  const revokeSupersededApprovals = useEffectEvent(() => {
+    if (isInitializing || loadError) return;
+    for (const message of messages) {
+      const old = message.supersededApproval;
+      if (!message.cardUpdatedLink || !old || old.settled || revokingApprovals.current.has(old.id)) continue;
+      revokingApprovals.current.add(old.id);
+      const epoch = conversationEpoch.current;
+      const controller = newController(false);
+      void (async () => {
+        try {
+          const result: AssistantActionResult = await responseJson(await fetch(`/api/assistant/actions/${old.id}`, { method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:"cancel"}),signal:controller.signal }));
+          if (!currentConversation(epoch) || result.id !== old.id) return;
+          const submitted = result.status === "executing" || result.status === "succeeded" || (result.completed || 0) > 0;
+          setMessages(current => {
+            const replacement = current.find(m => m.id === message.cardUpdatedLink)?.approval;
+            return current.map(m => m.id === message.id ? { ...m,supersededApproval:submitted && replacement ? {id:replacement.id,settled:false} : {id:old.id,settled:true} }
+              : submitted && m.id === message.cardUpdatedLink ? { ...m,approval:undefined,replacementBlocked:true,actionResult:{ ...result,status:"failed",text:"原方案已提交执行，请先核对账本结果再创建更正方案。" },error:"原方案已提交执行，请先核对账本结果。",...(result.event_context ? {eventContext:result.event_context} : {}) } : m);
+          });
+        } catch { /* The old card remains non-executable; a later refresh retries cancellation. */ }
+        finally { revokingApprovals.current.delete(old.id); finishController(controller); }
+      })();
+    }
+  });
+  useEffect(() => { revokeSupersededApprovals(); }, [messages, isInitializing, loadError]);
+
 
   function clearConversation() {
     const previousId = conversationId;
@@ -359,7 +416,7 @@ export default function AssistantPage() {
       ? { ...message, taskStatus: "missing", error: "发送结果暂未确认，重试会先核对原任务。" } : message));
   });
   const draftChecking = draft.status === "checking";
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useLayoutEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => {
     if (conversationId || draftChecking || configured === false && loadError) return;
     let cancelled = false;
@@ -418,7 +475,7 @@ export default function AssistantPage() {
 
   async function continueAgentCheckpoint(task: AssistantTask, settled?: AssistantActionResult) {
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
-    if (!assistantAgentWaiting(task) || !agent) return;
+    if (!assistantAgentWaiting(task) || !agent || messagesRef.current.some(m => m.id === task.id && (assistantCardTarget(m) || m.replacementBlocked))) return;
     const key = `${task.id}:${task.attempt}:${agent.pending_action_id || agent.pending_batch_id}`;
     if (resumingAgents.current.has(key)) return;
     resumingAgents.current.add(key);
@@ -460,7 +517,7 @@ export default function AssistantPage() {
   useEffect(() => { recoverAgentCheckpoints(); }, [tasks]);
 
   async function decideConversationAction(message: Message, decision: "approve" | "cancel", read = false, userReply?: Message) {
-    if (actionPendingRef.current || saveLock.current || sendLock.current || busy) return;
+    if (actionPendingRef.current || saveLock.current || sendLock.current || busy || messagesRef.current.some(m => m.id === message.id && assistantCardTarget(m))) return;
     actionPendingRef.current = true;
     setActionPending({ id: message.id, phase: read ? "read" : decision });
     patchMessage(message.id, { error: undefined });
@@ -470,6 +527,7 @@ export default function AssistantPage() {
 
   async function performConversationAction(message: Message, decision: "approve" | "cancel", read = false, userReply?: Message) {
     if (saveLock.current || sendLock.current || busy) return;
+    if (messagesRef.current.some(m => m.cardUpdatedLink === message.id && m.supersededApproval && !m.supersededApproval.settled)) return;
     if (message.approval || (read && message.actionResult)) {
       const epoch = conversationEpoch.current;
       saveLock.current = true; setSavingId(message.id);
@@ -480,10 +538,17 @@ export default function AssistantPage() {
         const summary = message.approval?.summary.replace(/\n尚未执行。[\s\S]*$/, "");
         patchMessage(message.id, { error: undefined, actionPreview: result.preview || message.actionPreview || message.approval?.preview || (message.eventContext ? eventActionPreview(message.eventContext.input, message.approval?.summary || message.text) : summaryActionPreview(message.approval?.summary || message.text)), text: result.status === "pending" && message.approval ? message.approval.summary : summary ? `${summary}\n\n${result.text}` : result.text, actionResult: result, ...(result.event_context ? { eventContext: result.event_context, eventChoices: undefined } : {}),
           ...(["succeeded", "failed", "cancelled", "expired"].includes(result.status) ? { approval: undefined } : {}) });
-        if (result.transaction_updates?.length) setMessages(current => syncSavedTransactionCards(current, result.transaction_updates!));
+        if (result.transaction_updates?.length) setMessages(current => {
+          let next = syncSavedTransactionCards(current,result.transaction_updates!);
+          for (const batchId of new Set(result.transaction_updates!.map(row => row.batch_id))) next = relocateAssistantCard(next,batchId,message.id);
+          return next;
+        });
         if (result.replacement_approval) patchMessage(message.id, { approval: result.replacement_approval, actionPreview: result.replacement_approval.preview,
           actionResult: { ...result, status: "pending" }, text: result.replacement_approval.summary, error: undefined });
-        if (result.status === "succeeded") reloadSetup();
+        if (result.status === "succeeded") {
+          if (result.event_context?.event_id) setMessages(current => linkAssistantEventCards(current,message.id,result.event_context!.event_id!));
+          reloadSetup();
+        }
         const agentTask = knownTasks.current.find(task => task.id === message.taskId && assistantAgentWaiting(task));
         if (agentTask && (assistantAgentActionSettled(result) || result.replacement_approval)) await continueAgentCheckpoint(agentTask, result);
       } catch (error) { if (currentConversation(epoch)) patchMessage(message.id, { error: error instanceof Error ? error.message : "结果待核对，请查询操作状态。" }); }
@@ -537,16 +602,16 @@ export default function AssistantPage() {
     const link = document.createElement("a"); link.href = url; link.download = message.exportFile.name; link.click(); URL.revokeObjectURL(url);
   }
 
-  async function send(override?: string, eventSelection?: import("@/lib/ledger-event").LedgerEventInput) {
+  async function send(override?: string, eventSelection?: import("@/lib/ledger-event").LedgerEventInput, draftBatchId?: string, eventCardId?: string) {
     const originalInput = override ?? input;
     const sentImages = override ? [] : images;
     const text = originalInput.trim() || (sentImages.length ? "请按图片顺序识别截图里的收支，衔接重叠账目，生成待确认账单。" : "");
     if (!text || actionPendingRef.current || busy || outboxRef.current || sendLock.current || saveLock.current || draft.hasDraft || draft.status === "checking" || configured === null || !conversationId) return;
-    const pendingApprovals = messages.filter(m => m.approval || m.confirmChoice || m.removeChoice || m.clearChoice || m.undoChoice);
+    const pendingApprovals = messages.filter(m => !assistantCardTarget(m) && (m.approval || m.confirmChoice || m.removeChoice || m.clearChoice || m.undoChoice));
     const pendingApproval = pendingApprovals.at(-1);
     // A reviewed draft operation and its source card represent one choice.
     const reviewedBatches = new Set(pendingApprovals.flatMap(m => m.confirmChoice ? [m.confirmChoice.batch_id] : m.removeChoice ? [m.removeChoice.batch_id] : []));
-    const pendingDrafts = messages.filter(m => m.status === "pending" && !m.commit && m.drafts?.some(d => !d.ignored) && !reviewedBatches.has(m.id));
+    const pendingDrafts = messages.filter(m => m.status === "pending" && !m.commit && m.drafts?.some(d => !d.ignored && !d.softRemoved) && !reviewedBatches.has(m.id));
     const pendingCount = pendingApprovals.length + pendingDrafts.length;
     if (!sentImages.length && isActionStatusRequest(text)) {
       if (pendingApprovals.filter(m => m.approval).length > 1) {
@@ -580,11 +645,14 @@ export default function AssistantPage() {
     }
     if (configured === false) { toast.error("请先在服务端配置百炼 API Key。"); return; }
     if (messages.length >= 78) { toast.info("当前对话已较长，请先确认待处理账单，再清空对话。"); return; }
-    const latestBatch = [...messages].reverse().find(m => m.drafts?.length);
-    const draftBatch: AssistantDraftBatch | null = latestBatch?.status === "pending" && !latestBatch.commit
-      ? { batch_id: latestBatch.id, status: "pending", drafts: sortedAssistantDrafts(latestBatch.drafts!, latestBatch.draftSort).filter(d => !d.ignored).map(d => ({ id: d.id, type: d.type, description: d.description, member_id: d.member_id, category_id: d.category_id, amount_cents: Math.round(Number(d.amount) * 100), transaction_date: d.transaction_date, payment_method: d.payment_method, note: d.note })) } : null;
+    const latestBatch = draftBatchId ? messages.find(m => m.id === draftBatchId) : [...messages].reverse().find(m => m.drafts?.length);
+    if (draftBatchId && (!latestBatch || latestBatch.status !== "pending" || latestBatch.commit || !latestBatch.drafts?.some(d => !d.ignored && !d.softRemoved))) {
+      toast.info("这组草稿已变化，请核对最新卡片。"); return;
+    }
+    const draftBatch: AssistantDraftBatch | null = latestBatch?.status === "pending" && !latestBatch.commit && latestBatch.drafts?.some(d => !d.ignored && !d.softRemoved)
+      ? { batch_id: latestBatch.id, status: "pending", drafts: sortedAssistantDrafts(latestBatch.drafts!, latestBatch.draftSort).filter(d => !d.ignored && !d.softRemoved).map(d => ({ id: d.id, type: d.type, description: d.description, member_id: d.member_id, category_id: d.category_id, amount_cents: Math.round(Number(d.amount) * 100), transaction_date: d.transaction_date, payment_method: d.payment_method, note: d.note })) } : null;
     const savedBatch: AssistantSavedBatch | null = latestBatch?.status === "saved"
-      ? { batch_id: latestBatch.id, status: "saved", drafts: sortedAssistantDrafts(latestBatch.drafts!, latestBatch.draftSort).filter(d => !d.ignored).map(d => ({ id: d.id, type: d.type, description: d.description, member_id: d.member_id, category_id: d.category_id, amount_cents: Math.round(Number(d.amount) * 100), transaction_date: d.transaction_date, payment_method: d.payment_method, note: d.note })) } : null;
+      ? { batch_id: latestBatch.id, status: "saved", drafts: sortedAssistantDrafts(latestBatch.drafts!, latestBatch.draftSort).filter(d => !d.ignored && !d.softRemoved).map(d => ({ id: d.id, type: d.type, description: d.description, member_id: d.member_id, category_id: d.category_id, amount_cents: Math.round(Number(d.amount) * 100), transaction_date: d.transaction_date, payment_method: d.payment_method, note: d.note })) } : null;
     const epoch = conversationEpoch.current;
     sendLock.current = true; setSending(true);
     try {
@@ -594,29 +662,29 @@ export default function AssistantPage() {
       if (!currentConversation(epoch)) return;
       const id = crypto.randomUUID();
       const userMessage: Message = { id: crypto.randomUUID(), role: "user", incomplete: "interrupted", taskId: id, taskStatus: "submitting",
-        text: originalInput.trim() ? text : sentImages.length ? `识别这 ${sentImages.length} 张截图` : text, images: previews };
+        ...(eventCardId ? {updatesCardId:eventCardId} : {}), text: originalInput.trim() ? text : sentImages.length ? `识别这 ${sentImages.length} 张截图` : text, images: previews };
       const request: AssistantTaskRequest = { id, conversation_id: conversationId, user_message_id: userMessage.id, message: text,
         display_text: userMessage.text, display_images: previews, ...(sentImages.length ? { images: sentImages.map(image => image.data) } : {}), today: localCalendarDate(), draft_batch: draftBatch, saved_batch: savedBatch,
         ...(eventSelection ? { event_selection: eventSelection } : {}),
         ...([...messages].reverse().find(m => m.eventContext)?.eventContext ? { event_context: [...messages].reverse().find(m => m.eventContext)!.eventContext } : {}),
         record_contexts: messages.flatMap(m => [...(m.taskHistory || []).flatMap(output => output.ledgerContext ? [output.ledgerContext] : []), ...(m.ledgerContext ? [m.ledgerContext] : [])]).slice(-3),
-        history: messages.filter(m => !m.incomplete).slice(-8).map(m => ({ role: m.role, content: m.drafts
-          ? `${m.text.slice(0, 500)}\n卡片当前状态：${m.status === "saved" ? "已保存" : m.status === "deleted" ? "已删除，未入账" : m.status === "conflict" ? "保存冲突待核对" : "待确认"}。以下是用户核对编辑后的账单，以此为准，不要重复生成：\n${JSON.stringify(sortedAssistantDrafts(m.drafts, m.draftSort).map(d => ({ type: d.type, amount_cents: Math.round(Number(d.amount) * 100), date: d.transaction_date, description: d.description.slice(0, 40) })))}`.slice(0, 4000)
+        history: messages.filter(m => !m.incomplete && !assistantCardTarget(m)).slice(-8).map(m => ({ role: m.role, content: m.drafts
+          ? `${m.text.slice(0, 500)}\n卡片当前状态：${m.status === "saved" ? "已保存" : m.status === "deleted" ? "已删除，未入账" : m.status === "conflict" ? "保存冲突待核对" : "待确认"}。以下是用户核对编辑后的账单，以此为准，不要重复生成：\n${JSON.stringify(sortedAssistantDrafts(m.drafts, m.draftSort).map(d => ({ type: d.type, amount_cents: Math.round(Number(d.amount) * 100), date: d.transaction_date, description: d.description.slice(0, 40), excluded_from_posting: !!d.softRemoved })))}`.slice(0, 4000)
           : m.text.slice(0, 4000) })) };
       const nextMessages = [...messages.map(message => ({ ...message, memberChoice: undefined, eventChoices: undefined })), userMessage];
       // Persist stable identifiers and the original upload before dispatch. The
       // outbox is dropped only after the server has acknowledged this exact ID.
-      const snapshot: Conversation = { conversationId, messages: nextMessages, input: "", images: [], confirmations: confirmationsRef.current, undos: undosRef.current, outbox: request };
+      const snapshot: Conversation = { conversationId, messages: nextMessages, input: draftBatchId ? input : "", images: draftBatchId ? images : [], confirmations: confirmationsRef.current, undos: undosRef.current, outbox: request };
       const persisted = draft.persist(snapshot);
       if (!persisted && !draft.persist({ ...snapshot, outbox: null })) {
         toast.error("本机对话暂时无法保存；本次尚未发送，输入和截图仍保留在当前页面，请稍后重试。");
         return;
       }
-      outboxRef.current = request; setOutbox(request); setOutboxPersistable(persisted); setMessages(nextMessages); setInput(""); setImages([]);
+      outboxRef.current = request; setOutbox(request); setOutboxPersistable(persisted); setMessages(nextMessages); if (!draftBatchId) { setInput(""); setImages([]); }
       if (!persisted) toast.info("原截图暂未保存在本机，请等待发送完成后再离开；服务器接收后可用原图重试。");
       await submitTask(request);
     } catch (error) {
-      if (currentConversation(epoch)) { toast.error(error instanceof Error ? error.message : "截图准备失败，请重试。"); setInput(originalInput); setImages(sentImages); }
+      if (currentConversation(epoch)) { toast.error(error instanceof Error ? error.message : "截图准备失败，请重试。"); if (!draftBatchId) { setInput(originalInput); setImages(sentImages); } }
     } finally { if (currentConversation(epoch)) { sendLock.current = false; setSending(false); } }
   }
 
@@ -727,7 +795,7 @@ export default function AssistantPage() {
         let updated: EditableDraft[];
         try { updated = applyDraftMemberUpdate(latest.message.drafts!, update, members); }
         catch { return [...current, { ...reply, text: "待修改的账目已变化，本次未修改。请核对当前卡片后重试。" }]; }
-        return [...current.map(m => m.id === latest.message.id ? { ...m, drafts: updated, error: undefined } : m.id === question.id ? { ...m, memberChoice: undefined } : m), reply];
+        return relocateAssistantDraftCard([...current.map(m => m.id === latest.message.id ? { ...m, drafts: updated, error: undefined } : m.id === question.id ? { ...m, memberChoice: undefined } : m), reply], latest.message.id, reply.id);
       });
     } catch (error) {
       if (!controller.signal.aborted && currentConversation(epoch)) {
@@ -740,7 +808,7 @@ export default function AssistantPage() {
   function revealInvalidDraft(message: Message, error: string) {
     if (message.commit) return;
     const preferred: DraftValidationField | undefined = error.includes("金额") ? "amount" : error.includes("分类") ? "category" : error.includes("成员") ? "member" : error.includes("日期") ? "date" : undefined;
-    const drafts = sortedAssistantDrafts(message.drafts || [], message.draftSort).filter(d => !d.ignored);
+    const drafts = sortedAssistantDrafts(message.drafts || [], message.draftSort).filter(d => !d.ignored && !d.softRemoved);
     for (const d of drafts) {
       const invalid = invalidDraftFields(d, categories, members);
       const field = preferred ? (invalid[preferred] ? preferred : undefined) : (Object.keys(invalid) as DraftValidationField[]).find(key => invalid[key]);
@@ -780,7 +848,7 @@ export default function AssistantPage() {
         return;
       }
       changeConfirmation(message.id);
-      patchMessage(message.id, { status: "saved", error: undefined, commit: undefined, savedDrafts: submitted.map(d => ({ ...d })) });
+      patchMessage(message.id, { status: "saved", error: undefined, commit: undefined, savedDrafts: submitted.map(d => ({ ...d })), drafts: message.drafts?.filter(d => submitted.some(saved => saved.id === d.id)) });
       toast.success(`${result.count} 笔已记入账本${result.replayed ? "（已核对，无重复记账）" : ""}`);
       if (currentConversation(epoch)) {
         const waiting = knownTasks.current.find(task => assistantAgentWaiting(task) && restoreAssistantAgent(task.agent || task.result?.agent)?.pending_batch_id === message.id);
@@ -884,21 +952,14 @@ export default function AssistantPage() {
 
   function deleteDrafts(messageId: string, draftId?: string) {
     if (busy || saveLock.current || sendLock.current) return;
-    const deletedBatch = messages.find(message => message.id === messageId);
-    if (deletedBatch && (!draftId || deletedBatch.drafts?.length === 1)) {
-      const waiting = knownTasks.current.find(task => assistantAgentWaiting(task) && restoreAssistantAgent(task.agent || task.result?.agent)?.pending_batch_id === messageId);
-      if (waiting) void stopTask(waiting.id);
-    }
-    setMessages(current => current.map(m => {
-      if (m.memberChoice?.batch_id === messageId && (!draftId || m.memberChoice.draft_ids.includes(draftId))) return { ...m, memberChoice: undefined };
-      // An unresolved save must keep the exact original batch available for retry.
-      if (m.id !== messageId || m.status !== "pending" || m.commit) return m;
-      const remaining = draftId ? m.drafts?.filter(d => d.id !== draftId) || [] : [];
-      const unassigned = m.memberFlow ? unassignedMemberDrafts(remaining, members) : [];
-      const imageReply = current.some(input => input.role === "user" && input.taskId === m.id && input.images?.length);
-      return remaining.length ? { ...m, drafts: remaining, ...(m.memberFlow && !imageReply ? { text: unassigned.length ? memberBatchQuestionText(unassigned) : "请核对账目后确认入账。" } : {}), error: undefined }
-        : { ...m, drafts: [], status: "deleted" as const, text: "这组草稿已删除，未入账。", error: undefined };
-    }));
+    setMessages(current => {
+      const target = current.find(m => m.id === messageId);
+      const row = target?.drafts?.find(d => d.id === draftId);
+      const active = target?.drafts?.filter(d => !d.ignored && !d.softRemoved) || [];
+      const removed = draftId ? !row?.softRemoved : active.length > 0;
+      const ids = draftId ? [draftId] : (target?.drafts || []).filter(d => !d.ignored).map(d => d.id);
+      return setAssistantDraftRemoval(current, messageId, ids, removed);
+    });
   }
 
   async function transcribe(blob: Blob, clipToLimit = false) {
@@ -1055,7 +1116,19 @@ export default function AssistantPage() {
         <Button type="button" variant="ghost" className={cn(buttonClass, "mt-2.5 flex w-full items-center justify-between gap-3 rounded-[14px] border border-border bg-card px-4 py-3.5 text-left text-[13px] hover:border-primary")} disabled={composerDisabled} onClick={() => fillQuickPrompt(capabilitiesPrompt)}><span className="min-w-0"><span className="mb-[5px] block text-[11px] text-muted-foreground">了解账本助手</span><span>你可以做什么？</span></span><ArrowUp size={16} className="shrink-0 text-muted-foreground" /></Button>
       </div>}
       {displayMessages.map(message => {
+        const cardTarget = assistantCardTarget(message);
+        if (cardTarget) {
+          const target = messages.find(item => item.id === cardTarget && item.role === "assistant" && !assistantCardTarget(item));
+          return <div key={message.id} className="mb-5" data-message-role="assistant" data-message-id={message.id}>
+            {!!message.text && message.text !== "这组账目卡片已更新。" && message.text !== "这张卡片已更新。" && <div className={`${bubbleClass} mb-2 text-foreground`}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div>}
+            <Button type="button" variant="ghost" className={cn(buttonClass, "gap-2 rounded-xl border border-border bg-muted/35 px-3 py-2.5 text-[13px] text-muted-foreground hover:bg-muted")} disabled={!target}
+              onClick={() => jumpToDraftCard(cardTarget)} aria-label="已更新，查看最新卡片">
+              <Check size={14} aria-hidden="true" /><span>已更新</span><span className="text-primary">查看最新卡片</span><ArrowDown size={14} aria-hidden="true" />
+            </Button>
+          </div>;
+        }
         const visibleDrafts = sortedAssistantDrafts(message.drafts || [], message.draftSort);
+        const activeDrafts = visibleDrafts.filter(d => !d.ignored && !d.softRemoved);
         const sortMode = assistantDraftSort(message.draftSort);
         const replacement = message.id === activeMemberChoice?.id ? memberChoiceTarget(message.memberChoice, messages) : undefined;
         const unassigned = message.memberFlow && message.status === "pending" && !message.commit && activeMemberChoice?.memberChoice?.batch_id !== message.id ? unassignedMemberDrafts(visibleDrafts, members) : [];
@@ -1065,7 +1138,7 @@ export default function AssistantPage() {
         const actionPreview = draftReplyView(message, messages, members, categories) || (message.clearChoice ? { title: "清空当前对话", metrics: [], sections: [], notices: [{ text: message.text, tone: "attention" as const }] } : undefined) || message.actionPreview || message.approval?.preview || (hasAction
           ? message.approval && message.eventContext ? eventActionPreview(message.eventContext.input, message.approval.summary) : summaryActionPreview(message.approval?.summary || message.text)
           : undefined);
-        const actionControls = (hasAction || pendingPhase) ? <AssistantActionControls pending={pendingPhase} executing={message.actionResult?.status === "executing"} disabled={composerDisabled}
+        const actionControls = (hasAction || pendingPhase) ? <AssistantActionControls pending={pendingPhase} executing={message.actionResult?.status === "executing"} disabled={composerDisabled || messages.some(m => m.cardUpdatedLink === message.id && m.supersededApproval && !m.supersededApproval.settled)}
           approveLabel={message.undoChoice ? `确认撤销 ${message.undoChoice.draft_ids.length} 笔` : message.approval?.preview?.approveLabel} canRead={!!message.approval} onDecide={phase => void decideConversationAction(message, phase === "cancel" ? "cancel" : "approve", phase === "read")}
           error={message.error} resultText={message.actionResult?.status === "pending" ? "尚未执行，等待你的确认。" : message.actionResult?.status === "executing" ? message.actionResult.text : undefined} /> : null;
         const replyView = !actionPreview ? message.replyView || (message.ledgerContext ? recordReplyView(message.ledgerContext.resource, message.ledgerContext.rows, undefined, members, categories)
@@ -1085,8 +1158,8 @@ export default function AssistantPage() {
           hasPreview={!!actionPreview || !!message.drafts?.length || !!message.eventChoices?.length}
           disabled={!!actionPending || sending || savingId !== null} onStop={() => void stopTask(message.taskId || message.id)}
           onEdit={() => { setInput(message.agent!.goal); composer.current?.focus(); }} />;
-        return <div key={message.id} className={cn("mb-5 flex", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
-        <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]")}>
+        return <div key={message.id} tabIndex={message.drafts?.length || actionPreview || replyView || message.eventContext ? -1 : undefined} className={cn("mb-5 flex outline-none", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
+        <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]", highlightedCard === message.id && "rounded-2xl ring-2 ring-primary/40 ring-offset-2 ring-offset-background")}>
           {message.role === "assistant" && agentRunning && agentStatus}
           {message.role === "assistant" && message.process && !message.agent && <AssistantProcessingDetails process={message.process}
             disconnected={!!taskConnectionError && (message === streamingMessage || message.taskId === activeTaskId)} />}
@@ -1116,15 +1189,29 @@ export default function AssistantPage() {
           </div>}
           {eventMembers && memberEvent && <AssistantMemberPicker heading={<p className="mb-3 flex items-baseline gap-2 text-[13px]"><span className="min-w-0 wrap-anywhere">{memberEvent.kind ? eventKinds[memberEvent.kind] : "这笔账"}{memberEvent.counterparty ? ` · ${memberEvent.counterparty}` : ""}</span><strong className="ml-auto whitespace-nowrap text-[16px]">¥{eventCashflowCents(memberEvent) === null ? "—" : money(eventCashflowCents(memberEvent)!)}</strong><span className="shrink-0 text-[11px] text-muted-foreground">{memberEvent.kind && eventType(memberEvent.kind) === "income" ? "收入" : "支出"}</span></p>}
             members={members} disabled={composerDisabled} loading={isInitializing} loadError={!!loadError} onReload={reloadSetup}
-            onSelect={member => void send(`${memberEvent.kind && eventType(memberEvent.kind) === "income" ? "收入所属人" : "支出人"}是「${member.name}」`, { ...memberEvent, member_id: member.id })}
+            onSelect={member => void send(`${memberEvent.kind && eventType(memberEvent.kind) === "income" ? "收入所属人" : "支出人"}是「${member.name}」`, { ...memberEvent, member_id: member.id }, undefined, message.id)}
             footer={<p className="mt-3 text-[11px] text-muted-foreground">点击名字，自动回复；核对后再确认入账</p>} />}
           {!eventMembers && !!message.eventChoices?.length && <AssistantReplyShell label="补充事项信息" title="请选择下一步">
             <div className="space-y-3 p-4"><div className={bubbleClass}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div>
-            <div className="flex flex-col gap-2">{message.eventChoices.map((choice, index) => <Button key={index} type="button" variant="ghost" className={assistantChoiceClass} disabled={composerDisabled} onClick={() => void send(choice.label, choice.input)}>{choice.label}</Button>)}</div></div>
+            <div className="flex flex-col gap-2">{message.eventChoices.map((choice, index) => <Button key={index} type="button" variant="ghost" className={assistantChoiceClass} disabled={composerDisabled} onClick={() => void send(choice.label, choice.input, undefined, message.id)}>{choice.label}</Button>)}</div></div>
           </AssistantReplyShell>}
           {actionPreview ? <AssistantActionCard preview={actionPreview} status={message.actionResult?.status || (message.agent?.status === "stopped" ? "executing" : "pending")} pending={pendingPhase}
-            resultText={message.actionResult?.text.split("\n")[0]}>{actionControls}</AssistantActionCard> : actionControls}
-          {replyView && <AssistantReplyCard preview={replyView} footer={(message.navigateTo || message.exportFile) ? <>
+            resultText={message.actionResult?.text.split("\n")[0]}
+            renderRecordAction={message.removeChoice ? record => record.id && <Button type="button" variant="outline" size="sm" className="h-7 min-h-7 shrink-0 rounded-md px-2 text-[11px]" disabled={composerDisabled || !!savingId || !!pendingPhase}
+              onClick={() => {
+                if (busy || saveLock.current || sendLock.current || actionPendingRef.current) return;
+                setMessages(current => toggleAssistantDraftRemoval(current, message.id, record.id!));
+              }}>{record.excluded ? "恢复" : "不移除"}</Button> : undefined}>{actionControls}</AssistantActionCard> : actionControls}
+          {replyView?.title === "重复入账核对" && !replyView.draftComparison ? <AssistantReplyShell label="历史核对结果" title="核对规则已更新">
+            <div className="space-y-3 p-4"><AssistantReplyNotice>旧结果仅按金额和日期召回，可能包含无关记录。请按当前草稿重新核对。</AssistantReplyNotice>
+              <Button type="button" size="sm" variant="outline" disabled={composerDisabled} onClick={() => void send("重新核对当前草稿是否已经入账，排除仅金额相同的无关记录")}>重新核对</Button></div>
+          </AssistantReplyShell> : replyView?.draftComparison ? <AssistantDraftMatchCard preview={replyView} disabled={composerDisabled || !!savingId}
+            state={draftId => messages.find(m => m.id === replyView.draftComparison!.batch_id)?.drafts?.find(d => d.id === draftId)?.softRemoved ? "removed" : message.draftMatchDecisions?.[draftId] === "removed" ? "changed" : assistantDraftMatchTarget(messages, message.id, draftId) ? message.draftMatchDecisions?.[draftId] || "pending" : "changed"}
+            onReview={() => jumpToDraftCard(replyView.draftComparison!.batch_id)}
+            onDecision={(draftId, decision) => {
+              if (busy || saveLock.current || sendLock.current) return;
+              setMessages(current => resolveAssistantDraftMatch(current, message.id, draftId, decision));
+            }} /> : replyView && <AssistantReplyCard preview={replyView} footer={(message.navigateTo || message.exportFile) ? <>
             {message.navigateTo && <Link href={message.navigateTo} className="inline-flex min-h-9 items-center rounded-xl border border-border px-3 text-sm text-primary hover:bg-muted">打开对应页面</Link>}
             {message.exportFile && <Button type="button" variant="outline" size="sm" className="max-w-full whitespace-normal wrap-anywhere" onClick={() => downloadExport(message)}>下载 {message.exportFile.name}</Button>}
           </> : undefined}>
@@ -1137,22 +1224,24 @@ export default function AssistantPage() {
           {replacement && <AssistantMemberPicker label="修改记账成员" heading={<p className="mb-3 flex items-baseline justify-between gap-3 text-[13px]"><span className="min-w-0 wrap-anywhere">{replacement.drafts.length === 1 ? replacement.drafts[0].description || "这笔账" : `修改这 ${replacement.drafts.length} 笔账目的人员`}</span>{replacement.drafts.length === 1 && <strong className="shrink-0 text-[16px]">¥{replacement.drafts[0].amount}</strong>}</p>} members={members} disabled={composerDisabled} loading={isInitializing} loadError={!!loadError}
             onReload={reloadSetup} onSelect={member => void selectReplacementMember(message, member)} footer={<div className="mt-3 flex items-center justify-between gap-3 text-[11px] text-muted-foreground"><span>点击人员，自动回复并更新</span><Button type="button" variant="ghost" className={cn(buttonClass, "shrink-0 py-1 underline")} disabled={composerDisabled} onClick={() => patchMessage(message.id, { memberChoice: undefined })}>取消修改</Button></div>} />}
           {question && <AssistantMemberPicker heading={<p className="mb-3 flex items-baseline gap-2 text-[13px]"><span className="min-w-0 wrap-anywhere">{unassigned.length > 1 ? `${unassigned.length} 笔待选成员` : question.description || "这笔账"}</span><strong className="ml-auto whitespace-nowrap text-[16px]">¥{questionTotal}</strong>{unassigned.length === 1 && <span className="shrink-0 text-[11px] text-muted-foreground">{question.type === "expense" ? "支出" : "收入"}</span>}</p>} members={members} disabled={composerDisabled} loading={isInitializing} loadError={!!loadError}
-            onReload={reloadSetup} onSelect={member => void chooseMember(message, member)} footer={<div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-[11px] text-muted-foreground"><span>点击名字，自动回复</span><div className="flex flex-wrap gap-3">{unassigned.length === 1 && <Button type="button" variant="ghost" className={cn(buttonClass, "py-[3px] text-xs font-normal text-muted-foreground hover:text-destructive")} disabled={composerDisabled} onClick={() => deleteDrafts(message.id, question.id)}>删除这笔草稿</Button>}{message.drafts!.length > 1 && <Button type="button" variant="ghost" className={cn(buttonClass, "py-[3px] text-xs font-normal text-muted-foreground hover:text-destructive")} disabled={composerDisabled} onClick={() => deleteDrafts(message.id)}>删除本组</Button>}</div></div>}>
+            onReload={reloadSetup} onSelect={member => void chooseMember(message, member)} footer={<div className="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-[11px] text-muted-foreground"><span>点击名字，自动回复</span><div className="flex flex-wrap gap-3">{unassigned.length === 1 && <Button type="button" variant="ghost" className={cn(buttonClass, "py-[3px] text-xs font-normal text-muted-foreground hover:text-destructive")} disabled={composerDisabled} onClick={() => deleteDrafts(message.id, question.id)}>移除这笔草稿</Button>}{message.drafts!.length > 1 && <Button type="button" variant="ghost" className={cn(buttonClass, "py-[3px] text-xs font-normal text-muted-foreground hover:text-destructive")} disabled={composerDisabled} onClick={() => deleteDrafts(message.id)}>{activeDrafts.length ? "移除本组" : "恢复本组"}</Button>}</div></div>}>
             {unassigned.length > 1 && <p className="mt-2.5 text-[11px] leading-[1.6] text-muted-foreground">选一次应用到这 {unassigned.length} 笔，确认前可逐笔修改。</p>}
-            {unassigned.length > 1 && <ul className="mt-3.5 grid list-none gap-[9px] p-0" aria-label="待选成员的账目">{unassigned.map(d => <li key={d.id} className="flex items-center gap-2 text-[12px]">
-              <span className="min-w-0 flex-1 wrap-anywhere">{d.description.trim() ? d.description : d.type === "expense" ? "支出" : "收入"}<small className="mt-px block text-[10px] text-muted-foreground">{d.transaction_date}</small></span>
-              <span className="shrink-0 tabular-nums">¥{d.amount}</span>
-              <Button type="button" variant="ghost" className={cn(buttonClass, "flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 hover:bg-muted hover:text-destructive")} aria-label="删除这笔草稿" title="删除这笔草稿" disabled={composerDisabled} onClick={() => deleteDrafts(message.id, d.id)}><Trash2 size={16} /></Button>
+            {(unassigned.length > 1 || visibleDrafts.some(d => d.softRemoved)) && <ul className="mt-3.5 grid list-none gap-[9px] p-0" aria-label="待选成员的账目">{visibleDrafts.filter(d => d.softRemoved || unassigned.some(row => row.id === d.id)).map(d => <li key={d.id} className="flex items-center gap-2 text-[12px]">
+              <span className={cn("min-w-0 flex-1 wrap-anywhere", d.softRemoved && "text-muted-foreground line-through")}>{d.description.trim() ? d.description : d.type === "expense" ? "支出" : "收入"}<small className="mt-px block text-[10px] text-muted-foreground">{d.transaction_date}</small></span>
+              <span className={cn("shrink-0 tabular-nums", d.softRemoved && "text-muted-foreground line-through")}>¥{d.amount}</span>
+              <Button type="button" variant="ghost" className={cn(buttonClass, "flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 hover:bg-muted hover:text-destructive")} aria-label={d.softRemoved ? "恢复这笔草稿" : "移除这笔草稿"} title={d.softRemoved ? "恢复这笔草稿" : "移除这笔草稿"} disabled={composerDisabled} onClick={() => deleteDrafts(message.id, d.id)}>{d.softRemoved ? <Undo2 size={16} /> : <Trash2 size={16} />}</Button>
             </li>)}</ul>}
+            <Button type="button" variant="outline" className="mt-3.5 min-h-10 w-full gap-2 rounded-xl whitespace-normal text-xs" disabled={composerDisabled || !!savingId || configured !== true}
+              onClick={() => void send("核对这组待确认账目是否存在重复记录，请逐笔对照已保存账本，只查询，不修改草稿或账本。", undefined, message.id)}><Search size={15} />核对是否存在重复记录</Button>
           </AssistantMemberPicker>}
           {!!message.drafts?.length && !question && <AssistantDraftCard drafts={visibleDrafts} status={message.status}
             pending={savingId === message.id} checking={!!message.commit} error={message.error} sortMode={sortMode}
             sortDisabled={busy || !!savingId || !!actionPending} onSort={() => cycleDraftSort(message.id)} footer={<>
             {message.status === "pending" && <div className="space-y-3"><p className="text-xs leading-5 text-muted-foreground">{message.commit ? "本组结果待核对，请重试原操作。" : "尚未入账，核对后确认。"}</p><div className="flex items-center gap-2 flex-wrap">
-              {!message.commit && <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-xs font-normal text-muted-foreground hover:text-destructive" disabled={!!actionPending || !!savingId || busy} onClick={() => deleteDrafts(message.id)}>删除本组</Button>}
+              {!message.commit && <Button type="button" variant="ghost" size="sm" className="h-8 px-2 text-xs font-normal text-muted-foreground hover:text-destructive" disabled={!!actionPending || !!savingId || busy} onClick={() => deleteDrafts(message.id)}>{activeDrafts.length ? "移除本组" : "恢复本组"}</Button>}
               {message.commit && <span className="text-xs text-muted-foreground">重试将核对原批次</span>}
-              <Button type="button" className="ml-auto min-w-[120px]" disabled={!!actionPending || !!savingId || busy || activeMemberChoice?.memberChoice?.batch_id === message.id} onClick={() => void confirm(message)}>
-                {savingId === message.id ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}{savingId === message.id ? "正在确认" : message.commit ? "重试确认" : `确认 ${message.drafts.length} 笔`}
+              <Button type="button" className="ml-auto min-w-[120px]" disabled={!!actionPending || !!savingId || busy || activeMemberChoice?.memberChoice?.batch_id === message.id || (!message.commit && !activeDrafts.length)} onClick={() => void confirm(message)}>
+                {savingId === message.id ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}{savingId === message.id ? "正在确认" : message.commit ? "重试确认" : `确认 ${activeDrafts.length} 笔`}
               </Button>
             </div></div>}
             {message.status === "saved" && <div className="flex items-center flex-wrap gap-2 text-[12px] text-primary"><Check size={16} className="shrink-0" /><span>已记入账本</span><Button type="button" variant="ghost" className="ml-auto h-8 gap-1 px-2 text-[12px] font-normal text-muted-foreground" aria-label="撤销入账" title="撤销本组入账并恢复草稿" disabled={!!actionPending || !!savingId || busy || undos.some(operation => operation.batch_id === message.id)} onClick={() => void undoSaved(message)}>{savingId === message.id ? <Loader2 size={14} className="animate-spin" /> : <Undo2 size={14} />}{savingId === message.id ? "正在撤销…" : "撤销入账"}</Button><Link className="shrink-0 underline" href="/dashboard">查看记录</Link></div>}
@@ -1163,13 +1252,13 @@ export default function AssistantPage() {
               const member = members.find(m => m.id === d.member_id);
               const locked = message.status !== "pending" || !!message.commit || !!savingId || busy || !!actionPending;
               const canDelete = message.status === "pending" && !message.commit;
-              const needsReview = message.status === "pending" && !message.commit;
+              const needsReview = message.status === "pending" && !message.commit && !d.softRemoved;
               const fields = invalidDraftFields(d, categories, members);
               const invalid = { amount: needsReview && fields.amount, category: needsReview && fields.category,
                 member: needsReview && fields.member, date: needsReview && fields.date };
               const needsCompletion = Object.values(invalid).some(Boolean);
               return <AssistantDraftRow key={d.id} draft={d} category={category} member={member} canDelete={canDelete} locked={locked}
-                open={expandedDrafts[d.id] ?? needsCompletion} onToggle={open => setExpandedDrafts(current => current[d.id] === open ? current : { ...current, [d.id]: open })}
+                open={!d.softRemoved && (expandedDrafts[d.id] ?? needsCompletion)} onToggle={open => setExpandedDrafts(current => current[d.id] === open ? current : { ...current, [d.id]: open })}
                 onDelete={() => deleteDrafts(message.id, d.id)}>
                 <div className="grid grid-cols-2 gap-x-3 gap-y-4">
                   <div className={fieldLabelClass}>

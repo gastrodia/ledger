@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import type { AssistantActionPreview } from "@/lib/assistant-action-preview";
 import type { AssistantActionResult } from "@/lib/assistant-commands";
 
-import { AssistantReplyShell, AssistantReplyBody, AssistantReplyNotice, AssistantReplyBadge, type AssistantBadgeTone, type AssistantNoticeTone } from "@/components/assistant/reply-primitives";
+import { AssistantReplyShell, AssistantReplyBody, AssistantReplyNotice, AssistantReplyBadge, type AssistantBadgeTone, type AssistantNoticeTone, type AssistantRecordAction } from "@/components/assistant/reply-primitives";
 
 export type AssistantActionPhase = "approve" | "cancel" | "read";
 const progressText = { approve: "正在执行…", cancel: "正在取消…", read: "正在核对…" };
@@ -29,15 +29,15 @@ export function AssistantActionControls({ pending, executing, disabled, canRead,
   </div>;
 }
 
-export function AssistantActionCard({ preview, status = "pending", pending, resultText, children }: {
-  preview: AssistantActionPreview; status?: AssistantActionResult["status"]; pending?: AssistantActionPhase; resultText?: string; children?: ReactNode;
+export function AssistantActionCard({ preview, status = "pending", pending, resultText, children, renderRecordAction }: {
+  preview: AssistantActionPreview; status?: AssistantActionResult["status"]; pending?: AssistantActionPhase; resultText?: string; children?: ReactNode; renderRecordAction?: AssistantRecordAction;
 }) {
   const labels = { pending: "待确认", executing: "结果待核对", succeeded: "已完成", cancelled: "已取消", failed: "未完成", expired: "需重新核对" };
   const tones = { pending: "pending", executing: "warning", succeeded: "success", cancelled: "neutral", failed: "error", expired: "warning" } satisfies Record<AssistantActionResult["status"], AssistantBadgeTone>;
   const resultTones = { pending: "info", executing: "attention", succeeded: "success", cancelled: "neutral", failed: "error", expired: "attention" } satisfies Record<AssistantActionResult["status"], AssistantNoticeTone>;
   return <AssistantReplyShell label="操作确认卡片" busy={!!pending || status === "executing"} title={preview.title} subtitle={preview.subtitle}
     badge={<AssistantReplyBadge busy={!!pending} tone={tones[status]}>{pending ? progressText[pending] : labels[status]}</AssistantReplyBadge>} footer={children}>
-    <AssistantReplyBody preview={preview}>
+    <AssistantReplyBody preview={preview} renderRecordAction={status === "pending" ? renderRecordAction : undefined}>
       {status === "pending" && !pending && <p className="text-xs text-muted-foreground">尚未执行。核对后确认，或直接告诉我要修改的内容。</p>}
       {resultText && status !== "pending" && <div role="status"><AssistantReplyNotice tone={resultTones[status]}>{resultText}</AssistantReplyNotice></div>}
     </AssistantReplyBody>

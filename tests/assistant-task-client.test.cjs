@@ -124,14 +124,54 @@ test('recovered member updates apply once and never overwrite a subsequent user 
     batch_id: original.id, draft_ids: [uuid(10)], member_id: uuid(3),
   } }) });
   const merged = client.mergeAssistantTasks([original, user()], [completed], conversationId, members);
-  assert.equal(merged[0].drafts[0].member_id, uuid(3));
-  assert.equal(merged[0].drafts[1].member_id, uuid(2));
+  assert.equal(merged.find(m => m.id === original.id).drafts[0].member_id, uuid(3));
+  assert.equal(merged.find(m => m.id === original.id).drafts[1].member_id, uuid(2));
   assert.equal(original.drafts[0].member_id, uuid(2), 'merge leaves the input immutable');
   const edited = plain(merged);
-  edited[0].drafts[0].member_id = uuid(2);
-  edited[0].drafts[0].amount = '9.00';
+  edited.find(m => m.id === original.id).drafts[0].member_id = uuid(2);
+  edited.find(m => m.id === original.id).drafts[0].amount = '9.00';
   const replayed = client.mergeAssistantTasks(edited, [completed], conversationId, members);
   assert.deepEqual(plain(replayed), edited);
+});
+
+test('chat edits move the original member card below the latest reply and keep every old location linked to that same batch', () => {
+  const origin = task({ id: uuid(40), user_message_id: uuid(41), result: plan({ drafts: [row(10, { member_id: null }), row(11, { member_id: null })] }) });
+  let messages = client.mergeAssistantTasks([user({ id: origin.user_message_id })], [origin], conversationId, members);
+  const first = task({ id: uuid(42), user_message_id: uuid(43), result: plan({ action: 'edit', drafts: [], edit: { batch_id: origin.id, edits: [{ draft_id: uuid(10), transaction_date: '2026-10-08' }] } }) });
+  messages = client.mergeAssistantTasks([...messages, user({ id: first.user_message_id, text: '截图是昨天截的' })], [first], conversationId, members);
+  assert.equal(messages.at(-1).id, origin.id);
+  assert.equal(messages.at(-2).id, first.id);
+  assert.equal(messages.at(-1).drafts[0].transaction_date, '2026-10-08');
+  assert.equal(messages.at(-1).drafts[1].transaction_date, '2026-09-30');
+  assert.equal(messages[1].draftCardLink, origin.id);
+  assert.equal(messages[1].drafts, undefined);
+  assert.deepEqual(plain(messages.at(-1).drafts.map(d => d.id)), [uuid(10), uuid(11)]);
+  const second = task({ id: uuid(44), user_message_id: uuid(45), result: plan({ action: 'edit', drafts: [], edit: { batch_id: origin.id, edits: [{ draft_id: uuid(11), amount_cents: 999 }] } }) });
+  messages = client.mergeAssistantTasks([...messages, user({ id: second.user_message_id, text: '第二笔改9.99' })], [second], conversationId, members);
+  assert.equal(messages.at(-1).id, origin.id);
+  assert.equal(messages.at(-2).id, second.id);
+  assert.equal(messages.at(-1).drafts[1].amount, '9.99');
+  assert.equal(messages.filter(m => m.draftCardLink === origin.id).length, 2);
+  assert.equal(messages.filter(m => m.drafts?.length).length, 1);
+  assert.equal(new Set(messages.map(m => m.id)).size, messages.length);
+  const restored = plain(messages);
+  assert.deepEqual(plain(client.mergeAssistantTasks(restored, [origin, first, second, first], conversationId, members)), restored);
+});
+
+test('failed or locked edits never move the card, and a history marker cannot become a mutation target', () => {
+  const source = { id: uuid(40), role: 'assistant', text: '请选择成员', status: 'pending', memberFlow: true, drafts: [row(10, { member_id: null, amount: '6.97' })] };
+  for (const value of [{ ...source, status: 'saved' }, { ...source, commit: source.drafts }, source]) {
+    const edits = [{ draft_id: uuid(999), transaction_date: '2026-10-08' }];
+    const completed = task({ result: plan({ action: 'edit', drafts: [], edit: { batch_id: source.id, edits } }) });
+    const merged = client.mergeAssistantTasks([value, user()], [completed], conversationId, members);
+    assert.equal(merged[0], value);
+    assert.equal(merged.some(m => m.draftCardLink), false);
+  }
+  const reply = { id: uuid(50), role: 'assistant', text: '已更新' };
+  const before = [source, reply];
+  const moved = client.relocateAssistantDraftCard(before, source.id, reply.id);
+  assert.equal(client.relocateAssistantDraftCard(moved, source.id, reply.id), moved);
+  assert.equal(client.relocateAssistantDraftCard(moved, moved[0].id, reply.id), moved);
 });
 
 test('recovered member choices target only current editable rows and keep the displayed sort order', () => {
@@ -543,64 +583,37 @@ test('historical applied replies gain process details without restoring deleted 
   assert.equal(client.mergeAssistantTasks(recovered, [completed], conversationId, members), recovered);
 });
 
-test('removing transfers leaves five original drafts and survives reload and task replay without any financial write', () => {
-  const descriptions = ['易加油', '坂田六、七区停车场', '转账-转给好知己', '微信红包-来自晶晶', '转账-转给弟', '转账-转给小贾妈', '天虹数科商业股份有限公司', '转账-来自妈', '长沙市拿云餐饮管理有限公司'];
-  const amounts = [9896, 800, 278500, 5, 30000, 60000, 15527, 10000, 300];
-  const drafts = descriptions.map((description, i) => row(100 + i, { description, amount_cents: amounts[i], amount: (amounts[i] / 100).toFixed(2), member_id: null }));
-  const original = { id: uuid(40), role: 'assistant', text: '这 9 笔账目属于谁？', status: 'pending', memberFlow: true, drafts };
-  const older = { ...original, id: uuid(41), drafts: [row(200)] };
-  const ids = [2, 4, 5, 7].map(i => drafts[i].id);
-  const choice = { id: uuid(42), role: 'assistant', text: '请选择成员', memberChoice: { batch_id: original.id, draft_ids: ids, member_id: null } };
-  const completed = task({ result: plan({ action: 'remove', drafts: [], remove: { batch_id: original.id, draft_ids: ids } }) });
-  const isolated = loadClient({ fetch() { assert.fail('removing drafts must never write transactions'); } });
-  const preview = isolated.mergeAssistantTasks([older, original, choice, user()], [completed], conversationId, members);
-  assert.equal(preview.find(m => m.id === original.id), original, 'preview must not mutate drafts');
-  assert.equal(preview.find(m => m.id === choice.id), choice, 'preview must not clear existing choices');
-  assert.match(preview.at(-1).text, /准备删除以下 4 笔/);
-  assert.match(preview.at(-1).text, /尚未删除/);
-  assert.match(preview.at(-1).text, /支出 ¥3785.00/);
-  const recoveredPreview = plain(preview);
-  assert.deepEqual(plain(isolated.mergeAssistantTasks(recoveredPreview, [completed], conversationId, members)), recoveredPreview);
-  const merged = isolated.approveAssistantDraftRemoval(preview, completed.id, members);
-  assert.equal(isolated.approveAssistantDraftRemoval(merged, completed.id, members), merged, 'approval is consumed once');
-  const remaining = drafts.filter(d => !ids.includes(d.id));
-  assert.deepEqual(plain(merged.find(m => m.id === original.id).drafts), remaining);
-  assert.equal(merged.find(m => m.id === original.id).status, 'pending');
-  assert.match(merged.find(m => m.id === original.id).text, /5 笔/);
-  assert.equal(merged.find(m => m.id === choice.id).memberChoice, undefined);
-  assert.equal(merged[0], older);
-  assert.equal(original.drafts.length, 9);
-  assert.match(merged.at(-1).text, /已删除 4 笔待确认草稿/);
-  assert.match(merged.at(-1).text, /本组剩余 5 笔，尚未入账/);
-  for (const id of ids) assert.ok(merged.at(-1).text.includes(drafts.find(d => d.id === id).description));
-  const persisted = plain(merged);
-  assert.deepEqual(plain(isolated.mergeAssistantTasks(persisted, [completed, completed], conversationId, members)), persisted);
+test('conversational soft removal preserves every ID and value, moves the same card and cannot replay over restoration', () => {
+  const drafts = [row(10), row(11), row(12)];
+  const original = {id:uuid(40),role:'assistant',text:'待确认',status:'pending',taskApplied:true,drafts};
+  const completed = task({result:plan({action:'remove',drafts:[],remove:{batch_id:original.id,draft_ids:[uuid(10),uuid(12)]}})});
+  const merged = client.mergeAssistantTasks([original,user()],[completed],conversationId,members);
+  const target = merged.find(m=>m.id===original.id);
+  assert.equal(target.drafts.length,3);
+  assert.deepEqual(target.drafts.map(d=>d.id),drafts.map(d=>d.id));
+  assert.deepEqual(target.drafts.map(d=>!!d.softRemoved),[true,false,true]);
+  assert.equal(target.status,'pending');
+  assert.equal(merged.at(-1).id,original.id);
+  assert.equal(merged.some(m=>m.removeChoice),false);
+  const restored = client.setAssistantDraftRemoval(plain(merged),original.id,[uuid(10)],false);
+  assert.deepEqual(plain(client.mergeAssistantTasks(restored,[completed],conversationId,members)),plain(restored));
+  assert.deepEqual(restored.find(m=>m.id===original.id).drafts.map(d=>!!d.softRemoved),[false,false,true]);
 });
 
-test('removing all drafts clears the batch; stale, saved and unresolved targets remain untouched', () => {
-  const original = { id: uuid(40), role: 'assistant', text: '待确认', status: 'pending', drafts: [row(10)] };
-  const remove = { batch_id: original.id, draft_ids: [uuid(10)] };
-  const completed = task({ result: plan({ action: 'remove', drafts: [], remove }) });
-  const preview = client.mergeAssistantTasks([original, user()], [completed], conversationId, members);
-  assert.equal(preview[0], original);
-  const merged = client.approveAssistantDraftRemoval(preview, completed.id, members);
-  assert.equal(merged[0].status, 'deleted');
-  assert.equal(merged[0].drafts.length, 0);
-  assert.match(merged.at(-1).text, /本组已清空，未入账/);
-  for (const target of [{ ...original, status: 'saved' }, { ...original, commit: original.drafts }, { ...original, status: 'conflict' },
-    { ...original, drafts: [] }, { ...original, drafts: [row(10, { ignored: true })] }, { ...original, id: uuid(41) },
-    { ...original, role: 'user' }]) {
-    const rejected = client.mergeAssistantTasks([target, user()], [completed], conversationId, members);
-    assert.equal(rejected[0], target);
-    assert.match(rejected.at(-1).text, /本次未删除/);
+test('soft removal never clears a batch and saved, unresolved, foreign and absent targets stay untouched', () => {
+  const original={id:uuid(40),role:'assistant',text:'pending',status:'pending',drafts:[row(10)]};
+  const soft=client.setAssistantDraftRemoval([original],original.id,[uuid(10)],true);
+  assert.equal(soft[0].drafts.length,1);assert.equal(soft[0].status,'pending');assert.equal(soft[0].drafts[0].softRemoved,true);
+  assert.equal(client.setAssistantDraftRemoval(soft,original.id,[uuid(10)],false)[0].drafts[0].softRemoved,false);
+  for(const target of [{...original,status:'saved'},{...original,commit:original.drafts},{...original,role:'user'},{...original,drafts:[]}]) {
+    const messages=[target];assert.equal(client.setAssistantDraftRemoval(messages,target.id,[uuid(10)],true),messages);
   }
 });
-
 
 test('draft removal approval fails closed when reviewed rows change, disappear, become ignored or are saved', () => {
   const original = { id: uuid(40), role: 'assistant', text: '待确认', status: 'pending', drafts: [row(10), row(11)] };
   const completed = task({ result: plan({ action: 'remove', drafts: [], remove: { batch_id: original.id, draft_ids: [uuid(10), uuid(11)] } }) });
-  const preview = client.mergeAssistantTasks([original, user()], [completed], conversationId, members);
+  const preview = [original, { id: completed.id, role: 'assistant', text: 'legacy deletion', removeChoice: { batch_id: original.id, draft_ids: original.drafts.map(d=>d.id), snapshot: JSON.stringify(original.drafts) } }];
   for (const target of [{ ...original, status: 'saved' }, { ...original, commit: original.drafts },
     { ...original, drafts: [row(10)] }, { ...original, drafts: [row(10, { amount: '99.00' }), row(11)] },
     { ...original, drafts: [row(10, { ignored: true }), row(11)] },
@@ -613,4 +626,92 @@ test('draft removal approval fails closed when reviewed rows change, disappear, 
   }
   const cancelled = preview.map(message => message.id === completed.id ? { ...message, removeChoice: undefined } : message);
   assert.equal(client.approveAssistantDraftRemoval(cancelled, completed.id, members), cancelled);
+});
+
+test('draft match quick decisions keep/remove only the compared pending draft and survive replay and refresh', () => {
+  const draft = { ...row(10), amount: '6.97' };
+  const target = { id: uuid(30), role: 'assistant', text: '核对后确认', status: 'pending', taskApplied: true, drafts: [draft, { ...draft, id: uuid(11) }] };
+  const comparison = { id: uuid(40), role: 'assistant', text: '核对结果', replyView: { draftComparison: { batch_id: target.id, rows: [{ draft_id: draft.id,
+    snapshot: { description: draft.description, type: draft.type, amount_cents: 697, transaction_date: draft.transaction_date, member_id: draft.member_id, category_id: draft.category_id }, candidates: [{ id: uuid(99) }] }] } } };
+  const initial = [target, comparison];
+  assert.ok(client.assistantDraftMatchTarget(initial, comparison.id, draft.id));
+  const kept = client.resolveAssistantDraftMatch(initial, comparison.id, draft.id, 'kept', members);
+  assert.equal(kept[1].draftMatchDecisions[draft.id], 'kept');
+  assert.equal(kept[0], target);
+  assert.equal(client.resolveAssistantDraftMatch(kept, comparison.id, draft.id, 'removed', members), kept, 'one final decision per comparison');
+  const removed = client.resolveAssistantDraftMatch(initial, comparison.id, draft.id, 'removed', members);
+  const latest = removed.find(m => m.id === target.id);
+  assert.deepEqual(latest.drafts.map(d => d.id), [uuid(10), uuid(11)]);
+  assert.equal(latest.drafts[0].softRemoved,true);
+  assert.equal(latest.status, 'pending');
+  assert.equal(latest.taskApplied, true);
+  assert.equal(removed.find(m => m.id === comparison.id).draftMatchDecisions[draft.id], 'removed');
+  assert.equal(removed.at(-1).id, target.id, 'remaining drafts relocate below the decision card');
+  const reloaded = plain(removed);
+  assert.equal(client.resolveAssistantDraftMatch(reloaded, comparison.id, draft.id, 'removed', members), reloaded);
+  assert.equal(client.assistantDraftMatchTarget(reloaded, comparison.id, draft.id), null);
+});
+
+test('old comparison buttons cannot act on edited, posted, locked or replaced drafts', () => {
+  const draft = { ...row(10), amount: '6.97' };
+  const target = { id: uuid(30), role: 'assistant', text: 'pending', status: 'pending', drafts: [draft] };
+  const reply = { id: uuid(40), role: 'assistant', text: 'comparison', replyView: { draftComparison: { batch_id: target.id, rows: [{ draft_id: draft.id,
+    snapshot: { description: draft.description, type: draft.type, amount_cents: 697, transaction_date: draft.transaction_date, member_id: draft.member_id, category_id: draft.category_id }, candidates: [{ id: uuid(99) }] }] } } };
+  for (const changed of [
+    { ...target, status: 'saved' }, { ...target, commit: [row(10)] }, { ...target, drafts: [] },
+    ...[{ amount: '7' }, { transaction_date: '2026-10-01' }, { description: '改过用途' }, { member_id: uuid(3) }, { category_id: uuid(2) }, { type: 'income' }].map(update => ({ ...target, drafts: [{ ...draft, ...update }] })),
+  ]) {
+    const messages = [changed, reply];
+    assert.equal(client.assistantDraftMatchTarget(messages, reply.id, draft.id), null);
+    assert.equal(client.resolveAssistantDraftMatch(messages, reply.id, draft.id, 'removed', members), messages);
+    assert.equal(client.resolveAssistantDraftMatch(messages, reply.id, draft.id, 'kept', members), messages);
+  }
+});
+
+test('not-remove keeps the review rows, toggles reversibly, persists exclusions and confirmation preserves excluded drafts', () => {
+  const drafts = [10, 11, 12].map(n => ({ ...row(n), amount: '6.97' }));
+  const target = { id: uuid(30), role: 'assistant', text: 'pending', status: 'pending', taskApplied: true, drafts };
+  const request = { id: uuid(40), role: 'assistant', text: 'remove', taskApplied: true,
+    removeChoice: { batch_id: target.id, draft_ids: drafts.map(d => d.id), snapshot: JSON.stringify(drafts) } };
+  const initial = [target, request];
+  const narrowed = client.toggleAssistantDraftRemoval(initial, request.id, drafts[1].id);
+  assert.equal(narrowed[0], target, 'excluding a draft must not edit it');
+  assert.deepEqual(plain(narrowed[1].removeChoice.draft_ids), drafts.map(d => d.id));
+  assert.deepEqual(plain(narrowed[1].removeChoice.excluded_ids), [drafts[1].id]);
+  assert.equal(narrowed[1].removeChoice.snapshot, request.removeChoice.snapshot);
+  assert.equal(narrowed[1].taskApplied, true);
+  const restoredChoice = client.toggleAssistantDraftRemoval(narrowed, request.id, drafts[1].id);
+  assert.deepEqual(plain(restoredChoice[1].removeChoice.excluded_ids), []);
+  assert.equal(restoredChoice[1].removeChoice.snapshot, request.removeChoice.snapshot);
+  const restored = plain(narrowed);
+  const approved = client.approveAssistantDraftRemoval(restored, request.id, members);
+  assert.deepEqual(approved.find(m => m.id === target.id).drafts.map(d => d.id), [drafts[1].id]);
+  assert.equal(approved.find(m => m.id === target.id).status, 'pending');
+  assert.match(approved.find(m => m.id === request.id).text, /已删除 2 笔/);
+  let cancelled = initial;
+  for (const draft of drafts) cancelled = client.toggleAssistantDraftRemoval(cancelled, request.id, draft.id);
+  assert.equal(cancelled[0], target);
+  assert.equal(cancelled[1].removeChoice.excluded_ids.length, 3);
+  assert.equal(cancelled[1].removeChoice.draft_ids.length, 3);
+  const keptAll = client.approveAssistantDraftRemoval(cancelled, request.id, members);
+  assert.equal(keptAll[0], target);
+  assert.equal(keptAll[1].removeChoice, undefined);
+  assert.match(keptAll[1].text, /已保留全部账目/);
+});
+
+test('not-remove never rebases edited drafts into approval and cannot narrow saved, locked or malformed scopes', () => {
+  const drafts = [10, 11].map(n => ({ ...row(n), amount: '6.97' }));
+  const target = { id: uuid(30), role: 'assistant', text: 'pending', status: 'pending', drafts };
+  const request = { id: uuid(40), role: 'assistant', text: 'remove', removeChoice: { batch_id: target.id, draft_ids: drafts.map(d => d.id), snapshot: JSON.stringify(drafts) } };
+  const edited = { ...target, drafts: [{ ...drafts[0], amount: '9.99' }, drafts[1]] };
+  const narrowed = client.toggleAssistantDraftRemoval([edited, request], request.id, drafts[1].id);
+  assert.equal(JSON.parse(narrowed[1].removeChoice.snapshot)[0].amount, '6.97', 'original reviewed value remains unchanged');
+  const rejected = client.approveAssistantDraftRemoval(narrowed, request.id, members);
+  assert.equal(rejected[0], edited);
+  assert.match(rejected[1].text, /已变化.*未删除/);
+  for (const messages of [[{ ...target, status: 'saved' }, request], [{ ...target, commit: [row()] }, request],
+    [target, { ...request, removeChoice: { ...request.removeChoice, snapshot: 'broken' } }],
+    [target, { ...request, removeChoice: { ...request.removeChoice, snapshot: JSON.stringify([drafts[0], drafts[0]]) } }]]) {
+    assert.equal(client.toggleAssistantDraftRemoval(messages, request.id, drafts[1].id), messages);
+  }
 });

@@ -245,7 +245,7 @@ test('sending an unrelated request preserves all waiting approvals and never sub
   const ref = current => ({ current });
   const exports = {};
   vm.runInNewContext(ts.transpileModule(`export ${send.getText(file)}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
-    exports, crypto: require('node:crypto'), input: '小美生日，我送她一双200元鞋子和500元礼金', images: [], messages: waiting,
+    exports, assistantCardTarget: load('lib/assistant-card-updates.ts').assistantCardTarget, crypto: require('node:crypto'), input: '小美生日，我送她一双200元鞋子和500元礼金', images: [], messages: waiting,
     actionPendingRef: ref(false), busy: false, outboxRef: ref(null), sendLock: ref(false), saveLock: ref(false),
     draft: { hasDraft: false, status: 'ready', persist: snapshot => { persisted.push(plain(snapshot)); return true; } }, configured: true,
     conversationId: uuid(4), conversationEpoch: ref(0), currentConversation: () => true,
@@ -297,6 +297,7 @@ test('member selection keeps question-answer-review order and the stable agent b
   assert.equal(selected.at(-1).drafts[0].id, draft.id);
   assert.equal(selected.at(-1).drafts[0].member_id, uuid(13));
   assert.equal(selected[1].taskId, undefined, 'the static question cannot replay the old task');
+  assert.equal(selected[1].draftCardLink, original.id, 'the old position links to the one current card');
   const restored = client.mergeAssistantTasks(plain(selected), [original], uuid(4), [{ id: uuid(13), name: '本人' }]);
   assert.deepEqual(plain(restored), plain(selected));
   assert.equal(client.completeAssistantMemberSelection(restored, original.id, { id: uuid(13), name: '本人' }, [{ id: uuid(13), name: '本人' }], answer.id, uuid(22)), restored, 'repeated acknowledgements cannot duplicate the card');

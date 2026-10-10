@@ -1,12 +1,45 @@
 import type { AssistantActionPreview } from "@/lib/assistant-action-preview";
-import type { AssistantCategory, AssistantMember, AssistantQuery } from "@/lib/assistant";
+import type { AssistantCategory, AssistantMember, AssistantQuery, AssistantDraftBatch } from "@/lib/assistant";
 import { fieldNames, resourceNames, type LedgerCommand, type LedgerResource } from "@/lib/assistant-commands";
+import { draftMatchReasonLabel } from "@/lib/assistant-draft-match-rules";
+import type { AssistantDraftMatches } from "@/lib/assistant-draft-matches";
 
-export type AssistantReplyView = AssistantActionPreview & { analysis?: boolean };
+export type AssistantDraftComparison = {
+  batch_id: string;
+  rows: { draft_id: string; snapshot: { description: string; type: string; amount_cents: number | null; transaction_date: string | null; member_id: string | null; category_id: string | null };
+    candidates: { id: string; description: string; date: string; amount: string; member: string; category: string; reason: string; dateDifference: number }[] }[];
+};
+export type AssistantReplyView = AssistantActionPreview & { analysis?: boolean; draftComparison?: AssistantDraftComparison };
 const money = (value: unknown) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? `${Number(value) < 0 ? "-" : ""}¥${Math.abs(Number(value)).toFixed(2)}` : "金额待核对";
 const day = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value || "").slice(0, 10);
 const names: Record<string, string> = { income: "收入", expense: "支出", lent: "借出", owed: "借入", money: "钱款", item: "物品", cash: "礼金", unpaid: "未还", partial: "部分归还", outstanding: "未结清", settled: "已结清", archived: "已归档", active: "未归档", pinned: "已置顶" };
 const display = (value: unknown): string => value == null || value === "" ? "未填写" : typeof value === "boolean" ? value ? "是" : "否" : names[String(value)] || String(value);
+
+/** The comparison card is built from server reads, never inferred from model prose. */
+export function draftMatchesReplyView(matches: Pick<AssistantDraftMatches, "rows" | "date_window_days"> & { batch_id?: string }, members: AssistantMember[] = [], categories: AssistantCategory[] = [], batch?: AssistantDraftBatch): AssistantReplyView {
+  const suspected = matches.rows.filter(row => row.candidates.some(candidate => candidate.same_description)).length;
+  const review = matches.rows.filter(row => row.status === "incomplete" || (row.status === "possible_match" && !row.candidates.some(candidate => candidate.same_description))).length;
+  return { draftComparison: matches.batch_id && batch ? { batch_id: matches.batch_id, rows: matches.rows.map(row => {
+      const draft = batch.drafts.find(d => d.id === row.draft_id)!;
+      return { draft_id: row.draft_id, snapshot: { description: draft.description, type: row.type, amount_cents: row.amount_cents, transaction_date: row.transaction_date, member_id: draft.member_id ?? null, category_id: draft.category_id ?? null },
+        candidates: row.candidates.map(c => ({ id: c.id, description: c.description || "未填写用途", date: c.transaction_date, amount: money(c.amount_cents / 100), member: members.find(m => m.id === c.member_id)?.name || "未选成员", category: categories.find(category => category.id === c.category_id)?.name || "未选分类", reason: draftMatchReasonLabel[c.match_reason] || "匹配依据不足，请重新核对", dateDifference: c.date_difference_days })) };
+    }) } : undefined, title: "重复入账核对", subtitle: `共核对 ${matches.rows.length} 笔草稿 · 同商户检查前后 ${matches.date_window_days} 天`,
+    metrics: [{ label: "疑似重复", value: `${suspected} 笔`, primary: true }, { label: "需人工核对", value: `${review} 笔` }], sections: [],
+    recordsTitle: "草稿与已入账记录对照", records: matches.rows.map(row => ({
+      title: row.description || "未填写用途", amount: row.amount_cents === null ? "金额缺失" : money(row.amount_cents / 100),
+      subtitle: `${row.transaction_date ?? "日期缺失"} · ${display(row.type)} · 待确认草稿`,
+      badge: { label: row.status === "incomplete" ? "信息不足" : row.status === "no_match" ? "未找到候选"
+        : row.candidates.some(candidate => candidate.same_description) ? "疑似重复" : row.candidates.some(candidate => candidate.match_reason === "purpose") ? "用途相关，待核对" : "缺少用途，待核对", tone: row.status === "possible_match" || row.status === "incomplete" ? "warning" : "neutral" },
+      rows: row.status === "incomplete" ? [{ label: "核对结果", value: "缺少金额或日期，尚未完成核对。" }]
+        : row.status === "no_match" ? [{ label: "核对结果", value: `前后 ${matches.date_window_days} 天未找到有商户或用途关联的记录；仅同金额的流水已排除。` }]
+        : [ ...row.candidates.map((candidate, i) => ({ label: row.candidates.length === 1 ? "账本记录" : `候选 ${i + 1}`, value: [
+          candidate.description || "未填写用途",
+          [candidate.transaction_date, money(candidate.amount_cents / 100), members.find(member => member.id === candidate.member_id)?.name, categories.find(category => category.id === candidate.category_id)?.name].filter(Boolean).join(" · "),
+          `${draftMatchReasonLabel[candidate.match_reason] || "商户名称一致 · 金额相同"}；${candidate.date_difference_days === 0 ? "日期相同" : `账本日期比草稿${candidate.date_difference_days < 0 ? "早" : "晚"} ${Math.abs(candidate.date_difference_days)} 天`}`,
+        ].join("\n") })), ...(row.candidates_limited ? [{ label: "更多候选", value: `共 ${row.candidate_count} 笔，当前列出前三笔。` }] : []) ],
+    })), notices: [{ text: "商户一致才提示疑似重复；用途相关或原账缺少用途仅提示核对。同商户可能多次消费，请核对日期后再移除草稿。", tone: "attention" },
+      { text: `同商户检查前后 ${matches.date_window_days} 天；用途相关或缺少用途仅检查前后 1 天。仅金额相同的记录已排除。`, tone: "info" }] };
+}
 
 /** Display only user-facing fields. IDs and internal metadata remain in record_context. */
 export function recordReplyView(resource: string, rows: Record<string, unknown>[], command?: LedgerCommand | null, members: AssistantMember[] = [], categories: AssistantCategory[] = []): AssistantReplyView {
@@ -60,13 +93,16 @@ export function draftReplyView(message: import("@/lib/assistant-task-client").As
   let selected = target?.drafts?.filter(draft => choice.draft_ids.includes(draft.id)) || [];
   if ("snapshot" in choice && typeof choice.snapshot === "string") { try { selected = JSON.parse(choice.snapshot); } catch { return; } }
   if (!Array.isArray(selected)) return;
+  const excluded = message.removeChoice?.excluded_ids || [];
+  if (!Array.isArray(excluded)) return;
+  const active = selected.filter(draft => !excluded.includes(draft.id));
   const totals = { income: 0, expense: 0 };
   let valid = true;
-  for (const draft of selected) {
+  for (const draft of active) {
     if (!/^\d+(?:\.\d{1,2})?$/.test(draft.amount) || !["income", "expense"].includes(draft.type)) { valid = false; continue; }
     totals[draft.type] += Math.round(Number(draft.amount) * 100);
   }
-  return { title: message.undoChoice ? `撤销 ${selected.length} 笔入账` : message.removeChoice ? `删除 ${selected.length} 笔待确认草稿` : `准备将以下 ${selected.length} 笔草稿入账`, subtitle: "请核对以下明细", metrics: valid ? [{ label: "涉及收入", value: money(totals.income / 100) }, { label: "涉及支出", value: money(totals.expense / 100), primary: true }] : [], sections: [],
-    records: selected.map(draft => ({ title: draft.description || "未填写用途", amount: money(draft.amount), subtitle: [draft.transaction_date, display(draft.type), members.find(member => member.id === draft.member_id)?.name || "未选成员", categories.find(category => category.id === draft.category_id)?.name || "未选分类"].join(" · ") })),
-    notices: [{ text: message.undoChoice ? "确认后撤销所选入账，并恢复为待确认草稿。" : message.removeChoice ? `尚未删除，也不会影响已入账记录。确认后本组剩余 ${(target?.drafts?.length || selected.length) - selected.length} 笔。` : "尚未入账，仅保存本次选中的草稿。", tone: message.removeChoice || message.undoChoice ? "attention" : "info" }] };
+  return { title: message.undoChoice ? `撤销 ${selected.length} 笔入账` : message.removeChoice ? active.length ? `删除 ${active.length} 笔待确认草稿` : "全部保留 · 未选择移除账目" : `准备将以下 ${selected.length} 笔草稿入账`, subtitle: "请核对以下明细", metrics: valid ? [{ label: "涉及收入", value: money(totals.income / 100) }, { label: "涉及支出", value: money(totals.expense / 100), primary: true }] : [], sections: [],
+    records: selected.map(draft => ({ ...(message.removeChoice ? { id: draft.id, excluded: excluded.includes(draft.id) } : {}), title: draft.description || "未填写用途", amount: money(draft.amount), subtitle: [draft.transaction_date, display(draft.type), members.find(member => member.id === draft.member_id)?.name || "未选成员", categories.find(category => category.id === draft.category_id)?.name || "未选分类"].join(" · ") })),
+    notices: [{ text: message.undoChoice ? "确认后撤销所选入账，并恢复为待确认草稿。" : message.removeChoice ? `尚未删除，也不会影响已入账记录。确认后本组剩余 ${(target?.drafts?.length || selected.length) - active.length} 笔。灰色划线的账目不移除，可点击“恢复”重新选择。` : "尚未入账，仅保存本次选中的草稿。", tone: message.removeChoice || message.undoChoice ? "attention" : "info" }] };
 }

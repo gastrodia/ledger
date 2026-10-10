@@ -343,7 +343,7 @@ test('screenshot caveats and zero omission stay visible while choosing a member 
       await h.flush();
     }
     assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
-    h.all(node => node.props?.['aria-label'] === '删除这笔草稿')[0].props.onClick(); h.render();
+    h.all(node => node.props?.['aria-label'] === '移除这笔草稿')[0].props.onClick(); h.render();
     assert.match(h.text, /已跳过零金额订单；截图年份需要核对/);
     assert.ok(h.all(node => node.type === 'Button').some(node => text(node) === '确认 1 笔'));
     h.restore(h.value);
@@ -444,10 +444,11 @@ test('draft date sort cycles stably, survives restore, and keeps group order aft
   assert.deepEqual(visibleDraftNames(h), ['交易12', '交易13', '交易10', '交易11', '交易14']);
   const container = h.find(node => node.type === 'div' && node.props['aria-label'] === '账目：交易12'
     && nodes(node).some(child => child.props?.id === `${uuid(12)}-date`));
-  nodes(container).find(node => node.props?.['aria-label'] === '删除这笔草稿').props.onClick(); h.render();
+  nodes(container).find(node => node.props?.['aria-label'] === '移除这笔草稿').props.onClick(); h.render();
   sortGroup(h); sortGroup(h);
-  assert.deepEqual(visibleDraftNames(h), ['交易10', '交易11', '交易13', '交易14']);
-  assert.deepEqual(h.value.messages[0].drafts.map(draft => draft.id), [uuid(10), uuid(11), uuid(13), uuid(14)]);
+  assert.deepEqual(visibleDraftNames(h), ['交易10', '交易11', '交易12', '交易13', '交易14']);
+  assert.deepEqual(h.value.messages[0].drafts.map(draft => draft.id), [uuid(10), uuid(11), uuid(12), uuid(13), uuid(14)]);
+  assert.equal(h.value.messages[0].drafts.find(d => d.id === uuid(12)).softRemoved, true);
   assert.equal(h.value.messages[0].drafts[1].transaction_date, '2026-10-09');
   assert.equal(h.calls.filter(call => call.body).length, 0);
   const restored = h.restore({ messages: [draftGroup(90, drafts, { draftSort: 'corrupt' }), draftGroup(91, [drafts[0], drafts[1]])], input: '' });
@@ -1074,7 +1075,7 @@ test('an unacknowledged submission locks existing draft edits but keeps its exac
   h.click('发送'); await h.flush();
   assert.equal(h.value.messages.at(-1).taskStatus, 'missing');
   assert.equal(h.find(node => node.props?.id === `${uuid(401)}-amount`).props.disabled, true);
-  assert.equal(h.control('删除这笔草稿').props.disabled, true);
+  assert.equal(h.control('移除这笔草稿').props.disabled, true);
   assert.equal(h.find(node => node.type === 'Button' && text(node) === '确认 1 笔').props.disabled, true);
   clickTextButton(h, '重试发送'); await h.flush();
   assert.equal(h.calls.filter(call => call.options.method === 'POST').length, 2);
@@ -1183,7 +1184,7 @@ test('conversational approval executes a saved-data preview only after an explic
     assert.equal(requests.length, 1);
     assert.equal(requests[0].body.decision, decision === '取消' ? 'cancel' : 'approve');
     assert.equal(h.value.messages.some(m => m.approval), false);
-    assert.equal(h.value.messages.at(-1).localHandled, true);
+    assert.equal(h.value.messages.filter(m => m.role === "user").at(-1).localHandled, true);
     const restored = h.restore(h.value);
     assert.equal(restored.messages.at(-1).incomplete, undefined, 'approved and cancelled replies do not become unsent messages after refresh');
   }
@@ -1263,15 +1264,15 @@ test('saved correction syncs only the original saved card after approval and pre
     h.restore({ messages: [draftGroup(968, [original], { status: 'saved', savedDrafts: [original] }), draftGroup(969, [other], { status: 'saved' }),
       { id: uuid(970), role: 'assistant', text: approval.summary, approval }], input: '' });
     clickTextButton(h, '确认修改'); await h.flush();
-    assert.equal(h.value.messages[0].drafts[0].amount, '20.00');
+    assert.equal(h.value.messages.find(m=>m.id===uuid(968)).drafts[0].amount, '20.00');
     wait.resolve(response({ id: approval.id, status: 'succeeded', text: '已修改', transaction_updates: [{ batch_id: uuid(968), draft_id: original.id, transaction_id: uuid(971),
       type: 'expense', amount_cents: 2200, category_id: category.id, member_id: member.id, transaction_date: '2026-10-09', description: original.description }] }));
     await h.flush();
-    assert.equal(h.value.messages[0].drafts[0].amount, '22.00');
-    assert.equal(h.value.messages[0].savedDrafts[0].amount_cents, 2000);
-    assert.equal(h.value.messages[1].drafts[0].amount, other.amount);
+    assert.equal(h.value.messages.find(m=>m.id===uuid(968)).drafts[0].amount, '22.00');
+    assert.equal(h.value.messages.find(m=>m.id===uuid(968)).savedDrafts[0].amount_cents, 2000);
+    assert.equal(h.value.messages.find(m=>m.id===uuid(969)).drafts[0].amount, other.amount);
     h.restore(h.value);
-    assert.equal(h.value.messages[0].drafts[0].amount, '22.00');
+    assert.equal(h.value.messages.find(m=>m.id===uuid(968)).drafts[0].amount, '22.00');
     assert.equal(h.calls.filter(call => call.body).length, 1);
   } finally { h.unmount(); }
 });
@@ -1326,75 +1327,64 @@ test('ordinary acknowledgement after a summary or completed operation stays chat
   }
 });
 
-test('conversational draft removal requires explicit approval; cancellation and unrelated queries never delete', async () => {
-  for (const decision of ['确认删除', 'button', '取消', '查本月支出']) {
-    const drafts = [datedDraft(101, '2026-10-09', null), datedDraft(102, '2026-10-08', member.id)];
-    const batch = draftGroup(60, drafts);
-    const h = await ready({ post: async (_url, body) => response(body.message === '查本月支出' ? chat('查询结果')
-      : { action: 'remove', reply: '正在处理', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
-    try {
-      h.restore({ messages: [batch], input: '', images: [] });
-      writeComposer(h, '删除第一笔'); h.click('发送'); await h.flush();
-      assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts, drafts);
-      assert.ok(h.text.includes('删除 1 笔待确认草稿'));
-      assert.ok(h.text.includes('尚未删除'));
-      assert.ok(h.value.messages.some(m => m.removeChoice));
-      if (decision === 'button') clickTextButton(h, '确认执行');
-      else { writeComposer(h, decision); h.click('发送'); }
-      await h.flush();
-      const approved = decision === '确认删除' || decision === 'button';
-      assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts, approved ? [drafts[1]] : drafts);
-      assert.equal(h.value.messages.some(m => m.removeChoice), decision === '查本月支出');
-      assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm' || c.url.startsWith('/api/assistant/actions/')).length, 0);
-      if (approved) assert.ok(h.text.includes('已删除 1 笔待确认草稿'));
-      writeComposer(h, '确认删除'); h.click('发送'); await h.flush();
-      if (decision === '查本月支出') assert.ok(h.text.includes('已删除 1 笔待确认草稿'));
-      else assert.ok(h.text.includes('当前没有待批准的操作'));
-      assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts, approved || decision === '查本月支出' ? [drafts[1]] : drafts);
-    } finally { h.unmount(); }
-  }
-});
-
-test('editing a reviewed draft invalidates the whole deletion when approval is submitted', async () => {
-  const drafts = [datedDraft(101, '2026-10-09'), datedDraft(102, '2026-10-08')];
+test('conversational removal soft-marks the original card without another approval and can be restored', async () => {
+  const drafts = [datedDraft(101, '2026-10-09', null), datedDraft(102, '2026-10-08', member.id)];
   const batch = draftGroup(60, drafts);
-  const h = await ready({ post: async () => response({ action: 'remove', reply: '', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: drafts.map(d => d.id) } }) });
+  const h = await ready({ post: async () => response({ action: 'remove', reply: '正在处理', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
   try {
     h.restore({ messages: [batch], input: '', images: [] });
-    writeComposer(h, '这组全部删除'); h.click('发送'); await h.flush();
-    const changed = h.value;
-    changed.messages.find(m => m.id === batch.id).drafts[0].amount = '99.00';
-    h.restore(changed);
-    writeComposer(h, '确认删除'); h.click('发送'); await h.flush();
-    assert.equal(h.value.messages.find(m => m.id === batch.id).drafts.length, 2);
-    assert.ok(h.text.includes('草稿在确认期间已变化，本次未删除'));
+    writeComposer(h, '删除第一笔'); h.click('发送'); await h.flush();
+    const original = h.value.messages.find(m => m.id === batch.id);
+    assert.equal(original.drafts.length, 2);
+    assert.equal(original.drafts[0].softRemoved, true);
+    assert.equal(original.status, 'pending');
     assert.equal(h.value.messages.some(m => m.removeChoice), false);
+    assert.match(h.text, /已将 1 笔草稿标记为移除/);
+    h.click('恢复这笔草稿'); await h.flush();
+    assert.equal(h.value.messages.find(m => m.id === batch.id).drafts[0].softRemoved, false);
+    assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm' || c.url.startsWith('/api/assistant/actions/')).length, 0);
   } finally { h.unmount(); }
 });
 
-test('draft deletion preview survives refresh without execution and an approved deletion never replays', async () => {
-  const storage = memoryStorage(), taskStore = new Map();
-  const drafts = [datedDraft(101, '2026-10-09')];
+test('all-soft-removed cards survive refresh and still offer restore, while confirmation stays disabled', async () => {
+  const drafts = [datedDraft(101, '2026-10-09'), datedDraft(102, '2026-10-08')];
   const batch = draftGroup(60, drafts);
-  const options = { realDraft: true, storage, taskStore, post: async () => response({ action: 'remove', reply: '', drafts: [], query: null, remove: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) };
-  const first = await ready(options);
-  first.restore({ messages: [batch], input: '', images: [] }); await settleDraft(first);
-  writeComposer(first, '删除这组'); first.click('发送'); await settleDraft(first);
-  assert.ok(first.value.messages.some(m => m.removeChoice));
-  first.unmount();
-  const restored = await ready(options);
-  assert.equal(restored.value.messages.find(m => m.id === batch.id).drafts.length, 1);
-  assert.ok(restored.value.messages.some(m => m.removeChoice));
-  assert.equal(restored.calls.filter(c => c.options.method === 'POST').length, 0);
-  writeComposer(restored, '确认删除'); restored.click('发送'); await settleDraft(restored);
-  assert.equal(restored.value.messages.find(m => m.id === batch.id).status, 'deleted');
-  assert.equal(restored.value.messages.some(m => m.removeChoice), false);
-  restored.unmount();
-  const final = await ready(options);
-  assert.equal(final.value.messages.find(m => m.id === batch.id).drafts.length, 0);
-  assert.equal(final.value.messages.some(m => m.removeChoice), false);
-  assert.equal(final.calls.filter(c => c.options.method === 'POST').length, 0);
-  final.unmount();
+  const h = await ready();
+  try {
+    h.restore({ messages: [batch], input: '' });
+    clickTextButton(h, '移除本组'); await h.flush();
+    h.restore(h.value); await h.flush();
+    const target = h.value.messages.find(m => m.id === batch.id);
+    assert.equal(target.status, 'pending');
+    assert.equal(target.drafts.length, 2);
+    assert.ok(target.drafts.every(d => d.softRemoved));
+    assert.equal(h.all(n => n.props?.['aria-label'] === '恢复这笔草稿').length, 2);
+    assert.ok(h.all(n => n.type === 'Button' && text(n) === '确认 0 笔')[0].props.disabled);
+    clickTextButton(h, '恢复本组'); await h.flush();
+    assert.ok(h.value.messages.find(m => m.id === batch.id).drafts.every(d => !d.softRemoved));
+  } finally { h.unmount(); }
+});
+
+test('only active drafts are posted, soft removal survives replay, and the saved card only shows posted rows', async () => {
+  const drafts = [datedDraft(101, '2026-10-09'), datedDraft(102, '2026-10-08')];
+  const batch = draftGroup(60, drafts);
+  const h = await ready({ post: async (url, body) => {
+    if (url === '/api/assistant/tasks') return response({ action:'remove',reply:'',drafts:[],query:null,remove:{batch_id:batch.id,draft_ids:[drafts[0].id]} });
+    assert.equal(url, '/api/assistant/confirm');
+    assert.deepEqual(body.drafts.map(d => d.id), [drafts[1].id]);
+    return response({count:1});
+  } });
+  try {
+    h.restore({messages:[batch],input:''});writeComposer(h,'移除第一笔');h.click('发送');await h.flush();
+    const before = h.value;h.restore(before);await h.poll();
+    assert.equal(h.value.messages.find(m=>m.id===batch.id).drafts[0].softRemoved,true);
+    clickTextButton(h,'确认 1 笔');await h.flush();
+    const saved = h.value.messages.find(m=>m.id===batch.id);
+    assert.equal(saved.status,'saved');
+    assert.deepEqual(saved.drafts.map(d=>d.id),[drafts[1].id]);
+    h.restore(h.value);await h.poll();
+    assert.deepEqual(h.value.messages.find(m=>m.id===batch.id).drafts.map(d=>d.id),[drafts[1].id]);
+  } finally {h.unmount();}
 });
 
 test('restored event member choices reuse the draft member card, actual payment and avatars, preserving mixed gift context', async () => {
@@ -1704,7 +1694,8 @@ test('member selection places the review after the answer while retaining the ex
     const selected = h.value;
     assert.deepEqual(selected.messages.map(m => m.role), ['assistant', 'user', 'assistant']);
     assert.equal(selected.messages[0].drafts, undefined);
-    assert.match(selected.messages[0].text, /支出人是谁/);
+    assert.equal(selected.messages[0].draftCardLink, id);
+    assert.match(h.text, /已更新查看最新卡片/);
     assert.match(selected.messages[1].text, /支出人是「本人」/);
     assert.equal(selected.messages[2].id, id);
     assert.equal(selected.messages[2].drafts[0].id, draft.id);
@@ -1716,4 +1707,123 @@ test('member selection places the review after the answer while retaining the ex
     assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 1);
     h.unmount();
   }
+});
+
+test('member preview check shortcut targets its own group, needs no member, preserves the composer and cannot post twice', async () => {
+  const pending = deferred();
+  const h = await ready({ post: async (url, body) => {
+    assert.equal(url, '/api/assistant/tasks');
+    assert.equal(body.draft_batch.batch_id, uuid(980), 'an older preview must not check the latest group instead');
+    assert.deepEqual(body.draft_batch.drafts.map(d => d.id), [uuid(981), uuid(982)]);
+    assert.ok(body.draft_batch.drafts.every(d => d.member_id === null));
+    assert.equal(body.images, undefined);
+    assert.match(body.message, /是否存在重复记录.*只查询/);
+    return pending.promise;
+  } });
+  try {
+    const composerImages = [image('下次再识别')];
+    h.restore({ messages: [draftGroup(980, [datedDraft(981, '2026-10-09', null), datedDraft(982, '2026-10-08', null)], { memberFlow: true }),
+      draftGroup(983, [datedDraft(984, '2026-10-10', null)], { memberFlow: true })], input: '还没写完的说明', images: composerImages });
+    const shortcut = h.all(node => node.type === 'Button' && text(node) === '核对是否存在重复记录')[0];
+    assert.ok(shortcut); assert.equal(!!shortcut.props.disabled, false);
+    shortcut.props.onClick(); shortcut.props.onClick(); await h.flush();
+    assert.equal(h.calls.filter(c => c.url === '/api/assistant/tasks' && c.options.method === 'POST').length, 1);
+    assert.equal(h.value.input, '还没写完的说明');
+    assert.deepEqual(h.value.images, composerImages);
+    pending.resolve(response({ action: 'chat', reply: '已核对，没有修改草稿或账本。', drafts: [], query: null })); await h.flush();
+    assert.equal(h.value.messages.find(m => m.id === uuid(980)).drafts.length, 2);
+    assert.equal(h.value.messages.find(m => m.id === uuid(983)).drafts.length, 1);
+    assert.equal(h.calls.filter(c => ['/api/assistant/confirm', '/api/assistant/actions'].includes(c.url)).length, 0);
+  } finally { h.unmount(); }
+});
+
+test('legacy removal previews migrate to reversible main-card selections without changing the reviewed scope', async () => {
+  const h = await ready();
+  try {
+    const drafts = ['0.44','0.21','0.02'].map((amount,i)=>({...datedDraft(991+i,'2026-10-04'),type:'income',amount,description:`红包${i}`}));
+    const target=draftGroup(990,drafts);
+    h.restore({messages:[target,{id:uuid(998),role:'assistant',text:'旧预览',taskApplied:true,
+      removeChoice:{batch_id:target.id,draft_ids:drafts.map(d=>d.id),excluded_ids:[drafts[0].id],snapshot:JSON.stringify(drafts)}}],input:''});
+    const canonical=()=>h.value.messages.find(m=>m.id===target.id);
+    assert.deepEqual(canonical().drafts.map(d=>!!d.softRemoved),[false,true,true]);
+    assert.equal(h.value.messages.some(m=>m.removeChoice),false);
+    assert.match(h.text,/确认 1 笔/);assert.match(h.text,/¥0.44/);
+    assert.equal(h.all(n=>n.props?.['aria-label']==='恢复这笔草稿').length,2);
+    h.restore(h.value);await h.flush();
+    assert.deepEqual(canonical().drafts.map(d=>!!d.softRemoved),[false,true,true]);
+    h.all(n=>n.props?.['aria-label']==='恢复这笔草稿')[0].props.onClick();h.render();
+    assert.match(h.text,/确认 2 笔/);
+    assert.equal(canonical().drafts.length,3);
+    assert.equal(h.calls.filter(c=>c.options?.method==='POST').length,0);
+  } finally {h.unmount();}
+});
+
+test('member selection only fills active rows; restoring an unassigned excluded row requires its own member selection', async () => {
+  const drafts=[datedDraft(1101,'2026-10-09',null),datedDraft(1102,'2026-10-08',null)];
+  const h=await ready({post:async(url,body)=>{
+    assert.equal(url,'/api/assistant');assert.equal(body.operation,'select_member');
+    return response({draft_id:body.draft_id,member});
+  }});
+  try {
+    h.restore({messages:[draftGroup(1100,drafts,{memberFlow:true})],input:''});
+    h.all(n=>n.props?.['aria-label']==='移除这笔草稿')[0].props.onClick();h.render();
+    nodes(h.control('选择记账成员')).find(n=>n.type==='Button'&&text(n)===member.name).props.onClick();await h.flush();
+    const target=()=>h.value.messages.find(m=>m.id===uuid(1100));
+    assert.equal(target().drafts[0].softRemoved,true);assert.equal(target().drafts[0].member_id,null);
+    assert.equal(target().drafts[1].member_id,member.id);
+    h.click('恢复这笔草稿');await h.flush();
+    assert.equal(target().drafts[0].softRemoved,false);assert.equal(target().drafts[0].member_id,null);
+    assert.ok(h.control('选择记账成员'));
+    assert.equal(h.calls.filter(c=>c.url==='/api/assistant/confirm').length,0);
+  } finally {h.unmount();}
+});
+
+test('correcting a pending gift replaces the old card, revokes only that approval and blocks stale clicks and replay', async () => {
+  const {validateLedgerEvent}=require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+  const gift=amount=>validateLedgerEvent({operation:'create',kind:'gift_given',counterparty:'小李',amount_cents:amount,date:'2026-10-10',member_id:member.id});
+  const preview=amount=>({title:'记录送礼 · 小李',metrics:[{label:'实际支出',value:`¥${(amount/100).toFixed(2)}`}],sections:[],notices:[]});
+  const firstApproval={id:uuid(1201),summary:'准备记录200',count:1,expires_at:null,preview:preview(20000)};
+  const secondApproval={id:uuid(1202),summary:'准备记录300',count:1,expires_at:null,preview:preview(30000)};
+  const cancel=deferred();
+  const h=await ready({post:async(url,body)=>{
+    if(url==='/api/assistant/tasks')return response({action:'event',reply:'准备更正',drafts:[],query:null,event_context:{status:'pending',event_id:null,input:gift(30000)},approval:secondApproval});
+    assert.equal(url,`/api/assistant/actions/${firstApproval.id}`);assert.equal(body.decision,'cancel');return cancel.promise;
+  }});
+  try {
+    h.restore({messages:[{id:uuid(1200),role:'assistant',text:firstApproval.summary,approval:firstApproval,eventContext:{status:'pending',event_id:null,input:gift(20000)}}],input:''});
+    const stale=h.find(n=>n.type?.name==='AssistantActionControls');
+    writeComposer(h,'记错了 是300');h.click('发送');await h.flush();
+    assert.equal(h.value.messages[0].cardUpdatedLink,h.value.messages.at(-1).id);
+    assert.match(h.text,/已更新查看最新卡片/);assert.match(h.text,/¥300.00/);assert.doesNotMatch(h.text,/¥200.00/);
+    const approve=h.all(n=>n.type==='Button'&&text(n)==='确认执行')[0];assert.ok(approve.props.disabled,'wait for old approval revocation');
+    stale.props.onDecide('approve');await h.flush();
+    assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,1);
+    cancel.resolve(response({id:firstApproval.id,status:'cancelled',text:'已取消旧方案'}));await h.flush();
+    assert.equal(h.all(n=>n.type==='Button'&&text(n)==='确认执行')[0].props.disabled,false);
+    const saved=h.value;h.restore(saved);await h.poll();
+    assert.equal(h.value.messages[0].cardUpdatedLink,h.value.messages.at(-1).id);
+    assert.equal(h.value.messages.filter(m=>m.approval).length,1);
+    assert.equal(h.calls.filter(c=>c.body?.decision==='approve').length,0);
+  } finally {h.unmount();}
+});
+
+test('an already-submitted old proposal blocks and cancels the replacement instead of exposing a second approval', async () => {
+  const {validateLedgerEvent}=require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+  const input=amount=>validateLedgerEvent({operation:'create',kind:'gift_given',counterparty:'小李',amount_cents:amount,date:'2026-10-10',member_id:member.id});
+  const preview={title:'送礼更正',metrics:[],sections:[],notices:[]};
+  const old={id:uuid(1301),summary:'old',count:1,expires_at:null,preview},fresh={...old,id:uuid(1302),summary:'new'};
+  const h=await ready({post:async(url,body)=>{
+    if(url==='/api/assistant/tasks')return response({action:'event',reply:'更正',drafts:[],query:null,approval:fresh,event_context:{status:'pending',event_id:null,input:input(30000)}});
+    assert.equal(body.decision,'cancel');
+    return response(url.endsWith(old.id)?{id:old.id,status:'succeeded',completed:1,text:'原方案已提交',event_context:{status:'saved',event_id:uuid(1399),input:input(20000)}}:{id:fresh.id,status:'cancelled',text:'新方案已取消'});
+  }});
+  try {
+    h.restore({messages:[{id:uuid(1300),role:'assistant',text:'old',approval:old,eventContext:{status:'pending',event_id:null,input:input(20000)}}],input:''});
+    writeComposer(h,'记错了 是300');h.click('发送');await h.flush();await h.flush();await h.flush();
+    const latest=h.value.messages.find(m=>m.id!==uuid(1300)&&m.role==='assistant'&&!m.cardUpdatedLink);
+    assert.equal(latest.approval,undefined);assert.equal(latest.replacementBlocked,true);
+    assert.match(h.text,/原方案已提交执行/);
+    assert.deepEqual(h.calls.filter(c=>c.body?.decision==='cancel').map(c=>c.url.split('/').at(-1)),[old.id,fresh.id]);
+    assert.equal(h.calls.filter(c=>c.body?.decision==='approve').length,0);
+  } finally {h.unmount();}
 });

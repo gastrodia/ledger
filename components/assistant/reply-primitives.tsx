@@ -59,21 +59,27 @@ export function AssistantReplyNotice({ children, tone = "info" }: { children: Re
   </div>;
 }
 
-export function AssistantReplyFields({ rows }: { rows: AssistantActionPreview["sections"][number]["rows"] }) {
-  return <dl className="space-y-2">{rows.map((row, index) => <div key={index} className="grid grid-cols-[minmax(0,100px)_minmax(0,1fr)] gap-3 text-[13px] leading-5"><dt className="text-muted-foreground wrap-anywhere">{row.label}</dt><dd className="min-w-0 text-foreground wrap-anywhere whitespace-pre-wrap">{row.value.length > 180 ? <details><summary className="cursor-pointer">{row.value.slice(0, 100)}… <span className="text-primary">展开全文</span></summary><p className="mt-2">{row.value}</p></details> : row.value}</dd></div>)}</dl>;
+export function AssistantReplyFields({ rows, stackOnMobile = false }: { rows: AssistantActionPreview["sections"][number]["rows"]; stackOnMobile?: boolean }) {
+  return <dl className="space-y-2">{rows.map((row, index) => <div key={index} className={cn("grid text-[13px] leading-5", stackOnMobile ? "grid-cols-1 gap-1 sm:grid-cols-[minmax(0,100px)_minmax(0,1fr)] sm:gap-3" : "grid-cols-[minmax(0,100px)_minmax(0,1fr)] gap-3")}><dt className="text-muted-foreground wrap-anywhere">{row.label}</dt><dd className="min-w-0 text-foreground wrap-anywhere whitespace-pre-wrap">{row.value.length > 180 ? <details><summary className="cursor-pointer">{row.value.slice(0, 100)}… <span className="text-primary">展开全文</span></summary><p className="mt-2">{row.value}</p></details> : row.value}</dd></div>)}</dl>;
 }
 
-export function AssistantReplyRecords({ records }: { records: NonNullable<AssistantActionPreview["records"]> }) {
-  const render = (items: typeof records, start: number) => <ol start={start + 1} className="divide-y divide-border">{items.map((record, index) => <li key={index} className="py-3 first:pt-0 last:pb-0">
-    <div className="flex items-start gap-3"><span className="mt-0.5 text-xs tabular-nums text-muted-foreground">{start + index + 1}.</span><div className="min-w-0 flex-1"><p className="text-[13px] font-medium text-foreground wrap-anywhere">{record.title}</p>{record.subtitle && <p className="mt-1 text-xs leading-5 text-muted-foreground wrap-anywhere">{record.subtitle}</p>}</div>{record.amount && <strong className="max-w-[45%] text-right text-[13px] tabular-nums wrap-anywhere">{record.amount}</strong>}</div>
-    {!!record.rows?.length && <div className="mt-2 pl-5"><AssistantReplyFields rows={record.rows} /></div>}
+export type AssistantRecordAction = (record: NonNullable<AssistantActionPreview["records"]>[number]) => ReactNode;
+export function AssistantReplyRecords({ records, renderRecordAction }: { records: NonNullable<AssistantActionPreview["records"]>; renderRecordAction?: AssistantRecordAction }) {
+  const render = (items: typeof records, start: number) => <ol start={start + 1} className="divide-y divide-border">{items.map((record, index) => <li key={record.id || index} className="py-3 first:pt-0 last:pb-0">
+    <div className="flex items-start gap-3"><span className={cn("mt-0.5 text-xs tabular-nums text-muted-foreground", record.excluded && "line-through")}>{start + index + 1}.</span><div className="min-w-0 flex-1">
+      <div className="flex items-start justify-between gap-2"><p className={cn("min-w-0 flex-1 text-[13px] font-medium wrap-anywhere", record.excluded ? "text-muted-foreground line-through" : "text-foreground")}>{record.title}</p>
+        <div className="flex max-w-[55%] shrink-0 items-center gap-2">{record.amount && <strong className={cn("min-w-0 text-right text-[13px] tabular-nums wrap-anywhere", record.excluded && "text-muted-foreground line-through")}>{record.amount}</strong>}{renderRecordAction && renderRecordAction(record)}</div>
+      </div>
+      {record.subtitle && <p className={cn("mt-1 text-xs leading-5 text-muted-foreground wrap-anywhere", record.excluded && "line-through")}>{record.subtitle}</p>}{record.badge && <div className="mt-2"><AssistantReplyBadge tone={record.badge.tone}>{record.badge.label}</AssistantReplyBadge></div>}
+    </div></div>
+    {!!record.rows?.length && <div className="mt-2 pl-5"><AssistantReplyFields rows={record.rows} stackOnMobile={!!record.badge} /></div>}
   </li>)}</ol>;
   return <div aria-label="记录明细">{render(records.slice(0, 5), 0)}{records.length > 5 && <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs text-primary">展开其余 {records.length - 5} 条</summary><div className="mt-3">{render(records.slice(5), 5)}</div></details>}</div>;
 }
 
-export function AssistantReplyBody({ preview, children }: { preview: AssistantActionPreview; children?: ReactNode }) {
+export function AssistantReplyBody({ preview, children, renderRecordAction }: { preview: AssistantActionPreview; children?: ReactNode; renderRecordAction?: AssistantRecordAction }) {
   return <><AssistantReplyMetrics metrics={preview.metrics} /><div className="space-y-4 p-4">
-    {!!preview.records?.length && <section>{preview.recordsTitle && <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{preview.recordsTitle}</h4>}<AssistantReplyRecords records={preview.records} /></section>}
+    {!!preview.records?.length && <section>{preview.recordsTitle && <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{preview.recordsTitle}</h4>}<AssistantReplyRecords records={preview.records} renderRecordAction={renderRecordAction} /></section>}
     {preview.sections.map((section, index) => <section key={index} className="min-w-0"><h4 className="mb-2 text-xs font-semibold text-muted-foreground">{section.title}</h4><AssistantReplyFields rows={section.rows} /></section>)}
     {!!preview.notices.length && <div className="space-y-2">{preview.notices.map((notice, index) => <AssistantReplyNotice key={index} tone={notice.tone}>{notice.text}</AssistantReplyNotice>)}</div>}{children}
   </div></>;

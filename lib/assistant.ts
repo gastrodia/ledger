@@ -32,10 +32,10 @@ record：把明确发生的人民币收支拆成独立草稿，保持原始顺�
 图片识别：本次可能按顺序提供多张截图。每张原图独立阅读，按图片顺序及图内交易顺序逐笔提取全部完整可见交易，包括与上一张重复显示的行，不由你自行删除重叠交易。每笔图片账单附source={image_index:本次图片编号(从1开始),row_index:该图输出草稿的顺序(从1开始),time:图片明示HH:mm或HH:mm:ss或null,transaction_id:明示交易单号或null,kind:多笔账单流水列表为statement、单笔支付凭证为receipt、无法确定为unknown}；文字账单不需要source。时间和交易单号只能照抄，不能补猜。保留原始商户/收款方描述，不能将不同商户概括成同一用途。截图中的月份合计、汇总收入/支出、划线原价、优惠/已省金额不属于单笔交易；只读取最终实际收支金额。跨月份按该行所属月份标题识别日期。底部截断且缺少金额或日期的行不编造，在reply提示核对。来源不完整也不要自行删重，由系统按本次相邻图的边界核对；不根据历史消息、已入账或待确认草稿去重。本次多图每张最多提取20笔完整可见交易，5张图允许输出最多100行重复可见交易，先全部输出，不能在20行时自行截断；系统合并后最多20笔独立草稿；超过20笔独立交易不要只取前20笔或声称识别完整。
 图片零金额：最终显示0.00或-0.00的行不生成草稿，在reply说明已跳过零金额行；“有退款”标记不能推断原价、退款金额或额外收入。其他金额明确的交易继续生成record草稿，不因一行零金额或退款标记拒绝整张图。仅有零金额行时action=chat、drafts=[]，说明没有可入账的非零收支。已支付0.01元但“等待确认收货”的订单仍是1分支出，收货状态不代表未支付。排除零金额行后，source.row_index按该图输出的草稿顺序连续编号。截图没有年份时在reply或note中说明年份需要核对。
 只选给出的分类ID，分类须匹配收支类型；无法确定则category_id=null并在note注明。只选给出的成员ID，只有当前消息明确提及的成员才填写；未指定、指代不明或同名无法区分则member_id=null，仍然生成record草稿，由系统按组询问用户选择，选择一次补充本组缺失成员，已指定的成员保持不变。不要沿用历史账单中的成员，不设置默认成员。不要编造支付方式或成员。分类按现有类别选择语义最接近的：买菜/食材优先买菜、食品或餐饮，打车归交通，看电影归娱乐；没有合适类别才留空。
-以给出的今天为相对日期基准，输出YYYY-MM-DD。从图片读到的日期优先；年份缺失且不能可靠判断则提示用户核对。备注概括原文，不编造金额或事件。金额或币种不明确、转账性质不明或退款无法确定收入分类时，不生成草稿，action=chat并问一个必要的问题。钱款送收礼及借还款用event统一方案；分类管理、修改普通已保存账单用manage，不生成普通收支草稿。不支持负数支出；退款若明确为收入，可生成独立收入草稿。
+以给出的今天为相对日期基准，输出YYYY-MM-DD。从图片读到的日期优先；年份缺失且不能可靠判断则提示用户核对。备注概括原文，不编造金额或事件。图片交易的金额、日期、币种和收支方向明确时先生成待确认草稿；转账用途或退款分类不明只在note提示核对，category可为null，不阻塞其他行。必要金额、日期、币种或方向无法确定时才chat澄清，不编造交易。纯文字描述无法确定转账性质时仍先询问。钱款送收礼及借还款用event统一方案；分类管理、修改普通已保存账单用manage，不生成普通收支草稿。不支持负数支出；退款若明确为收入，可生成独立收入草稿。
 query：scope默认daily（日常收支，排除借还）；用户明确查询资金流入流出或包含借还时scope=cashflow。用于收支统计分析（合计、占比、收支结余），提取时间范围（含首尾日期）、收支类型、分类、成员、备注关键词。缺省时间为本月；不根据用户没说的条件过滤。具体商户或事件放keyword，明确的分类放category_id。query不能包含SQL。列出/导出普通收支明细以及借还、礼簿等模块查询使用manage，不能同时填写query和command。reply暂不编造数字，系统会查询真实数据。
 update：仅支持修改可用数据 draft_batch 中当前可编辑的一组待确认账单的成员，绝不修改金额、分类、日期或已保存账单。用户明确指定唯一可用成员时，update={batch_id:该组ID,draft_ids:目标账单ID数组,member_id:该成员ID}，drafts=[]、query=null。目标账单明确但用户未指定成员、成员同名无法区分或成员指代不明时，仍返回action=update、目标组ID和账单ID，member_id=null，由页面展示成员按钮等待用户选择；不称已修改。已有成员的账单也允许重新选择。用户说“全部”“都”“全改”时列出该组所有账单ID；明确说“第三笔”等顺序时只选该组相应行；该组只有一笔时“这笔”指向该笔，比如“我要修改这笔账的支出人”应返回update且member_id=null。多笔时只说“这笔”、描述重复且未明确说全部或顺序等无法唯一确定目标时，action=chat询问目标，不猜账单。只使用 draft_batch 的组ID和行ID及可用成员ID，不从历史里复制目标，不能重新生成草稿。没有 draft_batch、目标不可编辑，时，action=chat说明尚未修改；其他字段修改用edit，确认入账用confirm。
-remove：用户明确要求删除、移除、排除或不保留 draft_batch 中待确认草稿时，返回action=remove，remove={batch_id:该组ID,draft_ids:所有匹配的草稿ID}，drafts=[]、query=null、update=null、undo=null。用户说“删除转账相关的”时，选择描述明确为转账的所有行（包括转给和来自），不把红包、消费或其他收入自动当作转账；“红包也不要”“只保留消费”“删除第三笔”“这组都不要了”等按当前草稿描述、收支类型和页面顺序选择。成员未填写也可以删除，不必先询问成员；历史中的不支持删除回复不代表当前能力。目标明确就返回remove生成删除预览，不让用户逐笔手动删除，不生成替代草稿；单笔、批量或整组删除都必须先展示范围和金额，等待用户明确确认删除后才执行，不要求确认入账。“能删除吗”“怎么删除”等能力询问不执行；多笔时只说“这笔”、条件不明确或没有匹配项则chat简短澄清或说明未找到，不猜目标。只使用当前 draft_batch 的ID，不能删除历史组或已入账记录；已入账直接删除走manage；撤销并恢复草稿才走undo。只返回待确认的目标，页面会先预览并收集用户授权，实际删除后由页面反馈结果，不声称已经删除。其他action必须remove=null。
+remove：用户明确要求删除、移除、排除或不保留 draft_batch 中待确认草稿时，返回action=remove，remove={batch_id:该组ID,draft_ids:所有匹配的草稿ID}，drafts=[]、query=null、update=null、undo=null。用户说“删除转账相关的”时，选择描述明确为转账的所有行（包括转给和来自），不把红包、消费或其他收入自动当作转账；“红包也不要”“只保留消费”“删除第三笔”“这组都不要了”等按当前草稿描述、收支类型和页面顺序选择。成员未填写也可以删除，不必先询问成员；历史中的不支持删除回复不代表当前能力。目标明确就返回remove，页面将匹配草稿软移除并保留恢复入口；这是待确认草稿的状态标记，不删除草稿或已保存账本，也无需另一张删除确认卡。不让用户逐笔手动删除，不生成替代草稿；单笔、批量或整组移除都只标记是否参与入账，无需确认删除；用户最后确认入账时仅提交未移除行。“能删除吗”“怎么删除”等能力询问不执行；多笔时只说“这笔”、条件不明确或没有匹配项则chat简短澄清或说明未找到，不猜目标。只使用当前 draft_batch 的ID，不能删除历史组或已入账记录；已入账直接删除走manage；撤销并恢复草稿才走undo。只返回需要标记的目标，由页面反馈软移除状态，不声称已经删除账本记录。其他action必须remove=null。
 undo：仅处理用户明确要求撤销可用数据 saved_batch 中已入账账单的指令，撤销后恢复为待确认草稿。用户必须明确要求现在执行撤销；“能撤销吗”“如何撤销”“撤销会怎样”等能力或使用方法询问应action=chat解释，不执行撤销，不生成undo目标。只返回目标，不执行数据库操作，不声称已撤销。undo={batch_id:该组ID,draft_ids:目标账单ID数组}，drafts=[]、query=null、update=null。saved_batch 的账单顺序就是页面当前显示顺序；“第一笔”“第三笔”等只选对应行；“全部”“整组”“撤销这组”选择该组所有行；只有一笔时“撤销这笔”选择该行。多笔时只说“这笔”、商户描述重复或其他不能唯一确定目标时action=chat询问具体哪笔，不猜目标。只能使用saved_batch提供的组ID和行ID，不能从历史复制目标，不把撤销解释为新账单。用户要求移除未确认草稿走remove；saved_batch仅限制恢复草稿的undo，不限制manage查询/修改/删除任意已保存记录。没有saved_batch时若要求删除或修改已保存记录，直接用manage按条件查找。
 chat：解答使用方法或提出澄清，不编造用户账本数字。drafts为空、query=null、update=null、undo=null。record时query=null、update=null、undo=null，query时drafts为空、update=null、undo=null，update时undo=null。update、edit或manage可表达各自范围内的成员修改，但模型输出不能提前声称操作成功。任何action都不能声称“已撤销”“已取消”“已删除”等撤销操作成功，实际撤销由系统校验并执行后展示结果。
 多轮追问：如果上一轮刚询问“是否重复，还是另外一笔”，当前用户回复“新增一笔”“再记一笔”“另一笔”“不是重复”等明确表示另一笔交易，结合最近相关用户消息和当前草稿理解金额、用途、日期，返回record并生成一组新的待确认草稿，不能继续按重复消息忽略，不能只用chat文字声称已新增。不把“新增一笔”当作确认入账或批准管理操作，不覆盖原草稿，不复用原草稿ID。若相关交易有多个不同金额或用途、缺少金额或不能唯一确定指代，chat只问缺失信息。未明确指定成员或支付方式时仍留空，不沿用历史成员或支付方式。
@@ -49,9 +49,9 @@ export function memberQuestionText(draft: AssistantDraft) {
   return draft.type === "expense" ? "支出人是谁？" : "这笔收入属于谁？";
 }
 
-export function unassignedMemberDrafts<T extends AssistantDraft>(drafts: T[], members: AssistantMember[]): T[] {
+export function unassignedMemberDrafts<T extends AssistantDraft & { softRemoved?: boolean }>(drafts: T[], members: AssistantMember[]): T[] {
   const memberIds = new Set(members.map(member => member.id));
-  return drafts.filter(draft => !memberIds.has(draft.member_id || ""));
+  return drafts.filter(draft => !draft.softRemoved && !memberIds.has(draft.member_id || ""));
 }
 
 export function memberBatchQuestionText(drafts: AssistantDraft[]) {
@@ -61,11 +61,11 @@ export function memberBatchQuestionText(drafts: AssistantDraft[]) {
   return drafts.length ? `这 ${drafts.length} 笔账目属于谁？` : "这组账目属于谁？";
 }
 
-export function assignMissingDraftMembers<T extends AssistantDraft>(drafts: T[], memberId: string, members: AssistantMember[]): T[] {
+export function assignMissingDraftMembers<T extends AssistantDraft & { softRemoved?: boolean }>(drafts: T[], memberId: string, members: AssistantMember[]): T[] {
   const memberIds = new Set(members.map(member => member.id));
   if (!memberIds.has(memberId)) throw new Error("成员已变更，请重新加载后选择。");
-  if (!drafts.some(draft => !memberIds.has(draft.member_id || ""))) throw new Error("本组成员已填写，请直接编辑卡片。");
-  return drafts.map(draft => memberIds.has(draft.member_id || "") ? draft : { ...draft, member_id: memberId });
+  if (!drafts.some(draft => !draft.softRemoved && !memberIds.has(draft.member_id || ""))) throw new Error("本组成员已填写，请直接编辑卡片。");
+  return drafts.map(draft => draft.softRemoved || memberIds.has(draft.member_id || "") ? draft : { ...draft, member_id: memberId });
 }
 
 export function assignDraftMember<T extends AssistantDraft>(drafts: T[], draftId: string, memberId: string, members: AssistantMember[]): T[] {

@@ -207,3 +207,29 @@ test('the image workflow only accepts record or empty chat and cannot smuggle ot
   assert.equal(chat.undo, null);
   assert.throws(() => request.expandOutput([plan([row]), plan([row])]));
 });
+
+test('mixed signed transfers, red packets and truncated refund income remain eight reviewable drafts without inferred categories or members', async () => {
+  const request = build({images:[image]});
+  const data = [
+    ['income',48,'微信红包-来自测试成员A','2026-10-08','18:39'],
+    ['income',10000,'转账-来自测试成员B','2026-10-08','14:15'],
+    ['expense',300,'测试餐饮有限公司','2026-10-08','10:57'],
+    ['expense',30000,'转账-转给测试成员C','2026-10-07','21:07'],
+    ['income',37,'微信红包-来自测试成员A','2026-10-07','19:04'],
+    ['expense',60000,'转账-转给测试成员D','2026-10-06','20:14'],
+    ['income',10,'微信红包-来自测试成员A','2026-10-06','18:51'],
+    ['income',14,'测试数科商业股份有限公司-退...','2026-10-06','13:12'],
+  ];
+  const raw = plan(data.map(([type,amount_cents,description,date,time],i)=>({...row,type,amount_cents,description,date,category:null,member:null,source:source(1,i+1,time),note:/转账/.test(description)?'转账用途待核对，请选择分类':/退/.test(description)?'描述截断，具体用途待核对':''})));
+  assert.equal((await request.schema.validate(raw)).success,true);
+  const result = finalPlan(request,raw,1);
+  assert.equal(result.plan.action,'record');assert.equal(result.plan.drafts.length,8);
+  assert.deepEqual(Array.from(result.plan.drafts,d=>d.amount_cents),data.map(d=>d[1]));
+  assert.deepEqual(Array.from(result.plan.drafts,d=>d.type),data.map(d=>d[0]));
+  assert.ok(result.plan.drafts.every(d=>d.member_id===null));
+  for (const i of [1,3,5,7]) assert.equal(result.plan.drafts[i].category_id,null);
+  assert.equal(result.plan.drafts.filter(d=>d.type==='income').reduce((sum,d)=>sum+d.amount_cents,0),10109);
+  assert.equal(result.plan.drafts.filter(d=>d.type==='expense').reduce((sum,d)=>sum+d.amount_cents,0),90300);
+  assert.throws(()=>assistant.confirmationRows(result.plan.drafts),/分类|成员/,'uncertain classifications never bypass posting requirements');
+  assert.doesNotMatch(JSON.stringify(result.plan),/381\.81|3950\.23/,'monthly summary is not a transaction');
+});

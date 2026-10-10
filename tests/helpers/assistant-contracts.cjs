@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
-const paths = ['@/lib/assistant-reply-view', '@/lib/assistant-execution', '@/lib/assistant-action-preview', '@/lib/ledger-event', '@/lib/assistant-commands', '@/lib/assistant-draft-actions', '@/lib/entity-icon-catalog'];
+const paths = ['@/lib/assistant-draft-match-rules', '@/lib/assistant-reply-view', '@/lib/assistant-execution', '@/lib/assistant-action-preview', '@/lib/ledger-event', '@/lib/assistant-commands', '@/lib/assistant-draft-actions', '@/lib/entity-icon-catalog'];
 const cache = new Map();
 module.exports = function contract(name) {
   if (!paths.includes(name)) return undefined;

@@ -10,7 +10,7 @@ import { BAILIAN_ASSISTANT_MODEL, bailianObjectStream } from "@/lib/bailian";
 
 // Changes to the prompt, schema, provenance mapping or merge contract require a
 // new version so a resumed task cannot mix incompatible recognition results.
-export const ASSISTANT_IMAGE_BATCH_VERSION = "target-image-v4";
+export const ASSISTANT_IMAGE_BATCH_VERSION = "target-image-v5";
 export const ASSISTANT_IMAGE_BATCH_TIMEOUT_MS = 90_000;
 export class AssistantImageBatchError extends Error {}
 export type AssistantImageBatchOutcome = "complete" | "empty" | "needs_clarification";
@@ -91,7 +91,7 @@ date_context必须为null或{year,month,source_image_index,evidence}，供后续
 编号核对：drafts[].source.image_index是本批编号，固定为${targetLocalIndex}；date_context.source_image_index是原始上传编号，目标图标题固定填${imageIndex + 1}${imageIndex ? `，紧邻前图标题固定填${imageIndex}` : ""}。这两个字段不能混用。本批第2张不等于原始第2张。
 日期证据只能逐字复制明确的年月标题或完整日期，例如“2026年09月”；“29日、28日、27日”不含月份，不能当作月份证据。标题在前图时也要读取它，不能只看目标图。不得用today补月份：只有日号且目标图、前图和可靠引用均没有月份时，必须needs_clarification，不能猜成当前月份。目标图的末尾没有新标题时，引用适用于末尾的前图标题，不能把月份来自前图改写成目标图来源。
 已完成前图的日期标题引用：${JSON.stringify(carriedContext)}
-顶层额外必填outcome：complete表示目标图全部必要信息可确定，action=record且drafts包含1至20行；empty仅表示目标图确实没有交易或全为零金额，action=chat、drafts=[]，说明原因；needs_clarification表示金额、日期、币种、退款或当前意图等尚需澄清，action=chat、drafts=[]。若有一笔必要交易无法可靠识别，不能仅输出其余行并声称complete。前图不能识别不影响日期等均明确的目标图。complete时所有需要核对的具体事实放在对应行note，reply只提示草稿待确认。此分批规则限定前述逐图提取规则的目标范围。`;
+顶层额外必填outcome：complete表示目标图全部必要信息可确定，action=record且drafts包含1至20行；empty仅表示目标图确实没有交易或全为零金额，action=chat、drafts=[]，说明原因；needs_clarification仅表示必要金额、日期、币种、收支方向或用户当前请求是否为识别无法确定，不包括用途、分类、成员或金额较大需要复核，action=chat、drafts=[]。若有一笔必要交易无法可靠识别，不能仅输出其余行并声称complete。前图不能识别不影响日期等均明确的目标图。用途/分类/成员未知但金额、日期、方向明确时必须complete并保留全部行，不以转账、还款、借贷或描述含“退”拒绝；category允许null。complete时所有需要核对的具体事实放在对应行note，reply只提示草稿待确认。此分批规则限定前述逐图提取规则的目标范围。`;
   const contextText = imageIndex
     ? `仅作日期/月份连续性参考的前图：原始第${imageIndex}张，本批第1张，不输出本图交易。`
     : "";

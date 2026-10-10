@@ -512,3 +512,16 @@ test('image batches on an arbitrary model retain strict financial and source che
     assert.equal(rejected.calls.length, 1);
   }
 });
+
+test('a complete target batch can include unknown transfer purpose and refund category without asking for clarification', () => {
+  const f=fixture();
+  const request=f.buildAssistantImageBatch({input:{...input,images:[images[0]]},categories,members,imageIndex:0});
+  const data=[['income',10000,'转账-来自测试成员'],['expense',30000,'转账-转给测试成员'],['income',14,'测试商户-退...']];
+  const raw={action:'record',reply:'请核对草稿。',outcome:'complete',date_context:{year:2026,month:10,source_image_index:1,evidence:'2026年10月'},drafts:data.map(([type,amount_cents,description],i)=>({type,amount_cents,category:null,member:null,date:'2026-10-08',description,payment_method:null,note:'具体用途和分类待核对',source:{image_index:1,row_index:i+1,time:'14:15',transaction_id:null,kind:'statement'}}))};
+  const expanded=request.expandOutput(raw);
+  const checked=f.validateAssistantImageBatchResult(expanded,0,1,categories,members);
+  assert.equal(checked.outcome,'complete');assert.equal(checked.output.drafts.length,3);
+  const final=f.finalizeAssistantImageBatches([checked],1,categories,members);
+  assert.equal(final.action,'record');assert.equal(final.drafts.length,3);
+  assert.ok(final.drafts.every(d=>d.category_id===null&&d.member_id===null));
+});

@@ -1,3 +1,4 @@
+import { assistantCardTarget, reconcileAssistantCardUpdate, reconcileAssistantCardHistory, relocateAssistantCard } from "@/lib/assistant-card-updates";
 import { restoreAssistantExecution } from "@/lib/assistant-execution";
 import { recordReplyView, type AssistantReplyView } from "@/lib/assistant-reply-view";
 import type { AssistantActionPreview } from "@/lib/assistant-action-preview";
@@ -9,7 +10,7 @@ import { sortedAssistantDrafts, type AssistantDraftSort } from "@/lib/assistant-
 import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask } from "@/lib/assistant-task-types";
 import { assistantProcessFromTask, type AssistantProcess } from "@/lib/assistant-process";
 
-export type EditableAssistantDraft = AssistantDraft & { amount: string; ignored?: boolean };
+export type EditableAssistantDraft = AssistantDraft & { amount: string; ignored?: boolean; softRemoved?: boolean };
 
 export function syncSavedTransactionCards(messages: AssistantConversationMessage[], updates: NonNullable<AssistantActionResult["transaction_updates"]>) {
   return messages.map(message => {
@@ -38,9 +39,17 @@ export type AssistantConversationMessage = {
   actionResult?: AssistantActionResult;
   actionPreview?: AssistantActionPreview;
   replyView?: AssistantReplyView;
+  draftMatchDecisions?: Record<string, "kept" | "removed">;
   replyKind?: "result";
+  /** Historical location of a card; always points to its unchanged batch ID. */
+  draftCardLink?: string;
+  cardUpdatedLink?: string;
+  updatesCardId?: string;
+  supersededApproval?: { id: string; settled?: boolean };
+  replacementBlocked?: boolean;
+  proposalScope?: { resource: string; operation: string; ids: string[] };
   confirmChoice?: AssistantDraftConfirm & { snapshot: string };
-  removeChoice?: AssistantDraftConfirm & { snapshot: string };
+  removeChoice?: AssistantDraftConfirm & { snapshot: string; excluded_ids?: string[] };
   clearChoice?: boolean;
   navigateTo?: string;
   exportFile?: AssistantExport;
@@ -64,6 +73,15 @@ export type AssistantConversationMessage = {
   approvalHistory?: AssistantTask["approval_history"];
 };
 
+/** Move the one editable card after the update reply, leaving a non-executable link.
+ * Marker IDs are presentation-only; they never replace batch or transaction IDs.
+ */
+export function relocateAssistantDraftCard(messages: AssistantConversationMessage[], batchId: string, afterId: string): AssistantConversationMessage[] {
+  const source = messages.find(m => m.id === batchId);
+  if (!source || source.status !== "pending" || !source.drafts?.length) return messages;
+  return relocateAssistantCard(messages,batchId,afterId);
+}
+
 /** Keep the confirmation batch ID while placing its review after the member answer. */
 export function completeAssistantMemberSelection(messages: AssistantConversationMessage[], messageId: string, member: AssistantMember,
   members: AssistantMember[], answerId: string, questionId: string): AssistantConversationMessage[] {
@@ -77,7 +95,7 @@ export function completeAssistantMemberSelection(messages: AssistantConversation
   catch { return messages; }
   const questionText = memberBatchQuestionText(unassigned);
   const question: AssistantConversationMessage = { id: questionId, role: "assistant",
-    text: source.text === questionText ? questionText : `${source.text}\n\n${questionText}` };
+    text: source.text === questionText ? "" : source.text, draftCardLink: messageId };
   const review: AssistantConversationMessage = { ...source, drafts: selected, error: undefined, memberChoice: undefined,
     memberFlow: true, text: "成员已补充，请核对账目后确认入账。" };
   // Move the original card instead of creating a new batch: approvals, undo and
@@ -182,7 +200,7 @@ export function assistantMemberChoiceTarget(choice: AssistantDraftMemberChoice |
     || new Set(choice.draft_ids).size !== choice.draft_ids.length || choice.draft_ids.some(id => typeof id !== "string" || !UUID_PATTERN.test(id))) return;
   const message = messages.find(m => m.id === choice.batch_id);
   if (!message || message.role !== "assistant" || message.status !== "pending" || message.commit || !message.drafts?.length) return;
-  const drafts = sortedAssistantDrafts(message.drafts, message.draftSort).filter(d => !d.ignored && choice.draft_ids.includes(d.id));
+  const drafts = sortedAssistantDrafts(message.drafts, message.draftSort).filter(d => !d.ignored && !d.softRemoved && choice.draft_ids.includes(d.id));
   if (drafts.length !== choice.draft_ids.length || new Set(drafts.map(d => d.id)).size !== drafts.length) return;
   return { message, drafts };
 }
@@ -199,6 +217,61 @@ function draftRemovalTotals(drafts: EditableAssistantDraft[]) {
   return `涉及收入 ¥${(totals.income / 100).toFixed(2)}，支出 ¥${(totals.expense / 100).toFixed(2)}。`;
 }
 
+/** Soft removal changes participation only. IDs, values and ordering remain intact. */
+export function setAssistantDraftRemoval(messages: AssistantConversationMessage[], batchId: string, draftIds: string[], removed: boolean): AssistantConversationMessage[] {
+  const target = messages.find(m => m.id === batchId && m.role === "assistant");
+  if (!target || target.status !== "pending" || target.commit || !draftIds.length || draftIds.some(id => !target.drafts?.some(d => d.id === id && !d.ignored))) return messages;
+  return messages.map(m => m.id === batchId ? { ...m, error: undefined, drafts: m.drafts!.map(d => draftIds.includes(d.id) ? { ...d, softRemoved: removed } : d) }
+    : m.memberChoice?.batch_id === batchId && m.memberChoice.draft_ids.some(id => draftIds.includes(id)) ? { ...m, memberChoice: undefined } : m);
+}
+
+/** Keep the original review intact; exclusions are reversible until confirmation. */
+function draftRemovalSelection(choice: NonNullable<AssistantConversationMessage["removeChoice"]>) {
+  const snapshot: EditableAssistantDraft[] = JSON.parse(choice.snapshot);
+  if (!Array.isArray(snapshot) || snapshot.length !== choice.draft_ids.length || new Set(snapshot.map(d => d.id)).size !== snapshot.length
+    || snapshot.some(d => !choice.draft_ids.includes(d.id))) throw new Error("invalid removal snapshot");
+  const excluded = choice.excluded_ids ?? [];
+  if (!Array.isArray(excluded) || excluded.some(id => typeof id !== "string" || !choice.draft_ids.includes(id)) || new Set(excluded).size !== excluded.length) throw new Error("invalid exclusions");
+  return { excluded, selectedSnapshot: snapshot.filter(d => !excluded.includes(d.id)), ids: choice.draft_ids.filter(id => !excluded.includes(id)) };
+}
+/** Old local deletion previews become reversible selections in the canonical card. */
+export function migrateAssistantDraftRemovalPreviews(messages: AssistantConversationMessage[]): AssistantConversationMessage[] {
+  let next = messages;
+  for (const request of messages.filter(m => m.role === "assistant" && m.removeChoice)) {
+    const choice = request.removeChoice!;
+    const target = next.find(m => m.id === choice.batch_id);
+    let valid = false;
+    try {
+      const { ids, selectedSnapshot } = draftRemovalSelection(choice);
+      valid = !!target && target.role === "assistant" && target.status === "pending" && !target.commit
+        && JSON.stringify(target.drafts?.filter(d => ids.includes(d.id))) === JSON.stringify(selectedSnapshot);
+      if (valid && ids.length) next = setAssistantDraftRemoval(next, choice.batch_id, ids, true);
+    } catch { valid = false; }
+    next = next.map(m => m.id === request.id ? { ...m, removeChoice: undefined, replyKind: "result", text: valid
+      ? "移除选择已合并到原账目卡片，可直接点击“恢复”。尚未入账。"
+      : "旧移除方案已失效，请在账目卡片重新选择。未改动草稿或账本。" } : m);
+    if (valid) next = relocateAssistantDraftCard(next, choice.batch_id, request.id);
+  }
+  return next;
+}
+
+export function toggleAssistantDraftRemoval(messages: AssistantConversationMessage[], requestId: string, draftId: string): AssistantConversationMessage[] {
+  const request = messages.find(m => m.id === requestId && m.role === "assistant");
+  const choice = request?.removeChoice;
+  if (!choice || !choice.draft_ids.includes(draftId)) return messages;
+  const target = messages.find(m => m.id === choice.batch_id);
+  try {
+    validateDraftRemoval(choice, target?.role === "assistant" && target.status === "pending" && !target.commit && target.drafts?.length
+      ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored && !d.softRemoved) } : null);
+    const { excluded } = draftRemovalSelection(choice);
+    const nextChoice = { ...choice, excluded_ids: excluded.includes(draftId) ? excluded.filter(id => id !== draftId) : [...excluded, draftId] };
+    const { selectedSnapshot } = draftRemovalSelection(nextChoice);
+    return messages.map(m => m.id !== requestId ? m : { ...m, error: undefined, removeChoice: nextChoice,
+      text: selectedSnapshot.length ? `准备移除 ${selectedSnapshot.length} 笔待确认草稿。${draftRemovalTotals(selectedSnapshot)}尚未执行，请核对后确认。`
+        : "本次未选择需移除的草稿。可恢复账目重新选择，确认后保留全部。" });
+  } catch { return messages; }
+}
+
 /** Resolve the current persisted preview, never a stale click closure; consume it atomically. */
 export function approveAssistantDraftRemoval(messages: AssistantConversationMessage[], requestId: string, members: AssistantMember[]): AssistantConversationMessage[] {
   const request = messages.find(message => message.id === requestId);
@@ -206,11 +279,14 @@ export function approveAssistantDraftRemoval(messages: AssistantConversationMess
   const choice = request.removeChoice;
   const target = messages.find(message => message.id === choice.batch_id);
   try {
-    validateDraftRemoval(choice, target?.role === "assistant" && target.status === "pending" && !target.commit && target.drafts?.length
-      ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored) } : null);
-    const selected = target!.drafts!.filter(d => choice.draft_ids.includes(d.id));
-    if (JSON.stringify(selected) !== choice.snapshot) throw new Error("stale removal preview");
-    const remaining = target!.drafts!.filter(d => !choice.draft_ids.includes(d.id));
+    const { ids, selectedSnapshot } = draftRemovalSelection(choice);
+    if (!ids.length) return messages.map(m => m.id === requestId ? { ...m, removeChoice: undefined, replyKind: "result", error: undefined,
+      text: "已保留全部账目，未删除任何草稿。" } : m);
+    validateDraftRemoval({ batch_id: choice.batch_id, draft_ids: ids }, target?.role === "assistant" && target.status === "pending" && !target.commit && target.drafts?.length
+      ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored && !d.softRemoved) } : null);
+    const selected = target!.drafts!.filter(d => ids.includes(d.id));
+    if (JSON.stringify(selected) !== JSON.stringify(selectedSnapshot)) throw new Error("stale removal preview");
+    const remaining = target!.drafts!.filter(d => !ids.includes(d.id));
     const unassigned = target!.memberFlow ? unassignedMemberDrafts(remaining, members) : [];
     return messages.map(message => {
       if (message.id === requestId) return { ...message, removeChoice: undefined, replyKind: "result",
@@ -218,7 +294,7 @@ export function approveAssistantDraftRemoval(messages: AssistantConversationMess
       if (message.id === target!.id) return { ...message, drafts: remaining, error: undefined,
         status: remaining.length ? "pending" : "deleted",
         text: remaining.length ? unassigned.length ? memberBatchQuestionText(unassigned) : "请核对账目后确认入账。" : "这组草稿已删除，未入账。" };
-      if (message.memberChoice?.batch_id === target!.id && message.memberChoice.draft_ids.some(id => choice.draft_ids.includes(id))) return { ...message, memberChoice: undefined };
+      if (message.memberChoice?.batch_id === target!.id && message.memberChoice.draft_ids.some(id => ids.includes(id))) return { ...message, memberChoice: undefined };
       return message;
     });
   } catch {
@@ -227,12 +303,36 @@ export function approveAssistantDraftRemoval(messages: AssistantConversationMess
   }
 }
 
+/** Quick decisions are bound to the exact draft read by the comparison. */
+export function assistantDraftMatchTarget(messages: AssistantConversationMessage[], replyId: string, draftId: string) {
+  const comparison = messages.find(m => m.id === replyId && m.role === "assistant")?.replyView?.draftComparison;
+  const row = comparison?.rows.find(row => row.draft_id === draftId);
+  const target = messages.find(m => m.id === comparison?.batch_id);
+  const draft = target?.drafts?.find(d => d.id === draftId && !d.ignored && !d.softRemoved);
+  if (!row || !target || target.role !== "assistant" || target.status !== "pending" || target.commit || !draft) return null;
+  const snapshot = row.snapshot;
+  if (draft.type !== snapshot.type || draft.description !== snapshot.description || draft.transaction_date !== snapshot.transaction_date
+    || !/^\d+(?:\.\d{1,2})?$/.test(draft.amount) || Math.round(Number(draft.amount) * 100) !== snapshot.amount_cents
+    || (draft.member_id ?? null) !== snapshot.member_id || (draft.category_id ?? null) !== snapshot.category_id) return null;
+  return { target, draft };
+}
+export function resolveAssistantDraftMatch(messages: AssistantConversationMessage[], replyId: string, draftId: string, decision: "kept" | "removed") {
+  const reply = messages.find(m => m.id === replyId);
+  if (reply?.draftMatchDecisions?.[draftId]) return messages;
+  const match = assistantDraftMatchTarget(messages, replyId, draftId);
+  if (!match) return messages;
+  const next = (decision === "removed" ? setAssistantDraftRemoval(messages, match.target.id, [draftId], true) : messages).map(m => m.id === replyId
+    ? { ...m, draftMatchDecisions: { ...m.draftMatchDecisions, [draftId]: decision } } : m);
+  return decision === "removed" ? relocateAssistantDraftCard(next, match.target.id, replyId) : next;
+}
+
 /** Pure, replay-safe recovery. Financial writes always remain explicit UI actions. */
 export function mergeAssistantTasks(
   messages: AssistantConversationMessage[], tasks: AssistantTask[], conversationId: string, members: AssistantMember[], categories: AssistantCategory[] = [],
 ): AssistantConversationMessage[] {
   let next = messages;
   for (const task of tasks) {
+    let updatedBatchId: string | undefined;
     if (task.conversation_id !== conversationId || !UUID_PATTERN.test(task.id) || !UUID_PATTERN.test(task.user_message_id)) continue;
     const user = next.find(message => message.id === task.user_message_id);
     if (user?.taskId === task.id && (user.taskAttempt || 0) > task.attempt) continue;
@@ -250,6 +350,7 @@ export function mergeAssistantTasks(
     // This flag is persisted on the stable reply, even when its drafts were moved
     // into a later member-selection card or removed by the user.
     const previousReply = next.find(message => message.id === task.id);
+    if (previousReply && assistantCardTarget(previousReply)) continue;
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
     const approvalHistory = restoreAssistantApprovalHistory(task.approval_history);
     const advanced = !!previousReply && task.attempt > (previousReply.taskAttempt || 1);
@@ -275,6 +376,7 @@ export function mergeAssistantTasks(
       continue;
     }
     if (previousReply?.taskApplied && !advanced) {
+      if (!previousReply.proposalScope && task.result?.command) next = next.map(m => m.id === task.id ? { ...m,proposalScope:{resource:task.result!.command!.resource,operation:task.result!.command!.operation,ids:task.result!.command!.ids} } : m);
       const rebound = agent?.status === "waiting_approval" && task.result?.approval?.id === agent.pending_action_id
         && (previousReply.approval?.id || previousReply.actionResult?.id) !== agent.pending_action_id
         && previousReply.agent?.pending_action_id !== agent.pending_action_id ? task.result?.approval : undefined;
@@ -315,7 +417,7 @@ export function mergeAssistantTasks(
       const result = task.result;
       reply = { ...reply, text: result.reply, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
       if (result.action === "manage" || result.action === "event") {
-        reply = { ...reply, eventContext: result.event_context, eventChoices: result.event_choices, approval: result.approval, actionPreview: result.approval?.preview, exportFile: result.export_file, ledgerContext: result.record_context, replyView: result.record_context ? recordReplyView(result.record_context.resource, result.record_context.rows, result.command, members, categories) : result.reply_view };
+        reply = { ...reply, ...(result.command ? { proposalScope: {resource:result.command.resource,operation:result.command.operation,ids:result.command.ids} } : {}), eventContext: result.event_context, eventChoices: result.event_choices, approval: result.approval, actionPreview: result.approval?.preview, exportFile: result.export_file, ledgerContext: result.record_context, replyView: result.record_context ? recordReplyView(result.record_context.resource, result.record_context.rows, result.command, members, categories) : result.reply_view };
       } else if (result.action === "edit") {
         reply.replyKind = "result";
         const edit = result.edit;
@@ -326,12 +428,13 @@ export function mergeAssistantTasks(
           next = next.map(message => message.id === target.id ? { ...message, drafts, error: undefined }
             : message.memberChoice?.batch_id === target.id ? { ...message, memberChoice: undefined } : message);
           reply.text = `已修改 ${edit.edits.length} 笔待确认草稿，请核对卡片；尚未入账。`;
+          updatedBatchId = target.id;
         } catch (error) { reply.text = error instanceof Error ? error.message : changed; }
       } else if (result.action === "confirm") {
         const target = next.find(message => message.id === result.confirm?.batch_id);
         try {
           const choice = validateDraftRemoval(result.confirm, target?.status === "pending" && !target.commit && target.drafts?.length
-            ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored) } : null);
+            ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored && !d.softRemoved) } : null);
           const selected = target!.drafts!.filter(d => choice.draft_ids.includes(d.id));
           reply.confirmChoice = { ...choice, snapshot: JSON.stringify(selected) };
           reply.text = `准备将以下 ${selected.length} 笔草稿入账：\n${selected.map(d => `- ${d.description} · ${d.transaction_date} · ${d.type === "income" ? "收入" : "支出"} ¥${d.amount} · ${members.find(m => m.id === d.member_id)?.name || "未选成员"} · ${categories.find(c => c.id === d.category_id)?.name || "未选分类"}`).join("\n")}\n尚未入账。回复“确认执行”批准，或回复“取消”。`;
@@ -343,7 +446,7 @@ export function mergeAssistantTasks(
         else {
           const target = next.find(message => message.id === nav.batch_id && message.status === "pending" && !message.commit);
           if (!target || !nav.order) reply.text = changed;
-          else { reply.replyKind = "result"; next = next.map(message => message.id === target.id ? { ...message, draftSort: nav.order! } : message); reply.text = "已调整本组草稿的显示顺序。"; }
+          else { reply.replyKind = "result"; next = next.map(message => message.id === target.id ? { ...message, draftSort: nav.order! } : message); reply.text = "已调整本组草稿的显示顺序。"; updatedBatchId = target.id; }
         }
       } else if (result.action === "undo") {
         const target = next.find(message => message.id === result.undo?.batch_id);
@@ -356,10 +459,11 @@ export function mergeAssistantTasks(
         const target = next.find(message => message.id === result.remove?.batch_id);
         try {
           const removal = validateDraftRemoval(result.remove, target?.role === "assistant" && target.status === "pending" && !target.commit && target.drafts?.length
-            ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored) } : null);
-          const selected = target!.drafts!.filter(d => removal.draft_ids.includes(d.id));
-          reply.removeChoice = { ...removal, snapshot: JSON.stringify(selected) };
-          reply.text = `准备删除以下 ${selected.length} 笔待确认草稿：\n${selected.map(d => `- ${d.description || "未填写用途"} · ${d.transaction_date} · ${d.type === "income" ? "收入" : "支出"} ¥${d.amount}`).join("\n")}\n\n${draftRemovalTotals(selected)}\n\n确认后本组剩余 ${target!.drafts!.length - selected.length} 笔。尚未删除，也不会影响已入账记录。回复“确认删除”批准，或回复“取消”。`;
+            ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored && !d.softRemoved) } : null);
+          next = setAssistantDraftRemoval(next, target!.id, removal.draft_ids, true);
+          reply.replyKind = "result";
+          reply.text = `已将 ${removal.draft_ids.length} 笔草稿标记为移除，暂不入账。可在账目卡片点击“恢复”；未改动已保存账本。`;
+          updatedBatchId = target!.id;
         } catch { reply.text = "草稿状态已变化，本次未删除。请核对当前卡片后重试。"; }
       } else if (result.action === "update") {
         reply.replyKind = "result";
@@ -373,6 +477,7 @@ export function mergeAssistantTasks(
           try {
             const drafts = applyDraftMemberUpdate(target.drafts, update, members);
             next = next.map(message => message.id === target.id ? { ...message, drafts, error: undefined } : message);
+            updatedBatchId = target.id;
           } catch { reply.text = changed; }
         }
       } else if (result.drafts.length) {
@@ -399,8 +504,11 @@ export function mergeAssistantTasks(
       const userIndex = next.findIndex(message => message.id === task.user_message_id);
       next = [...next.slice(0, userIndex + 1), reply, ...next.slice(userIndex + 1)];
     }
+    if (updatedBatchId) next = relocateAssistantDraftCard(next, updatedBatchId, task.id);
+    if (advanced && previousReply) next = relocateAssistantCard(next,task.id,next.at(-1)!.id);
+    next = reconcileAssistantCardUpdate(next, task.id, currentUser.text, currentUser.updatesCardId);
   }
-  return next;
+  return reconcileAssistantCardHistory(next);
 }
 
 export class AssistantTaskRequestError extends Error {

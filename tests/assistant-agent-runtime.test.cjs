@@ -42,6 +42,62 @@ test('query validation blocks database access and feeds concrete error to the ne
   await f.run(); assert.equal(f.calls.filter(c => c[0] === 'query').length, 0);
 });
 
+test('draft matching reads current context, persists evidence, and replaces an earlier aggregate view', async () => {
+  let reads = 0;
+  const f = fixture([choose('read', 'query', query()), choose('read', 'draft_matches', {}), messages => {
+    assert.match(messages.at(-1).content, /draft_matches/);
+    assert.match(messages.at(-1).content, /possible_match/);
+    return respond('早餐有一条疑似匹配，请核对。');
+  }], { adapters: { draftMatches: async signal => {
+    signal.throwIfAborted(); reads++;
+    return { reply_view: { title: '重复入账核对' }, rows: [{ draft_id: ACTION, status: 'possible_match', candidates: [{ id: ID, amount_cents: 2130 }] }] };
+  } } });
+  const result = await f.run();
+  assert.equal(reads, 1);
+  assert.equal(result.reply_view.title, '重复入账核对');
+  assert.equal(result.agent.status, 'completed');
+  assert.equal(result.agent.tool_calls, 2);
+  assert.equal(result.drafts.length, 0);
+  assert.equal(f.checkpoints.at(-1).pending_approval, null);
+});
+
+test('draft matching rejects caller-specified records and cannot be used as a preview tool', async () => {
+  let reads = 0;
+  const f = fixture([choose('read', 'draft_matches', { user_id: 'foreign', drafts: [] }), respond('请核对当前草稿。')],
+    { adapters: { draftMatches: async () => { reads++; return {}; } } });
+  await f.run();
+  assert.equal(reads, 0);
+  assert.match(f.checkpoints.at(-1).tool_results[0].result.message, /参数必须/);
+  const illegal = fixture([choose('preview', 'draft_matches', {})]);
+  await assert.rejects(illegal.run(), /允许范围/);
+});
+
+test('failed draft reads do not become evidence that there are no saved matches', async () => {
+  const f = fixture([choose('read', 'draft_matches', {}), messages => {
+    assert.match(messages.at(-1).content, /connection failed/);
+    return respond('暂时无法核对，请稍后重试。');
+  }], { adapters: { draftMatches: async () => { throw new Error('connection failed'); } } });
+  const result = await f.run();
+  assert.equal(f.checkpoints.at(-1).tool_results.some(r => r.name === 'draft_matches'), false);
+  assert.equal(result.reply_view, undefined);
+});
+
+test('provider reply-format failure preserves the completed draft read using only its server summary', async () => {
+  const serverReply = '逐笔核对结果：早餐，疑似重复；午餐，未找到同日同金额流水。没有更改账本。';
+  const f = fixture([choose('read', 'draft_matches', {}), () => { throw Object.assign(new Error('bad model JSON'), { code: 'invalid_output' }); }],
+    { adapters: { draftMatches: async () => ({ reply: serverReply, reply_view: { title: '重复入账核对' }, rows: [] }) } });
+  const result = await f.run();
+  assert.equal(result.reply, serverReply);
+  assert.equal(result.action, 'chat');
+  assert.equal(result.reply_view.title, '重复入账核对');
+  assert.equal(result.agent.status, 'needs_input', 'a malformed next step cannot prove a compound goal is completed');
+  assert.equal(result.approval, undefined);
+  assert.equal(result.drafts.length, 0);
+  const failedRead = fixture([choose('read', 'draft_matches', {}), () => { throw Object.assign(new Error('bad model JSON'), { code: 'invalid_output' }); }],
+    { adapters: { draftMatches: async () => { throw new Error('DB unavailable'); } } });
+  await assert.rejects(failedRead.run(), /bad model JSON/);
+});
+
 test('write preview is prepared once and durable checkpoint precedes returning approval', async () => {
   const f = fixture([choose('read', 'records', command()), choose('preview', 'command', command('update', { ids: [ID], values_json: '{"amount":30}' }))]);
   const plan = await f.run(); const c = f.checkpoints.at(-1);
@@ -150,7 +206,7 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/assistant-agent-schem
 const stepValidation = schemaExports.ASSISTANT_AGENT_STEP_SCHEMA.validate;
 
 test('step schema discards only unused bounded plan commentary on recognized read or preview tools', async () => {
-  for (const [kind, tool] of [['read', 'query'], ['read', 'records'], ['preview', 'command'], ['preview', 'event']]) {
+  for (const [kind, tool] of [['read', 'query'], ['read', 'records'], ['read', 'draft_matches'], ['preview', 'command'], ['preview', 'event']]) {
     const output = { ...choose(kind, tool, {}), plan_json: '{"goal":"ignored","steps":["never execute"]}' };
     const validated = await stepValidation(output);
     assert.equal(validated.success, true); assert.equal(validated.value.plan_json, null); assert.equal(validated.value.arguments_json, '{}');
@@ -165,6 +221,19 @@ test('step schema discards only unused bounded plan commentary on recognized rea
     { ...respond('hello'), tool: 'command' },
     { ...choose('read', 'query', {}), sql: 'SELECT *' },
   ]) assert.equal((await stepValidation(output)).success, false);
+});
+
+test('omitted conversational status defaults without relaxing plan fields or tool permissions', async () => {
+  for (const output of [choose('read', 'draft_matches', {}), respond('逐笔核对结果如下。')]) {
+    delete output.needs_input;
+    const result = await stepValidation(output);
+    assert.equal(result.success, true);
+    assert.equal(result.value.needs_input, false);
+  }
+  assert.equal((await stepValidation({ ...respond('核对结果'), needs_input: 'false' })).success, false);
+  const missingPlan = respond('核对结果'); delete missingPlan.plan_json;
+  assert.equal((await stepValidation(missingPlan)).success, false);
+  assert.equal((await stepValidation({ ...choose('preview', 'draft_matches', {}), needs_input: undefined })).success, false);
 });
 
 const core = {};
@@ -208,6 +277,12 @@ test('capabilities, saved-record scope and conditional instructions are preserve
     '针对已保存账单准备修改预览，核对后再执行。',
     '可以帮你查询已保存支出和已入账收入。',
     '更正已成功入账的交易，或查询已完成保存的账单。',
+    '零食很忙疑似重复，存在一笔描述、日期、金额完全相同的已入账记录。',
+    '匹配到一条已保存账单，请核对是否是同一交易。',
+    '在已入账记录中找到了同日期、同金额的疑似重复项。',
+    '已核对当前待确认草稿与已入账记录，结果如下。',
+    '未找到已入账记录，请核对日期和金额。',
+    '零食很忙：疑似已入账，存在同日期、同金额、同描述的记录。',
 
   ];
   for (const reply of replies) {
@@ -238,6 +313,8 @@ test('capability words elsewhere never exempt concrete unsupported completion cl
     '已新增分类。',
     '已成功新增分类。',
     '查询已保存记录，并已删除账单。',
+    '存在一笔相同的已入账记录。已删除重复账单。',
+    '零食很忙疑似已入账。已删除重复账单。',
 
   ];
   for (const reply of replies) {

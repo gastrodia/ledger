@@ -5,7 +5,7 @@ export type AssistantActionPreview = {
   approveLabel?: string;
   subtitle?: string;
   recordsTitle?: string;
-  records?: { title: string; subtitle?: string; amount?: string; rows?: { label: string; value: string }[] }[];
+  records?: { id?: string; excluded?: boolean; title: string; subtitle?: string; amount?: string; badge?: { label: string; tone: "warning" | "neutral" }; rows?: { label: string; value: string }[] }[];
   metrics: { label: string; value: string; primary?: boolean }[];
   sections: { title: string; rows: { label: string; value: string }[] }[];
   notices: { text: string; tone: "info" | "attention" }[];
