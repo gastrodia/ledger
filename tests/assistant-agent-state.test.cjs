@@ -13,12 +13,26 @@ const checkpoint = () => ({ version: 1, goal_id: taskId, goal: '核对并整理�
 function load(file, deps = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
-    { exports, require: name => { if (name in deps) return deps[name]; if (name.startsWith('@/')) return load(name.slice(2) + '.ts', deps); throw new Error(name); },
+    { exports, require: name => { if (name === 'zod') return require('zod'); if (name in deps) return deps[name]; if (name.startsWith('@/')) return load(name.slice(2) + '.ts', deps); throw new Error(name); },
       Error, Date, JSON, Number, setTimeout, clearTimeout, console, AbortController, AbortSignal, process });
   return exports;
 }
 const state = load('lib/assistant-agent-state.ts');
 const plain = value => JSON.parse(JSON.stringify(value));
+test('restoring an older confirmed group repairs omitted agenda coverage without replaying rows', () => {
+  const original=checkpoint();
+  original.pending_approval=null;
+  original.operations=[{id:'breakfast',label:'早餐',action:'record',effect:'write',depends_on:[],sources:['早餐3.9'],status:'completed',receipt_id:actionId},
+    {id:'metro',label:'地铁',action:'record',effect:'write',depends_on:[],sources:['地铁2.96'],status:'pending'}];
+  original.outputs=[{id:actionId,user_message_id:id(4),input:{message:'早餐3.9 地铁2.96',display_text:'早餐3.9 地铁2.96',display_images:[]},attempt:1,
+    plan:{action:'record',reply:'请核对',drafts:[{description:'早餐',amount_cents:390},{description:'地铁',amount_cents:296}]},receipt:{id:actionId,status:'succeeded'}}];
+  const restored=state.restoreAssistantAgentCheckpoint(original);
+  assert.equal(restored.operations[1].status,'completed');
+  assert.equal(restored.operations[1].receipt_id,actionId);
+  assert.equal(original.operations[1].status,'pending','restoration does not mutate the stored snapshot');
+  original.outputs[0].receipt.status='failed';
+  assert.equal(state.restoreAssistantAgentCheckpoint(original).operations[1].status,'pending');
+});
 test('checkpoint restores defensively and public state excludes model prompts and tool results', () => {
   const original = checkpoint();
   const restored = state.restoreAssistantAgentCheckpoint(original);
@@ -218,4 +232,56 @@ test('replayed tool previews produce one public action receipt per approval ID',
   assert.equal(history.length, 2);
   assert.equal(history[0].result.status, 'cancelled');
   assert.equal(history[1].approval.id, id(20));
+});
+
+if (PGlite) test('SQL explicit batch exclusions count as reviewed choices rather than lost operations',async t=>{
+  const f=await fixture(t);
+  await f.db.exec("CREATE TABLE assistant_batches(user_id varchar(36),id varchar(36),payload_hash text,draft_transactions jsonb,excluded_draft_ids jsonb,undone_draft_ids jsonb,revoked_at timestamptz); CREATE TABLE transactions(id varchar(36),user_id varchar(36));");
+  const c=checkpoint();c.pending_approval=null;c.pending_approvals=[];c.pending_batch={batch_id:taskId,draft_ids:[id(10),id(11)]};
+  await f.db.query('UPDATE assistant_tasks SET agent_checkpoint=$1::jsonb',[JSON.stringify(c)]);
+  await f.db.query("INSERT INTO assistant_batches VALUES('owner',$1,'hash',$2::jsonb,$3::jsonb,'[]',NULL)",[taskId,JSON.stringify([{draft_id:id(10),transaction_id:id(20)}]),JSON.stringify([id(11)])]);
+  await f.db.query("INSERT INTO transactions VALUES($1,'owner')",[id(20)]);
+  const next=await f.tasks.changeAssistantTask('owner',taskId,'resume',1);
+  assert.equal(next.status,'queued');assert.equal(next.id,taskId);
+  const stored=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0].agent_checkpoint;
+  assert.equal(stored.approval_outcome.status,'succeeded');assert.match(stored.approval_outcome.text,/1 笔由用户明确排除/);
+});
+
+if(PGlite)test('SQL confirmed draft edits are restored from the submitted server snapshot on continuation',async t=>{
+ const f=await fixture(t);
+ await f.db.exec("CREATE TABLE assistant_batches(user_id varchar(36),id varchar(36),payload_hash text,draft_transactions jsonb,draft_snapshot jsonb,undone_draft_ids jsonb,revoked_at timestamptz); CREATE TABLE transactions(id varchar(36),user_id varchar(36));");
+ const draft={id:id(10),type:'expense',amount_cents:390,member_id:null,category_id:id(30),transaction_date:'2026-10-10',description:'早餐',payment_method:null,note:''};
+ const c=checkpoint();c.pending_approval=null;c.pending_approvals=[];c.pending_batch={batch_id:taskId,draft_ids:[id(10)]};c.output_id=taskId;c.outputs=[{id:taskId,user_message_id:id(4),input:{message:'早餐',display_text:'早餐',display_images:[]},plan:{action:'record',reply:'核对',drafts:[draft],query:null},attempt:1}];
+ await f.db.query('UPDATE assistant_tasks SET agent_checkpoint=$1::jsonb',[JSON.stringify(c)]);
+ await f.db.query("INSERT INTO assistant_batches VALUES('owner',$1,'hash',$2::jsonb,$3::jsonb,'[]',NULL)",[taskId,JSON.stringify([{draft_id:id(10),transaction_id:id(20)}]),JSON.stringify([{...draft,member_id:id(31),amount_cents:400}])]);
+ await f.db.query("INSERT INTO transactions VALUES($1,'owner')",[id(20)]);
+ await f.tasks.changeAssistantTask('owner',taskId,'resume',1);
+ const restored=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0].agent_checkpoint.outputs[0].plan.drafts[0];
+ assert.equal(restored.member_id,id(31));assert.equal(restored.amount_cents,400);assert.equal(restored.id,id(10));
+});
+
+
+test('legacy technical limits recover as interruptions without converting business questions', () => {
+ const c=checkpoint();c.status='needs_input';c.pending_approval=null;c.pending_approvals=[];c.awaiting_answer=true;c.output_id=id(8);
+ c.operations=[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'running'}];
+ c.outputs=[{id:id(8),user_message_id:id(4),input:{message:'送礼',display_text:'送礼',display_images:[]},attempt:1,plan:{action:'chat',drafts:[],reply:'本次已达到步骤上限，账本更改尚需确认。请缩小范围或补充具体目标。'}}];
+ const restored=state.restoreAssistantAgentCheckpoint(c);assert.equal(restored.status,'interrupted');assert.equal(restored.awaiting_answer,false);assert.equal(restored.operations[0].status,'pending');
+ assert.equal(c.status,'needs_input');assert.equal(c.awaiting_answer,true);
+ c.operations[0].status='needs_input';c.outputs[0].plan.reply='鞋子是实际购买还是估值？';
+ const question=state.restoreAssistantAgentCheckpoint(c);assert.equal(question.status,'needs_input');assert.equal(question.awaiting_answer,true);
+});
+
+
+test('old event choice answers recover as scoped conditions and repeated duplicate questions become resumable', () => {
+ const c=checkpoint();c.status='needs_input';c.pending_approval=null;c.pending_approvals=[];c.current_operation_id='gift';c.output_id=id(5);c.awaiting_answer=true;
+ const input={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:false};
+ c.operations=[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'needs_input'}];
+ c.tool_results=[{call_id:'tool',name:'event_preview',operation_id:'gift',result:{event_context:{input}}}];
+ const source={id:id(3),user_message_id:id(4),input:{message:'送礼',display_text:'送礼',display_images:[]},attempt:1,plan:{action:'event',reply:'请核对是不是已经记过',drafts:[],event_context:{input},event_choices:[{label:'这是另外新发生的一笔，继续核对',input:{...input,allow_duplicate:true}}]}};
+ const answer={id:id(5),user_message_id:id(6),input:{message:'新发生的一笔',display_text:'新发生的一笔',display_images:[]},attempt:2,plan:{action:'chat',reply:'这笔是新发生的还是同一笔？',drafts:[]}};
+ c.outputs=[source,answer];c.continuations=[{message_id:id(6),output_id:source.id,kind:'answer',hash:'abc'}];
+ const restored=state.restoreAssistantAgentCheckpoint(c);assert.equal(restored.status,'interrupted');assert.equal(restored.awaiting_answer,false);assert.equal(restored.event_resolutions[0].input.allow_duplicate,true);assert.equal(restored.event_resolutions[0].operation_id,'gift');assert.equal(restored.operations[0].status,'pending');assert.equal(c.status,'needs_input');
+ for(const text of ['好的','是的','不是新发生的一笔','可能新发生的一笔','这是同一笔']) {c.outputs[1].input.message=text;const ambiguous=state.restoreAssistantAgentCheckpoint(c);assert.equal(ambiguous.status,'needs_input');assert.equal(ambiguous.event_resolutions,undefined);}
+ c.outputs[1].input.message='新发生的一笔';c.outputs[1].plan.reply='这笔新发生的送礼支出属于哪个成员？';const memberQuestion=state.restoreAssistantAgentCheckpoint(c);assert.equal(memberQuestion.status,'needs_input');assert.equal(memberQuestion.event_resolutions[0].pending,false);
+ c.tool_results[0].operation_id='other';assert.equal(state.restoreAssistantAgentCheckpoint(c).event_resolutions,undefined);
 });

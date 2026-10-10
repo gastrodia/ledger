@@ -50,7 +50,12 @@ const schemas = {
 };
 export function validateLedgerCommand(raw: unknown): LedgerCommand {
   const parsed = commandSchema.safeParse(raw);
-  if (!parsed.success) throw new Error("操作条件不完整，请补充目标、日期或要修改的内容。");
+  if (!parsed.success) {
+    // Report schema paths, not raw account values, so the next model step can
+    // repair its tool call instead of asking the user to debug missing fields.
+    const fields = parsed.error.issues.slice(0, 12).map(issue => `${issue.path.join(".") || "command"} (${issue.code})`).join("、");
+    throw new Error(`操作条件不完整：工具参数格式无效，请按command schema修正这些字段：${fields}。无用筛选值填写null，不新增用户未授权的目标。`);
+  }
   const c = parsed.data;
   if (new Set(c.ids).size !== c.ids.length || (c.filter.start_date && c.filter.end_date && c.filter.start_date > c.filter.end_date)) throw new Error("操作范围无效。");
   if (c.operation === "reorder" && c.resource !== "categories") throw new Error("当前只有分类支持自定义排序。");

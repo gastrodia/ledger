@@ -1,0 +1,33 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- verify real confirmation SQL in an isolated database. */
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
+const {NextResponse}=require('next/server'),crypto=require('node:crypto');
+const PGlite=process.env.LEDGER_TASKS_PGLITE_MODULE?require(process.env.LEDGER_TASKS_PGLITE_MODULE).PGlite:null;
+const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
+test('SQL confirmed exclusions bind to original draft IDs and replay without another transaction',{skip:!PGlite},async t=>{
+  const db=new PGlite();t.after(()=>db.close());
+  await db.exec(`CREATE TABLE users(id varchar(36) PRIMARY KEY);INSERT INTO users VALUES('owner');
+    CREATE TABLE categories(id varchar(36),user_id varchar(36),type text);INSERT INTO categories VALUES('${id(1)}','owner','expense');
+    CREATE TABLE members(id varchar(36),user_id varchar(36));INSERT INTO members VALUES('${id(2)}','owner');
+    CREATE TABLE transactions(id varchar(36),user_id varchar(36),type text,amount numeric,category_id varchar(36),member_id varchar(36),transaction_date timestamp,description text,created_at timestamp,updated_at timestamp);
+    CREATE TABLE assistant_tasks(id varchar(36),user_id varchar(36),agent_checkpoint jsonb);`);
+  const checkpoint={pending_batch:{batch_id:id(3),draft_ids:[id(4),id(5)]}};
+  await db.query("INSERT INTO assistant_tasks VALUES($1,'owner',$2::jsonb)",[id(6),JSON.stringify(checkpoint)]);
+  const query=(text,values=[])=>({text,values,then:(yes,no)=>db.query(text,values).then(r=>r.rows).then(yes,no)});
+  const sql=(parts,...values)=>query(parts.map((part,i)=>part+(i<values.length?`$${i+1}`:'')).join(''),values);sql.query=query;
+  sql.transaction=async statements=>db.transaction(async tx=>{const rows=[];for(const statement of statements)rows.push((await tx.query(statement.text,statement.values)).rows);return rows;});
+  const cache=new Map();let owner='owner';
+  const deps={'next/server':{NextResponse},'node:crypto':crypto,'@/lib/db':{sql},'@/lib/auth':{getSession:async()=>({userId:owner})},'zod':require('zod')};
+  const load=file=>{if(cache.has(file))return cache.get(file);const exports={};cache.set(file,exports);vm.runInNewContext(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports,Error,SyntaxError,Date,JSON,Number,Set,require:name=>name in deps?deps[name]:name.startsWith('@/')?load(name.slice(2)+'.ts'):require(name)});return exports;};
+  const route=load('app/api/assistant/confirm/route.ts');
+  const draft={id:id(4),type:'expense',amount_cents:390,category_id:id(1),member_id:id(2),transaction_date:'2026-10-10',description:'早餐',payment_method:null,note:''};
+  const body={batch_id:id(3),task_id:id(6),drafts:[draft],excluded_draft_ids:[id(5)]};
+  const post=body=>route.POST({json:async()=>body});
+  assert.equal((await post({...body,excluded_draft_ids:[id(9)]})).status,409);
+  const first=await post(body);assert.equal(first.status,200);assert.equal((await first.json()).count,1);
+  const replay=await post(body);assert.equal(replay.status,200);assert.equal((await replay.json()).replayed,true);
+  assert.equal((await post({...body,excluded_draft_ids:[]})).status,409);
+  const stored=(await db.query('SELECT excluded_draft_ids,draft_transactions FROM assistant_batches')).rows[0];
+  assert.deepEqual(stored.excluded_draft_ids,[id(5)]);assert.equal(stored.draft_transactions.length,1);
+  assert.equal((await db.query('SELECT COUNT(*)::int count FROM transactions')).rows[0].count,1);
+  owner='other';assert.equal((await post(body)).status,409);
+});

@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -24,4 +25,9 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+const configForPhase = (phase: string): NextConfig => ({
+  ...nextConfig,
+  // Production builds must not replace files used by a running dev server.
+  distDir: phase === PHASE_DEVELOPMENT_SERVER ? ".next-dev" : ".next",
+});
+export default configForPhase;

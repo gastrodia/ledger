@@ -37,7 +37,7 @@ import { savedDraftSnapshot, undoRecoverySnapshots, validateUndoResult, type Ass
 import { MAX_AUDIO_SECONDS, recordingToWav } from "@/lib/assistant-audio";
 import { startSpeechRecording, type SpeechPhase, type SpeechRecording } from "@/lib/assistant-speech";
 import { appendSpeechTranscript } from "@/lib/assistant-speech-transcript";
-import { assistantAgentWaiting, assistantAgentActionSettled, resumeAssistantAgentTask, cancelAssistantTaskCheckpoint, restoreAssistantAgent, restoreAssistantApprovalHistory, restoreAssistantTaskHistory, syncSavedTransactionCards, completeAssistantMemberSelection, relocateAssistantDraftCard, approveAssistantDraftRemoval, setAssistantDraftRemoval, migrateAssistantDraftRemovalPreviews, toggleAssistantDraftRemoval, assistantDraftMatchTarget, resolveAssistantDraftMatch, assistantMemberChoiceTarget as memberChoiceTarget, assistantImageProgressText, assistantTaskRetryLabel, assistantTaskJson, AssistantTaskRequestError, mergeAssistantTasks, reconcileAssistantTaskSnapshots, subscribeAssistantTasks, type EditableAssistantDraft as EditableDraft, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
+import { assistantTaskAnswerable, assistantAgentWaiting, assistantAgentActionSettled, resumeAssistantAgentTask, cancelAssistantTaskCheckpoint, restoreAssistantAgent, restoreAssistantApprovalHistory, restoreAssistantTaskHistory, syncSavedTransactionCards, completeAssistantMemberSelection, relocateAssistantDraftCard, approveAssistantDraftRemoval, setAssistantDraftRemoval, migrateAssistantDraftRemovalPreviews, toggleAssistantDraftRemoval, assistantDraftMatchTarget, resolveAssistantDraftMatch, assistantMemberChoiceTarget as memberChoiceTarget, assistantImageProgressText, assistantTaskRetryLabel, assistantTaskJson, AssistantTaskRequestError, mergeAssistantTasks, reconcileAssistantTaskSnapshots, subscribeAssistantTasks, type EditableAssistantDraft as EditableDraft, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
 import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask, type AssistantTaskRequest } from "@/lib/assistant-task-types";
 import { assistantDraftSort, nextAssistantDraftSort, sortedAssistantDrafts } from "@/lib/assistant-draft-sort";
 import { appendAssistantImages, clipboardImages, restoreAssistantImages, restoreAssistantImportSummary, prepareAssistantMessageImage, MAX_ASSISTANT_IMAGES, MAX_ASSISTANT_IMAGE_LENGTH, MAX_ASSISTANT_MESSAGE_IMAGE_LENGTH, type AssistantImage } from "@/lib/assistant-images";
@@ -403,7 +403,7 @@ export default function AssistantPage() {
       ? current?.text === pending.text && current.phase === pending.phase && current.image_progress === pending.image_progress
         ? current : { text: pending.text, phase: pending.phase, image_progress: pending.image_progress }
       : null);
-    if (outboxRef.current && valid.some(task => task.id === outboxRef.current!.id)) { outboxRef.current = null; setOutbox(null); }
+    if (outboxRef.current && valid.some(task => task.user_message_id === outboxRef.current!.user_message_id && task.conversation_id === outboxRef.current!.conversation_id || task.id === outboxRef.current!.id && !outboxRef.current!.continuation)) { outboxRef.current = null; setOutbox(null); }
     setTaskConnectionError(""); setTasksReady(true);
   }
 
@@ -459,6 +459,7 @@ export default function AssistantPage() {
       try {
         const { task } = await assistantTaskJson<{ task: AssistantTask }>(await fetch(`/api/assistant/tasks/${request.id}`, { cache: "no-store", signal: controller.signal }));
         if (!currentConversation(epoch) || controller.signal.aborted) return;
+        if (request.continuation && task.user_message_id !== request.user_message_id) throw new Error("回答发送结果尚未确认，请重试原回答。");
         acceptTasks([task]);
       } catch (lookupError) {
         if (!currentConversation(epoch) || controller.signal.aborted) return;
@@ -475,7 +476,7 @@ export default function AssistantPage() {
 
   async function continueAgentCheckpoint(task: AssistantTask, settled?: AssistantActionResult) {
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
-    if (!assistantAgentWaiting(task) || !agent || messagesRef.current.some(m => m.id === task.id && (assistantCardTarget(m) || m.replacementBlocked))) return;
+    if (!assistantAgentWaiting(task) || !agent || messagesRef.current.some(m => m.id === (agent.output_id || task.id) && (assistantCardTarget(m) || m.replacementBlocked))) return;
     const key = `${task.id}:${task.attempt}:${agent.pending_action_id || agent.pending_batch_id}`;
     if (resumingAgents.current.has(key)) return;
     resumingAgents.current.add(key);
@@ -493,7 +494,7 @@ export default function AssistantPage() {
       const result = settled || await responseJson(await fetch(`/api/assistant/actions/${agent.pending_action_id}`, { cache: "no-store", signal: controller.signal })) as AssistantActionResult;
       if (!currentConversation(epoch) || controller.signal.aborted) return;
       if (result.id !== agent.pending_action_id || (!assistantAgentActionSettled(result) && !result.replacement_approval)) return;
-      patchMessage(task.id, result.replacement_approval
+      patchMessage(agent.output_id || task.id, result.replacement_approval
         ? { approval: result.replacement_approval, actionResult: { ...result, status: "pending" }, actionPreview: result.replacement_approval.preview, text: result.replacement_approval.summary, error: undefined }
         : { actionResult: result, actionPreview: result.preview || task.result?.approval?.preview, approval: undefined, error: undefined });
       // The server verifies the stored action outcome before continuing this ID.
@@ -503,18 +504,50 @@ export default function AssistantPage() {
         || restoreAssistantAgent(resumed.agent || resumed.result?.agent)?.pending_action_id !== agent.pending_action_id;
       acceptTasks([resumed]);
     } catch (error) {
-      if (currentConversation(epoch) && !controller.signal.aborted) patchMessage(task.id, { error: error instanceof Error ? error.message : "任务暂未继续，正在核对原操作结果。" });
+      if (currentConversation(epoch) && !controller.signal.aborted) patchMessage(agent.output_id || task.id, { error: error instanceof Error ? error.message : "任务暂未继续，正在核对原操作结果。" });
     } finally {
       resumingAgents.current.delete(key); finishController(controller);
       if (dispatched && currentConversation(epoch)) taskSubscription.current?.refresh();
     }
   }
 
+  async function deliverAgentCheckpoint(task: AssistantTask) {
+    const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+    const output = messagesRef.current.find(message => message.id === agent?.output_id);
+    if (!agent?.awaiting_delivery || !agent.output_id || !output?.taskApplied || output.error || output.undoChoice || output.clearChoice || output.confirmChoice || output.memberChoice) return;
+    const key = `delivery:${task.id}:${task.attempt}:${agent.output_id}`;
+    if (resumingAgents.current.has(key)) return;
+    resumingAgents.current.add(key);
+    const controller = newController();
+    const epoch = conversationEpoch.current;
+    const latest = [...messagesRef.current].reverse().find(message => message.drafts?.length);
+    const batchRows = latest?.drafts?.filter(row => !row.ignored && !row.softRemoved).map(({ amount, ...row }) => ({ ...row, amount_cents: Math.round(Number(amount) * 100) })) || [];
+    try {
+      const ok = !output.error && !/状态已变化|本次未|未修改|未删除|无法|失败/.test(output.text);
+      const request: AssistantTaskRequest = { id: task.id, conversation_id: task.conversation_id, user_message_id: task.user_message_id,
+        message: "继续原任务", display_text: "继续原任务", today: localCalendarDate(),
+        continuation: { attempt: task.attempt, output_id: agent.output_id, kind: "delivery", ok },
+        draft_batch: latest?.status === "pending" && batchRows.length ? { batch_id: latest.id, status: "pending", drafts: batchRows } : null,
+        saved_batch: latest?.status === "saved" && batchRows.length ? { batch_id: latest.id, status: "saved", drafts: batchRows } : null,
+        record_contexts: messagesRef.current.flatMap(message => message.ledgerContext ? [message.ledgerContext] : []).slice(-3),
+      };
+      const { task: resumed } = await assistantTaskJson<{ task: AssistantTask }>(await fetch("/api/assistant/tasks", {
+        method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal, body: JSON.stringify(request),
+      }));
+      if (currentConversation(epoch) && !controller.signal.aborted) { acceptTasks([resumed]); taskSubscription.current?.refresh(); }
+    } catch (error) {
+      if (currentConversation(epoch) && !controller.signal.aborted) patchMessage(agent.output_id, { error: error instanceof Error ? error.message : "任务接续失败，请重试。" });
+    } finally { resumingAgents.current.delete(key); finishController(controller); }
+  }
+
   const recoverAgentCheckpoints = useEffectEvent(() => {
     if (saveLock.current || sendLock.current || actionPendingRef.current) return;
-    for (const task of knownTasks.current.filter(assistantAgentWaiting)) void continueAgentCheckpoint(task);
+    for (const task of knownTasks.current) {
+      if (assistantAgentWaiting(task)) void continueAgentCheckpoint(task);
+      else if (task.status === "succeeded" && restoreAssistantAgent(task.agent || task.result?.agent)?.awaiting_delivery) void deliverAgentCheckpoint(task);
+    }
   });
-  useEffect(() => { recoverAgentCheckpoints(); }, [tasks]);
+  useEffect(() => { recoverAgentCheckpoints(); }, [tasks, messages]);
 
   async function decideConversationAction(message: Message, decision: "approve" | "cancel", read = false, userReply?: Message) {
     if (actionPendingRef.current || saveLock.current || sendLock.current || busy || messagesRef.current.some(m => m.id === message.id && assistantCardTarget(m))) return;
@@ -556,7 +589,9 @@ export default function AssistantPage() {
       return;
     }
     if (decision === "cancel") {
-      patchMessage(message.id, { confirmChoice: undefined, removeChoice: undefined, clearChoice: undefined, undoChoice: undefined, replyKind: "result", text: "已取消本次操作，未执行。" }); return;
+      patchMessage(message.id, { confirmChoice: undefined, removeChoice: undefined, clearChoice: undefined, undoChoice: undefined, replyKind: "result", text: "已取消本次操作，未执行。" });
+      if (message.agent?.operations && message.taskId) await stopTask(message.taskId);
+      return;
     }
     if (message.removeChoice) {
       setMessages(current => approveAssistantDraftRemoval(current, message.id, members)); return;
@@ -607,6 +642,14 @@ export default function AssistantPage() {
     const sentImages = override ? [] : images;
     const text = originalInput.trim() || (sentImages.length ? "请按图片顺序识别截图里的收支，衔接重叠账目，生成待确认账单。" : "");
     if (!text || actionPendingRef.current || busy || outboxRef.current || sendLock.current || saveLock.current || draft.hasDraft || draft.status === "checking" || configured === null || !conversationId) return;
+    const answerCandidates = [...knownTasks.current].reverse().filter(assistantTaskAnswerable);
+    const answering = !sentImages.length
+      ? eventCardId ? answerCandidates.find(task => restoreAssistantAgent(task.agent || task.result?.agent)?.output_id === eventCardId) : answerCandidates[0]
+      : undefined;
+    if (answering && approvalDecision(text, false) === "cancel") {
+      setInput(""); setMessages(current => [...current, { id: crypto.randomUUID(), role: "user", text, localHandled: true }]);
+      await stopTask(answering.id); return;
+    }
     const pendingApprovals = messages.filter(m => !assistantCardTarget(m) && (m.approval || m.confirmChoice || m.removeChoice || m.clearChoice || m.undoChoice));
     const pendingApproval = pendingApprovals.at(-1);
     // A reviewed draft operation and its source card represent one choice.
@@ -625,7 +668,7 @@ export default function AssistantPage() {
       else setMessages(current => [...current, { id: crypto.randomUUID(), role: "assistant", text: "当前没有已提交的管理操作。入账或撤销结果请查看对应账单卡片。" }]);
       return;
     }
-    const decision = !sentImages.length ? approvalDecision(text, !!pendingApproval || pendingCount > 1) : null;
+    const decision = !sentImages.length && !answering ? approvalDecision(text, !!pendingApproval || pendingCount > 1) : null;
     if (decision && pendingCount > 1) {
       setInput("");
       setMessages(current => [...current, { id: crypto.randomUUID(), role: "user", text, localHandled: true }, { id: crypto.randomUUID(), role: "assistant", text: "当前有多个待处理方案或账单，请在要操作的卡片上点击确认或取消；本次未执行任何操作。" }]);
@@ -644,7 +687,7 @@ export default function AssistantPage() {
       return;
     }
     if (configured === false) { toast.error("请先在服务端配置百炼 API Key。"); return; }
-    if (messages.length >= 78) { toast.info("当前对话已较长，请先确认待处理账单，再清空对话。"); return; }
+    if (messages.length >= 78 && !answering) { toast.info("当前对话已较长，请先确认待处理账单，再清空对话。"); return; }
     const latestBatch = draftBatchId ? messages.find(m => m.id === draftBatchId) : [...messages].reverse().find(m => m.drafts?.length);
     if (draftBatchId && (!latestBatch || latestBatch.status !== "pending" || latestBatch.commit || !latestBatch.drafts?.some(d => !d.ignored && !d.softRemoved))) {
       toast.info("这组草稿已变化，请核对最新卡片。"); return;
@@ -660,10 +703,10 @@ export default function AssistantPage() {
       // Sending another request must not cancel those unrelated operations.
       const previews = sentImages.length ? await Promise.all(sentImages.map(image => prepareAssistantMessageImage(image, Math.floor(MAX_ASSISTANT_MESSAGE_IMAGE_LENGTH / sentImages.length)))) : [];
       if (!currentConversation(epoch)) return;
-      const id = crypto.randomUUID();
+      const id = answering?.id || crypto.randomUUID();
       const userMessage: Message = { id: crypto.randomUUID(), role: "user", incomplete: "interrupted", taskId: id, taskStatus: "submitting",
         ...(eventCardId ? {updatesCardId:eventCardId} : {}), text: originalInput.trim() ? text : sentImages.length ? `识别这 ${sentImages.length} 张截图` : text, images: previews };
-      const request: AssistantTaskRequest = { id, conversation_id: conversationId, user_message_id: userMessage.id, message: text,
+      const request: AssistantTaskRequest = { id, ...(answering ? { continuation: { attempt: answering.attempt, output_id: restoreAssistantAgent(answering.agent || answering.result?.agent)!.output_id!, kind: "answer" as const } } : {}), conversation_id: conversationId, user_message_id: userMessage.id, message: text,
         display_text: userMessage.text, display_images: previews, ...(sentImages.length ? { images: sentImages.map(image => image.data) } : {}), today: localCalendarDate(), draft_batch: draftBatch, saved_batch: savedBatch,
         ...(eventSelection ? { event_selection: eventSelection } : {}),
         ...([...messages].reverse().find(m => m.eventContext)?.eventContext ? { event_context: [...messages].reverse().find(m => m.eventContext)!.eventContext } : {}),
@@ -714,7 +757,13 @@ export default function AssistantPage() {
         return;
       }
       if (!currentConversation(epoch) || controller.signal.aborted) return;
-      if (task.status === "failed" || task.status === "cancelled") {
+      const pendingDelivery = restoreAssistantAgent(task.agent || task.result?.agent);
+      if (pendingDelivery?.awaiting_delivery && pendingDelivery.output_id) {
+        patchMessage(pendingDelivery.output_id, { error: undefined });
+        messagesRef.current = messagesRef.current.map(item => item.id === pendingDelivery.output_id ? { ...item, error: undefined } : item);
+        await deliverAgentCheckpoint(task); return;
+      }
+      if (task.status === "failed" || task.status === "cancelled" || pendingDelivery?.status === "interrupted" || pendingDelivery?.status === "stopped" && pendingDelivery.awaiting_answer) {
         ({ task } = await assistantTaskJson<{ task: AssistantTask }>(await fetch(`/api/assistant/tasks/${taskId}`, {
           method: "PATCH", headers: { "Content-Type": "application/json" }, signal: controller.signal, body: JSON.stringify({ action: "retry", attempt: task.attempt }),
         })));
@@ -771,6 +820,24 @@ export default function AssistantPage() {
     const target = memberChoiceTarget(choice, messages);
     if (!choice || !target) { toast.error("待修改的账目已变化，请重新选择。"); return; }
     const update = { ...choice, member_id: member.id };
+    const pendingTask = knownTasks.current.find(task => {
+      const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+      return task.id === question.taskId && assistantTaskAnswerable(task) && agent?.awaiting_answer && agent.output_id === question.id;
+    });
+    if (pendingTask) {
+      const answer: Message = { id: crypto.randomUUID(), role: "user", text: `这 ${target.drafts.length} 笔账目的成员选「${member.name}」`, taskId: pendingTask.id, taskStatus: "submitting" };
+      const request: AssistantTaskRequest = { id: pendingTask.id, conversation_id: pendingTask.conversation_id, user_message_id: answer.id,
+        message: answer.text, display_text: answer.text, today: localCalendarDate(),
+        continuation: { kind: "answer", attempt: pendingTask.attempt, output_id: question.id, selected_member_id: member.id },
+        draft_batch: { batch_id: target.message.id, status: "pending", drafts: sortedAssistantDrafts(target.message.drafts!, target.message.draftSort).filter(row => !row.ignored && !row.softRemoved).map(({ amount, ...row }) => ({ ...row, amount_cents: Math.round(Number(amount) * 100) })) },
+      };
+      const next = [...messagesRef.current, answer];
+      const snapshot: Conversation = { conversationId: conversationId || undefined, messages: next, input, images, confirmations: confirmationsRef.current, undos: undosRef.current, outbox: request };
+      const persisted = draft.persist(snapshot);
+      if (!persisted && !draft.persist({ ...snapshot, outbox: null })) { toast.error("本机暂时无法保存回答，请稍后重新选择。"); return; }
+      outboxRef.current = request; setOutbox(request); setOutboxPersistable(persisted); setMessages(next);
+      await submitTask(request); return;
+    }
     try { applyDraftMemberUpdate(target.message.drafts!, update, members); }
     catch (error) { toast.error(error instanceof Error ? error.message : "成员选择无效。"); return; }
     sendLock.current = true; followReply.current = true; setSending(true);
@@ -834,7 +901,7 @@ export default function AssistantPage() {
     setConfirmingIds(current => [...current, message.id]);
     try {
       const response = await fetch("/api/assistant/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-        body: JSON.stringify({ batch_id: message.id, drafts: submitted }) });
+        body: JSON.stringify({ batch_id: message.id, drafts: submitted, ...(message.agent?.operations && message.taskId ? { task_id: message.taskId, excluded_draft_ids: (message.drafts || []).filter(row => row.softRemoved || row.ignored).map(row => row.id) } : {}) }) });
       const result = await response.json().catch(() => ({}));
       if (!live.current || controller.signal.aborted) return;
       if (!response.ok) {
@@ -1079,8 +1146,9 @@ export default function AssistantPage() {
   const detachedConfirmations = confirmations.filter(c => !messages.some(m => m.id === c.id && m.status === "pending" && m.commit));
   // The provisional reply uses the final task ID and the same message subtree,
   // so finishing a reply updates it in place instead of removing/recreating it.
-  const streamingMessage: Message | null = activeTask && !messages.some(message => message.id === activeTask.id)
-    ? { id: activeTask.id, role: "assistant", text: streamingReply?.text || "", agent: restoreAssistantAgent(activeTask.agent || activeTask.result?.agent), approvalHistory: restoreAssistantApprovalHistory(activeTask.approval_history), process: assistantProcessFromTask(activeTask) } : null;
+  const activeOutputId = activeTask ? restoreAssistantAgent(activeTask.agent || activeTask.result?.agent)?.output_id || activeTask.id : undefined;
+  const streamingMessage: Message | null = activeTask && !messages.some(message => message.id === activeOutputId)
+    ? { id: activeOutputId!, role: "assistant", taskId: activeTask.id, text: streamingReply?.text || "", agent: restoreAssistantAgent(activeTask.agent || activeTask.result?.agent), approvalHistory: restoreAssistantApprovalHistory(activeTask.approval_history), process: assistantProcessFromTask(activeTask) } : null;
   const displayMessages = streamingMessage ? messages.flatMap(message => message.id === activeTask!.user_message_id ? [message, streamingMessage] : [message]) : messages;
   return <DashboardLayout viewport contentClassName="px-0 pb-1.5 md:px-0 md:pb-1.5 lg:px-0 lg:pb-7"><section className="flex h-full min-h-0 w-full flex-col text-foreground [&_*]:motion-reduce:scroll-auto [&_*]:motion-reduce:transition-none" aria-label="AI 记账">
     <div className={cn(contentWidthClass, "shrink-0")}>
@@ -1138,6 +1206,9 @@ export default function AssistantPage() {
         const actionPreview = draftReplyView(message, messages, members, categories) || (message.clearChoice ? { title: "清空当前对话", metrics: [], sections: [], notices: [{ text: message.text, tone: "attention" as const }] } : undefined) || message.actionPreview || message.approval?.preview || (hasAction
           ? message.approval && message.eventContext ? eventActionPreview(message.eventContext.input, message.approval.summary) : summaryActionPreview(message.approval?.summary || message.text)
           : undefined);
+        const visibleApprovalHistory = message.approvalHistory?.filter(entry => entry.approval.id !== (message.approval?.id || message.actionResult?.id)
+          && !message.taskHistory?.some(output => (output.actionResult?.id || output.approval?.id) === entry.approval.id)
+          && !messages.some(other => other.id !== message.id && !assistantCardTarget(other) && (other.approval?.id || other.actionResult?.id) === entry.approval.id));
         const actionControls = (hasAction || pendingPhase) ? <AssistantActionControls pending={pendingPhase} executing={message.actionResult?.status === "executing"} disabled={composerDisabled || messages.some(m => m.cardUpdatedLink === message.id && m.supersededApproval && !m.supersededApproval.settled)}
           approveLabel={message.undoChoice ? `确认撤销 ${message.undoChoice.draft_ids.length} 笔` : message.approval?.preview?.approveLabel} canRead={!!message.approval} onDecide={phase => void decideConversationAction(message, phase === "cancel" ? "cancel" : "approve", phase === "read")}
           error={message.error} resultText={message.actionResult?.status === "pending" ? "尚未执行，等待你的确认。" : message.actionResult?.status === "executing" ? message.actionResult.text : undefined} /> : null;
@@ -1157,15 +1228,14 @@ export default function AssistantPage() {
           error={!hasAction && !message.drafts?.length && !message.incomplete ? message.error : undefined} settled={agentSettled}
           hasPreview={!!actionPreview || !!message.drafts?.length || !!message.eventChoices?.length}
           disabled={!!actionPending || sending || savingId !== null} onStop={() => void stopTask(message.taskId || message.id)}
-          onEdit={() => { setInput(message.agent!.goal); composer.current?.focus(); }} />;
+          onContinue={() => void retryTask(message)} onEdit={() => { setInput(message.agent!.goal); composer.current?.focus(); }} />;
         return <div key={message.id} tabIndex={message.drafts?.length || actionPreview || replyView || message.eventContext ? -1 : undefined} className={cn("mb-5 flex outline-none", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
         <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]", highlightedCard === message.id && "rounded-2xl ring-2 ring-primary/40 ring-offset-2 ring-offset-background")}>
           {message.role === "assistant" && agentRunning && agentStatus}
           {message.role === "assistant" && message.process && !message.agent && <AssistantProcessingDetails process={message.process}
             disconnected={!!taskConnectionError && (message === streamingMessage || message.taskId === activeTaskId)} />}
           {message.role === "assistant" && message.agent && !agentRunning && message.process && <AssistantProcessingDetails process={message.process} quiet />}
-          {message.role === "assistant" && !!message.approvalHistory?.length && <div className="mb-3 space-y-3" aria-label="任务操作记录">{message.approvalHistory.filter(entry => entry.approval.id !== (message.approval?.id || message.actionResult?.id)
-            && !message.taskHistory?.some(output => (output.actionResult?.id || output.approval?.id) === entry.approval.id)).map(entry => <AssistantActionCard key={entry.approval.id}
+          {message.role === "assistant" && !!visibleApprovalHistory?.length && <div className="mb-3 space-y-3" aria-label="任务操作记录">{visibleApprovalHistory.map(entry => <AssistantActionCard key={entry.approval.id}
               preview={entry.approval.preview || summaryActionPreview(entry.approval.summary)} status={entry.result?.status || "executing"} resultText={entry.result?.text.split("\n")[0] || "原操作结果待核对。"} />)}</div>}
           {message.role === "assistant" && !!message.taskHistory?.length && <div className="mb-3 space-y-3" aria-label="任务先前结果">{message.taskHistory.map(output => {
             const preview = output.actionPreview || output.approval?.preview;

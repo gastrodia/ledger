@@ -46,3 +46,28 @@ test('saved cards relocate with stable identities and verified event updates rep
  assert.equal(linkAssistantEventCards([old,latest],latest.id,id(99))[0].cardUpdatedLink,latest.id);
  assert.equal(relocateAssistantCard([{...a,commit:[{}]},later],a.id,later.id)[0].draftCardLink,undefined);
 });
+
+test('member questions remain before the answer when their event card is superseded, including repeated corrections',()=>{
+ for(const text of ['这笔资金流水归属哪个成员？','请选择这笔资金流水的成员']){
+  const a={...event(1),text,eventChoices:[{label:'本人'}]},b=event(2),c=event(3);
+  const answer={id:id(9),role:'user',text:'支出人是「本人」'};
+  const updated=reconcileAssistantCardUpdate([a,answer,b],b.id,answer.text);
+  assert.equal(updated[0].text,text);
+  assert.equal(updated[0].approval,undefined);
+  assert.equal(updated[0].eventChoices,undefined);
+  assert.deepEqual(plain(updated.map(m=>m.id)),[a.id,answer.id,b.id]);
+  const latest=reconcileAssistantCardUpdate([...updated,{id:id(10),role:'user',text:'改成300'},c],c.id,'改成300');
+  assert.equal(latest[0].text,text);
+  assert.equal(latest[0].cardUpdatedLink,c.id);
+  assert.deepEqual(plain(reconcileAssistantCardHistory(plain(latest))),plain(latest));
+ }
+});
+
+test('moving a question card leaves its question at the original location and only one active card',()=>{
+ const a={...event(1),text:'这次实际付款还是估值？'},answer={id:id(9),role:'user',text:'实际付款'};
+ const moved=relocateAssistantCard([a,answer],a.id,answer.id);
+ assert.equal(moved[0].text,a.text);
+ assert.equal(moved[0].cardUpdatedLink,a.id);
+ assert.equal(moved[0].approval,undefined);
+ assert.equal(moved.filter(m=>m.approval).length,1);
+});

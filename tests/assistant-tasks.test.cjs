@@ -58,7 +58,7 @@ function loader(dependencies, globals = {}) {
   return load;
 }
 
-function fixture({ sql, session = { userId: 'owner' }, provider = {} } = {}) {
+function fixture({ sql, session = { userId: 'owner' }, provider = {}, extraDependencies = {} } = {}) {
   const background = [], paidCalls = [];
   const database = sql || (() => assert.fail('invalid requests must not query the database'));
   database.query ||= async () => assert.fail('invalid requests must not query the database');
@@ -66,6 +66,7 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {} } = {}) {
     constructor(status, code) { super('provider failure'); this.status = status; this.code = code; }
   }
   const invoke = fn => async (...args) => { paidCalls.push(args); return fn(...args); };
+  const pendingPlans = new Map();
   const load = loader({
     '@/lib/assistant-task-dispatch': { runAndContinueAssistantTask: async (...args) => { await load('lib/assistant-tasks.ts').runAssistantTask(...args); } },
     'next/server': { NextResponse, after: callback => background.push(callback) },
@@ -75,7 +76,10 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {} } = {}) {
     '@/lib/bailian': {
       BAILIAN_ASSISTANT_MODEL: 'fixture-object', BAILIAN_SUMMARY_MODEL: 'fixture-summary', BailianError,
       bailianConfig: () => ({}), bailianFailure: error => ({ status: error.status || 502, message: 'AI 服务暂时无法连接，请稍后重试。' }),
-      bailianObject: invoke(async (settings, signal) => {
+      bailianObject: async (settings, signal) => {
+        const pending = pendingPlans.get(settings.telemetryId);
+        if (settings.schemaName === 'ledger_agent_step' && pending) { pendingPlans.delete(settings.telemetryId); return pending; }
+        return invoke(async (settings, signal) => {
         if (settings.schemaName !== 'ledger_agent_step') return provider.bailianObject ? provider.bailianObject(settings, signal)
           : settings.schemaName === 'ledger_image_batch' ? imageBatch(settings) : settings.schemaName === 'ledger_image_import' ? imageRecord : record;
         // Preserve the provider promises used by worker concurrency/cancellation
@@ -90,9 +94,16 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {} } = {}) {
         } else output = provider.bailianObject ? await provider.bailianObject(settings, signal)
           : provider.bailianObjectStream ? await provider.bailianObjectStream(settings, () => {}, signal) : record;
         if (output.kind) return output;
-        return output.action === 'query' ? { kind: 'read', tool: 'query', arguments_json: JSON.stringify(output.query), plan_json: null, needs_input: false }
+        const chosen = output.action === 'query' ? { kind: 'read', tool: 'query', arguments_json: JSON.stringify(output.query), plan_json: null, needs_input: false }
           : { kind: 'respond', tool: null, arguments_json: '{}', plan_json: JSON.stringify(output), needs_input: false };
-      }),
+        chosen.operation_id = 'fixture';
+        if (!settings.messages.some(message => message.content.startsWith('账本工具 workflow 的结果'))) {
+          pendingPlans.set(settings.telemetryId, chosen);
+          return {kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'fixture',label:'当前脚本目标',sources:[settings.messages.findLast(message=>message.role==='user'&&!['账本工具','本次服务端','本次请求上下文','服务端核实'].some(prefix=>message.content.startsWith(prefix))).content],action:output.action,effect:['chat','query'].includes(output.action)?'read':['edit','update','remove','navigate'].includes(output.action)?'local':'write',depends_on:[]}]}),plan_json:null,needs_input:false};
+        }
+        return chosen;
+      })(settings, signal);
+      },
       bailianObjectStream: invoke(provider.bailianObjectStream || (async (settings, partial) => {
         const output = settings.schemaName === 'ledger_image_batch' ? imageBatch(settings) : settings.schemaName === 'ledger_image_import' ? imageRecord : record;
         partial(output); return output;
@@ -100,6 +111,7 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {} } = {}) {
       bailianText: invoke(provider.bailianText || (async () => assert.fail('unexpected query summary'))),
       bailianStream: invoke(provider.bailianStream || (async () => assert.fail('unexpected query summary stream'))),
     },
+    ...extraDependencies,
   });
   return { load, tasks: load('lib/assistant-tasks.ts'), background, paidCalls };
 }
@@ -193,6 +205,26 @@ test('malformed JSON and unknown task actions stay visible and never schedule a 
 });
 
 if (PGlite) {
+  test('real PostgreSQL: context failures are identified before model calls and retry preserves the original task', async t => {
+    const f = await databaseFixture(t);
+    await f.tasks.createAssistantTask('owner', body());
+    await f.db.exec('ALTER TABLE categories RENAME COLUMN icon TO unavailable_icon');
+    await f.tasks.runAssistantTask('owner', taskId);
+    const failed = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.error, '读取记账上下文失败，请重新处理。');
+    assert.equal(failed.execution_steps.find(step => step.id === 'context').state, 'failed');
+    assert.equal(f.paidCalls.length, 0);
+    await f.db.exec('ALTER TABLE categories RENAME COLUMN unavailable_icon TO icon');
+    await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
+    await f.tasks.runAssistantTask('owner', taskId);
+    const recovered = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(recovered.id, taskId);
+    assert.equal(recovered.attempt, 2);
+    assert.equal(recovered.status, 'succeeded');
+    assert.equal(recovered.result.action, 'record');
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+  });
   test('real PostgreSQL: identical creation is idempotent, changed content conflicts, and every read is owner scoped', async t => {
     const f = await databaseFixture(t);
     const [first, replay] = await Promise.all([f.tasks.createAssistantTask('owner', body()), f.tasks.createAssistantTask('owner', body())]);
@@ -239,7 +271,7 @@ if (PGlite) {
     const privateState = (await f.db.query('SELECT payload,agent_checkpoint FROM assistant_tasks')).rows[0];
     assert.equal(privateState.payload.message, body().message, 'record goal input is retained until actual batch confirmation');
     assert.equal(privateState.agent_checkpoint.status, 'waiting_approval');
-    assert.equal(privateState.agent_checkpoint.pending_batch.batch_id, taskId);
+    assert.equal(privateState.agent_checkpoint.pending_batch.batch_id, saved.result.agent.output_id);
     assert.equal(privateState.agent_checkpoint.pending_plan.drafts[0].id, saved.result.drafts[0].id);
     assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
     assert.equal(f.statements.some(statement => /(?:INSERT INTO|UPDATE|DELETE FROM) transactions/i.test(statement.text)), false);
@@ -778,15 +810,15 @@ if (PGlite) {
     await started.promise;
     await new Promise(resolve => setTimeout(resolve, 1150));
     const live = await f.tasks.getAssistantTask('owner', taskId);
-    const queryStep = live.execution_steps.find(step => step.id === 'agent_tool_1');
+    const queryStep = live.execution_steps.find(step => step.id === 'agent_tool_2');
     assert.equal(queryStep.state, 'done');
     assert.match(queryStep.details.join(' '), /2026-10-01 至 2026-10-09.*分类：餐饮；成员：本人.*匹配 1 笔/);
-    assert.equal(live.execution_steps.find(step => step.id === 'agent_2').state, 'running');
+    assert.equal(live.execution_steps.find(step => step.id === 'agent_3').state, 'running');
     finish.resolve(); await running;
     const saved = (await f.tasks.listAssistantTasks('owner', conversationId))[0];
-    assert.equal(saved.execution_steps.length, 4);
+    assert.equal(saved.execution_steps.length, 5);
     assert.ok(saved.execution_steps.every(step => step.state === 'done' && step.finishedAt >= step.startedAt));
-    assert.equal(saved.execution_steps.find(step => step.id === 'agent_2').details.some(detail => detail.includes('已生成')), true);
+    assert.equal(saved.execution_steps.find(step => step.id === 'agent_3').details.some(detail => detail.includes('已生成')), true);
     assert.equal((await f.db.query('SELECT COUNT(*)::int AS count FROM transactions')).rows[0].count, 1);
   });
 
@@ -820,4 +852,160 @@ if (PGlite) {
     assert.deepEqual((await f.db.query('SELECT execution_steps FROM assistant_tasks')).rows[0].execution_steps, []);
   });
 
+}
+
+if (PGlite) {
+  test('real PostgreSQL: clarification resumes the original durable agenda once and preserves unanswered items across reload', async t => {
+    const operations = [
+      {id:'gift',label:'小美生日送礼和鞋子',sources:['小美生日送礼500外加一双200的鞋子'],action:'event',effect:'write',depends_on:[]},
+      {id:'breakfast',label:'早餐3.9',sources:['早餐3.9'],action:'record',effect:'write',depends_on:[]},
+    ];
+    const steps = [
+      {kind:'plan',tool:null,arguments_json:JSON.stringify({operations}),plan_json:null,operation_id:null},
+      {kind:'respond',tool:null,arguments_json:'{}',plan_json:JSON.stringify({...chat,reply:'鞋子的200元是实际买鞋付款还是估值？'}),operation_id:'gift',needs_input:true},
+      {kind:'respond',tool:null,arguments_json:'{}',plan_json:JSON.stringify({...chat,reply:'已经明确是估值；还需要选所属成员。'}),operation_id:'gift',needs_input:true},
+    ];
+    const f = await databaseFixture(t,{provider:{bailianObject:async()=>steps.shift()}});
+    await f.tasks.createAssistantTask('owner',body({message:'早餐3.9，小美生日送礼500外加一双200的鞋子'}));
+    await f.tasks.runAssistantTask('owner',taskId);
+    const question=await f.tasks.getAssistantTask('owner',taskId,true);
+    assert.equal(question.agent.awaiting_answer,true);assert.equal(question.agent.operations.length,2);
+    const original=(await f.db.query('SELECT payload FROM assistant_tasks')).rows[0].payload;
+    assert.equal(original.message,'早餐3.9，小美生日送礼500外加一双200的鞋子');
+    const answer=body({user_message_id:id(80),today:'2026-10-11',message:'200只是估值，鞋子以前买的',display_text:'200只是估值，鞋子以前买的',continuation:{attempt:1,output_id:question.agent.output_id,kind:'answer'}});
+    const resumed=await f.tasks.createAssistantTask('owner',answer);
+    const replay=await f.tasks.createAssistantTask('owner',answer);
+    assert.equal(resumed.id,taskId);assert.equal(resumed.attempt,2);assert.equal(replay.attempt,2);
+    assert.equal((await f.db.query('SELECT payload FROM assistant_tasks')).rows[0].payload.today, original.today, 'a later answer cannot move the original goal date');
+    await assert.rejects(f.tasks.createAssistantTask('owner',{...answer,user_message_id:id(81),message:'是新买的',display_text:'是新买的'}),error=>error.status===409);
+    await assert.rejects(f.tasks.createAssistantTask('foreign',answer),error=>error.status===404);
+    await f.tasks.runAssistantTask('owner',taskId);
+    const next=await f.tasks.getAssistantTask('owner',taskId,true);
+    assert.equal(next.user_message_id,id(80));assert.equal(next.input.display_text,answer.display_text);
+    assert.equal(next.output_history.length,1);assert.equal(next.output_history[0].result.reply,question.result.reply);
+    assert.equal(next.agent.operations[1].status,'pending');assert.notEqual(next.agent.output_id,question.agent.output_id);
+    const rows=(await f.db.query('SELECT * FROM assistant_tasks')).rows;assert.equal(rows.length,1);
+    assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+    assert.ok(rows[0].agent_checkpoint.messages.some(message=>message.content.includes(answer.message)));
+    await f.tasks.cancelConversationTasks('owner',conversationId);
+    await assert.rejects(f.tasks.createAssistantTask('owner',{...answer,continuation:{...answer.continuation,attempt:2,output_id:next.agent.output_id}}),error=>error.status===409);
+  });
+}
+
+if(PGlite)test('real PostgreSQL: member picker answers remain in the original goal and validate the selected member',async t=>{
+ const batch={batch_id:id(70),status:'pending',drafts:[{...draft,member_id:null}]};
+ const update=member=>({kind:'respond',tool:null,operation_id:'member',arguments_json:'{}',plan_json:JSON.stringify({action:'update',reply:'选人员',drafts:[],query:null,update:{batch_id:batch.batch_id,draft_ids:[draft.id],member_id:member}}),needs_input:member===null});
+ const steps=[{kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'member',label:'选择草稿成员',action:'update',effect:'local',depends_on:[],sources:['修改这笔的支出人']},{id:'stats',label:'查询本月',action:'query',effect:'read',depends_on:['member'],sources:['然后查询本月支出']}]}),plan_json:null},update(null),update(memberId)];
+ const f=await databaseFixture(t,{provider:{bailianObject:async()=>steps.shift()}});
+ await f.tasks.createAssistantTask('owner',body({message:'修改这笔的支出人，然后查询本月支出',draft_batch:batch}));await f.tasks.runAssistantTask('owner',taskId);
+ const question=await f.tasks.getAssistantTask('owner',taskId);assert.equal(question.agent.awaiting_answer,true);
+ const answer=body({user_message_id:id(80),message:'选本人',display_text:'选本人',draft_batch:batch,continuation:{attempt:1,output_id:question.agent.output_id,kind:'answer',selected_member_id:id(99)}});
+ await assert.rejects(f.tasks.createAssistantTask('owner',answer),error=>error.status===400);
+ const valid={...answer,continuation:{...answer.continuation,selected_member_id:memberId}};
+ const queued=await f.tasks.createAssistantTask('owner',valid);assert.equal(queued.id,taskId);assert.equal(queued.attempt,2);
+ await f.tasks.runAssistantTask('owner',taskId);const selected=await f.tasks.getAssistantTask('owner',taskId);
+ assert.equal(selected.result.update.member_id,memberId);assert.equal(selected.agent.awaiting_delivery,true);assert.equal(selected.agent.operations[1].status,'pending');
+ assert.equal((await f.db.query('SELECT COUNT(*)::int count FROM transactions')).rows[0].count,0);
+});
+
+if (PGlite) {
+ test('real PostgreSQL: agent waves requeue with a fenced token and preserve reads through continuation replay', async t => {
+  const query={scope:'daily',start_date:'2026-10-01',end_date:'2026-10-10',type:null,category_id:null,member_id:null,keyword:null};
+  const steps=[{kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'stats',label:'查询统计',sources:['查询统计'],action:'query',effect:'read',depends_on:[]}]}),plan_json:null},
+    ...Array(7).fill({kind:'read',tool:'query',operation_id:'stats',arguments_json:JSON.stringify(query),plan_json:null}),
+    {kind:'respond',tool:null,operation_id:'stats',arguments_json:'{}',plan_json:JSON.stringify(chat)}];
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>steps.shift()}});
+  await f.tasks.createAssistantTask('owner',body({message:'查询统计'}));
+  const wave=await f.tasks.runAssistantTask('owner',taskId);assert.ok(wave);
+  const queued=await f.tasks.getAssistantTask('owner',taskId);assert.equal(queued.status,'queued');assert.equal(queued.result,null);assert.equal(queued.agent.awaiting_answer,undefined);
+  assert.equal((await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0].agent_checkpoint.tool_results.filter(t=>t.name==='query').length,7);
+  await f.tasks.runAssistantTask('owner',taskId,wave);assert.equal(await f.tasks.runAssistantTask('owner',taskId,wave),null);
+  const done=await f.tasks.getAssistantTask('owner',taskId);assert.equal(done.status,'succeeded');assert.equal(done.agent.status,'completed');assert.equal(done.attempt,1);
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
+ test('real PostgreSQL: technical interruption retries once without an answer and retains the original agenda', async t => {
+  const steps=[{kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'stats',label:'查询统计',sources:['查询统计'],action:'query',effect:'read',depends_on:[]}]}),plan_json:null},
+    ...Array(3).fill({kind:'respond',tool:null,operation_id:'unknown',arguments_json:'{}',plan_json:JSON.stringify(chat)}),
+    {kind:'respond',tool:null,operation_id:'stats',arguments_json:'{}',plan_json:JSON.stringify(chat)}];
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>steps.shift()}});
+  await f.tasks.createAssistantTask('owner',body({message:'查询统计'}));await f.tasks.runAssistantTask('owner',taskId);
+  const interrupted=await f.tasks.getAssistantTask('owner',taskId);assert.equal(interrupted.agent.status,'interrupted');assert.equal(interrupted.agent.awaiting_answer,undefined);
+  await assert.rejects(f.tasks.changeAssistantTask('foreign',taskId,'retry',1),e=>e.status===404);
+  const retries=await Promise.all([f.tasks.changeAssistantTask('owner',taskId,'retry',1),f.tasks.changeAssistantTask('owner',taskId,'retry',1)]);
+  assert.ok(retries.every(task=>task.attempt===2));await f.tasks.runAssistantTask('owner',taskId);
+  const done=await f.tasks.getAssistantTask('owner',taskId);assert.equal(done.agent.status,'completed');assert.equal(done.agent.goal,'查询统计');assert.equal(done.output_history.length,1);
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
+}
+
+if(PGlite) {
+ test('real PostgreSQL: malformed model decisions recover within the same attempt and preserve the original agenda',async t=>{
+  const steps=[{kind:'plan',operation_id:null,tool:null,arguments_json:JSON.stringify({operations:[{id:'gift',label:'送礼',sources:['小美生日送礼500元'],action:'event',effect:'write',depends_on:[]}]}),plan_json:null},
+   {kind:'respond',operation_id:'错误编号',tool:null,arguments_json:'{}',plan_json:JSON.stringify(chat)},
+   {kind:'respond',operation_id:'gift',tool:null,arguments_json:'{}',plan_json:JSON.stringify({...chat,reply:'这笔支出属于哪个成员？'}),needs_input:true}];
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>steps.shift()}});
+  await f.tasks.createAssistantTask('owner',body({message:'小美生日送礼500元'}));await f.tasks.runAssistantTask('owner',taskId);
+  const recovered=await f.tasks.getAssistantTask('owner',taskId);assert.equal(recovered.status,'succeeded');assert.equal(recovered.error,null);assert.equal(recovered.attempt,1);assert.equal(recovered.agent.awaiting_answer,true);assert.equal(recovered.agent.operations[0].status,'needs_input');
+  assert.equal(recovered.result.reply,'这笔支出属于哪个成员？');assert.ok(recovered.execution_steps.some(step=>step.id==='agent_2'&&step.state==='failed'));
+  const row=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0];assert.equal(row.agent_checkpoint.outputs.length,1);assert.equal(row.agent_checkpoint.tool_results.filter(t=>t.name==='validation_error').length,1);
+  assert.equal(await f.tasks.runAssistantTask('owner',taskId),null);assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
+}
+
+if(PGlite) {
+ test('real PostgreSQL: a local agent exception is not misreported as an AI network outage',async t=>{
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>{throw new Error('private internal detail');}}});
+  await f.tasks.createAssistantTask('owner',body({message:'早餐3.9元'}));await f.tasks.runAssistantTask('owner',taskId);
+  const failed=await f.tasks.getAssistantTask('owner',taskId);assert.equal(failed.status,'failed');assert.equal(failed.error,'AI 任务处理出现异常，请重新处理。');assert.equal(JSON.stringify(failed).includes('private internal detail'),false);
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
+}
+
+if(PGlite) {
+ test('real PostgreSQL: offered event choices persist once and bypass model reinterpretation without authorizing writes',async t=>{
+  const event={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:false};
+  let models=0;const events=[];
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>{models++;return models===1?{kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],sources:['小美生日送礼500元']}]}),plan_json:null}:{kind:'preview',tool:'event',operation_id:'gift',arguments_json:JSON.stringify(event),plan_json:null};}},extraDependencies:{
+   '@/lib/assistant-command-server':{prepareAssistantAgentPreview:async(_user,_conversation,_goal,_fp,_signal,work)=>work()},
+   '@/lib/ledger-event-server':{prepareLedgerEvent:async(_user,_conversation,input)=>{events.push(input);return input.allow_duplicate?{reply:'请核对后确认',approval:{id:id(90),summary:'送礼',count:1,expires_at:null},event_context:{status:'pending',event_id:null,input},event_choices:[]}:{reply:'发现已登记事项，请核对是不是已经记过',event_context:{status:'pending',event_id:null,input},event_choices:[{label:'这是另外新发生的一笔，继续核对',input:{...input,allow_duplicate:true}}]};}}
+  }});
+  await f.tasks.createAssistantTask('owner',body({message:'小美生日送礼500元'}));await f.tasks.runAssistantTask('owner',taskId);
+  const question=await f.tasks.getAssistantTask('owner',taskId);assert.equal(question.agent.awaiting_answer,true);
+  const selected=question.result.event_choices[0].input;
+  const answer=body({user_message_id:id(80),message:'这是另外新发生的一笔，继续核对',display_text:'这是另外新发生的一笔，继续核对',event_selection:selected,continuation:{kind:'answer',attempt:1,output_id:question.agent.output_id}});
+  await assert.rejects(f.tasks.createAssistantTask('owner',{...answer,event_selection:{...selected,amount_cents:60000}}),e=>e.status===409);
+  const accepted=await f.tasks.createAssistantTask('owner',answer);assert.equal(accepted.attempt,2);assert.equal((await f.tasks.createAssistantTask('owner',answer)).attempt,2);
+  await f.tasks.runAssistantTask('owner',taskId);const review=await f.tasks.getAssistantTask('owner',taskId);assert.equal(review.agent.status,'waiting_approval');assert.equal(models,2);assert.deepEqual(events.map(e=>e.allow_duplicate),[false,true]);
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+  const c=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0].agent_checkpoint;assert.equal(c.event_resolutions[0].pending,false);assert.equal(c.outputs.length,2);assert.equal(c.operations[0].status,'waiting_approval');
+ });
+}
+
+if(PGlite) {
+ test('real PostgreSQL: an ordinary short reply resumes a stopped question in the same conversation exactly once',async t=>{
+  let count=0;const original='早餐3.9 地铁2.96 小美生日送礼500外加一双200的鞋子';
+  const operations=[{id:'breakfast',label:'早餐',action:'record',effect:'write',depends_on:[],sources:['早餐3.9']},{id:'metro',label:'地铁',action:'record',effect:'write',depends_on:[],sources:['地铁2.96']},{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],sources:['小美生日送礼500外加一双200的鞋子'],questions:['鞋子是实际购买还是已有物品？']}];
+  const f=await databaseFixture(t,{provider:{bailianObject:async settings=>{count++;if(count===1)return {kind:'plan',operation_id:null,tool:null,arguments_json:JSON.stringify({operations}),plan_json:null};if(count===2)return {kind:'respond',operation_id:'gift',tool:null,arguments_json:'{}',plan_json:JSON.stringify(chat)};assert.ok(settings.messages.some(m=>m.content.includes('已有物品')));assert.ok(settings.messages.some(m=>m.content.includes(original)));return {kind:'respond',operation_id:'gift',tool:null,arguments_json:'{}',plan_json:JSON.stringify({...chat,reply:'送礼支出属于哪个成员？'}),needs_input:true};}}});
+  await f.tasks.createAssistantTask('owner',body({message:original}));await f.tasks.runAssistantTask('owner',taskId);await f.tasks.changeAssistantTask('owner',taskId,'cancel',1);
+  const paused=await f.tasks.getAssistantTask('owner',taskId);assert.equal(paused.agent.awaiting_answer,true);
+  const answer=body({id:id(70),user_message_id:id(80),message:'已有物品',display_text:'已有物品'});
+  const resumed=await f.tasks.createAssistantTask('owner',answer);assert.equal(resumed.id,taskId);assert.equal(resumed.attempt,2);assert.equal(resumed.agent.goal,original);assert.equal((await f.tasks.createAssistantTask('owner',answer)).attempt,2);
+  await assert.rejects(f.tasks.createAssistantTask('owner',{...answer,message:'新买的',display_text:'新买的'}),e=>e.status===409);
+  await f.tasks.runAssistantTask('owner',taskId);const next=await f.tasks.getAssistantTask('owner',taskId);assert.equal(next.agent.goal,original);assert.equal(next.agent.operations.length,3);assert.equal(next.agent.operations[0].status,'pending');assert.equal(next.result.reply,'送礼支出属于哪个成员？');
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM assistant_tasks')).rows[0].count,1);assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
+ test('real PostgreSQL: resuming a paused question rebinds an already split chat reply and retires only the confused clarification',async t=>{
+  let count=0;const original='小美生日送礼500元';
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>++count===1?{kind:'plan',operation_id:null,tool:null,arguments_json:JSON.stringify({operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],sources:[original],questions:['鞋子是已有物品吗？']}]}),plan_json:null}:{kind:'respond',operation_id:'gift',tool:null,arguments_json:'{}',plan_json:JSON.stringify({...chat,reply:'支出属于哪个成员？'}),needs_input:true}}});
+  await f.tasks.createAssistantTask('owner',body({message:original}));await f.tasks.runAssistantTask('owner',taskId);await f.tasks.changeAssistantTask('owner',taskId,'cancel',1);
+  const parent=(await f.db.query('SELECT * FROM assistant_tasks')).rows[0];
+  const c={version:1,goal_id:id(70),goal:'已有物品',status:'needs_input',steps:1,messages:[],tool_results:[],preview_fingerprints:[],pending_approval:null,awaiting_answer:true,output_id:id(71),current_operation_id:'question',operations:[{id:'question',label:'澄清',action:'chat',effect:'read',depends_on:[],sources:['已有物品'],status:'needs_input'}],outputs:[{id:id(71),user_message_id:id(80),input:{message:'已有物品',display_text:'已有物品',display_images:[]},attempt:1,plan:chat}]};
+  const payload={...parent.payload,message:'已有物品'};
+  await f.db.query(`INSERT INTO assistant_tasks(user_id,id,conversation_id,user_message_id,request_hash,payload,display_input,status,phase,result,agent_checkpoint,attempt,created_at) VALUES('owner',$1,$2,$3,'split',$4::jsonb,$5::jsonb,'succeeded','thinking',$6::jsonb,$7::jsonb,1,$8)`,[id(70),conversationId,id(80),JSON.stringify(payload),JSON.stringify({message:'已有物品',display_text:'已有物品',display_images:[]}),JSON.stringify(chat),JSON.stringify(c),new Date(new Date(parent.created_at).getTime()+1000)]);
+  const recovered=await f.tasks.listAssistantTasks('owner',conversationId);const resumed=recovered.find(task=>task.id===taskId);assert.equal(resumed.id,taskId);assert.equal(resumed.attempt,2);assert.equal(resumed.user_message_id,id(80));
+  const linked=await f.tasks.getAssistantTask('owner',id(70));assert.equal(linked.agent.status,'completed');assert.equal(linked.agent.awaiting_answer,undefined);assert.match(linked.result.reply,/接续原来/);
+  await f.tasks.runAssistantTask('owner',taskId);const next=await f.tasks.getAssistantTask('owner',taskId);assert.equal(next.agent.goal,original);assert.equal(next.agent.awaiting_answer,true);
+  const answer=await f.tasks.createAssistantTask('owner',body({id:id(90),user_message_id:id(91),message:'王城丽',display_text:'王城丽'}));assert.equal(answer.id,taskId);assert.equal(answer.attempt,3);
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
 }

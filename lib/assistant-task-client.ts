@@ -1,4 +1,4 @@
-import { assistantCardTarget, reconcileAssistantCardUpdate, reconcileAssistantCardHistory, relocateAssistantCard } from "@/lib/assistant-card-updates";
+import { assistantCardTarget, assistantHistoryQuestion, reconcileAssistantCardUpdate, reconcileAssistantCardHistory, relocateAssistantCard } from "@/lib/assistant-card-updates";
 import { restoreAssistantExecution } from "@/lib/assistant-execution";
 import { recordReplyView, type AssistantReplyView } from "@/lib/assistant-reply-view";
 import type { AssistantActionPreview } from "@/lib/assistant-action-preview";
@@ -9,6 +9,7 @@ import { restoreAssistantImages, restoreAssistantImportSummary, type AssistantIm
 import { sortedAssistantDrafts, type AssistantDraftSort } from "@/lib/assistant-draft-sort";
 import { assistantTaskActive, restoreAssistantImageProgress, type AssistantImageProgress, type AssistantTask } from "@/lib/assistant-task-types";
 import { assistantProcessFromTask, type AssistantProcess } from "@/lib/assistant-process";
+import { validateWorkflow } from "@/lib/assistant-workflow";
 
 export type EditableAssistantDraft = AssistantDraft & { amount: string; ignored?: boolean; softRemoved?: boolean };
 
@@ -95,7 +96,7 @@ export function completeAssistantMemberSelection(messages: AssistantConversation
   catch { return messages; }
   const questionText = memberBatchQuestionText(unassigned);
   const question: AssistantConversationMessage = { id: questionId, role: "assistant",
-    text: source.text === questionText ? "" : source.text, draftCardLink: messageId };
+    text: source.text && source.text !== questionText ? `${source.text}\n\n${questionText}` : questionText, draftCardLink: messageId };
   const review: AssistantConversationMessage = { ...source, drafts: selected, error: undefined, memberChoice: undefined,
     memberFlow: true, text: "成员已补充，请核对账目后确认入账。" };
   // Move the original card instead of creating a new batch: approvals, undo and
@@ -110,13 +111,25 @@ export function restoreAssistantAgent(value: unknown): NonNullable<AssistantPlan
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const agent = value as NonNullable<AssistantPlan["agent"]>;
   if (typeof agent.goal_id !== "string" || !UUID_PATTERN.test(agent.goal_id) || typeof agent.goal !== "string" || !agent.goal.trim() || agent.goal.length > 4000
-    || !["running", "waiting_approval", "completed", "stopped", "needs_input"].includes(agent.status)
+    || !["running", "waiting_approval", "completed", "stopped", "needs_input", "interrupted"].includes(agent.status)
     || !Number.isSafeInteger(agent.steps) || agent.steps < 0 || !Number.isSafeInteger(agent.tool_calls) || agent.tool_calls < 0
     || (agent.pending_action_id !== undefined && (typeof agent.pending_action_id !== "string" || !UUID_PATTERN.test(agent.pending_action_id)))
     || (agent.pending_batch_id !== undefined && (typeof agent.pending_batch_id !== "string" || !UUID_PATTERN.test(agent.pending_batch_id)))) return;
+  let operations;
+  try { operations = agent.operations ? validateWorkflow(agent.operations, true) : undefined; } catch { return; }
+  if (agent.output_id !== undefined && !UUID_PATTERN.test(agent.output_id) || agent.awaiting_answer !== undefined && typeof agent.awaiting_answer !== "boolean" || agent.awaiting_delivery !== undefined && typeof agent.awaiting_delivery !== "boolean") return;
   return { goal_id: agent.goal_id, goal: agent.goal, status: agent.status, steps: agent.steps, tool_calls: agent.tool_calls,
     ...(agent.pending_action_id ? { pending_action_id: agent.pending_action_id } : {}),
-    ...(agent.pending_batch_id ? { pending_batch_id: agent.pending_batch_id } : {}) };
+    ...(agent.pending_batch_id ? { pending_batch_id: agent.pending_batch_id } : {}),
+    ...(agent.output_id ? { output_id: agent.output_id } : {}), ...(operations ? { operations } : {}),
+    ...(agent.awaiting_answer ? { awaiting_answer: true } : {}), ...(agent.awaiting_delivery ? { awaiting_delivery: true } : {}) };
+}
+
+/** A stopped clarification keeps its original question and can accept an answer. */
+export function assistantTaskAnswerable(task: AssistantTask): boolean {
+  const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+  return !!agent?.awaiting_answer && !!agent.output_id && !agent.pending_action_id && !agent.pending_batch_id
+    && (task.status === "succeeded" && agent.status === "needs_input" || task.status === "cancelled" && agent.status === "stopped");
 }
 
 export function restoreAssistantApprovalHistory(value: unknown): NonNullable<AssistantTask["approval_history"]> {
@@ -332,36 +345,92 @@ export function mergeAssistantTasks(
 ): AssistantConversationMessage[] {
   let next = messages;
   for (const task of tasks) {
+    const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+    const roots = new Map<string, string>();
+    const outputs: AssistantTask[] = [];
+    for (const history of task.output_history || []) {
+      if (!UUID_PATTERN.test(history.id) || !UUID_PATTERN.test(history.user_message_id) || !history.result || history.id === agent?.output_id) continue;
+      roots.set(history.id, task.id);
+      outputs.push({ ...task, id: history.id, user_message_id: history.user_message_id, input: history.input, result: history.result,
+        text: history.result.reply, attempt: history.attempt, status: "succeeded", agent: undefined, output_history: undefined });
+    }
+    const output = agent?.output_id || task.id;
+    roots.set(output, task.id);
+    if (task.status === "succeeded" && task.result && output !== task.id) {
+      const historyIds = new Set((task.output_history || []).map(item => item.id));
+      // A retry can emit its first real card under a new output ID. Retire the
+      // earlier empty/error placeholder so it cannot keep showing a live spinner.
+      const settled = next.filter(message => !(message.role === "assistant" && message.taskId === task.id
+        && message.id !== output && !historyIds.has(message.id) && !message.taskApplied
+        && !message.drafts?.length && !message.approval && !message.actionResult && !message.eventContext
+        && !message.memberChoice && !message.eventChoices?.length && !message.actionPreview && !message.replyView && !assistantHistoryQuestion(message)));
+      if (settled.length !== next.length) next = settled;
+    }
+    outputs.push({ ...task, id: output, output_history: undefined });
+    next = mergeAssistantTaskOutputs(next, outputs, conversationId, members, categories, roots);
+    // Old responses remain in the conversation, but only the latest response owns controls.
+    if (task.output_history?.length) {
+    const updated = next.map(message => {
+      const historical = task.output_history?.find(item => item.id === message.id);
+      if (message.role !== "assistant" || !historical) return message;
+      const receipt = historical.receipt;
+      const process = message.process && ["queued", "running"].includes(message.process.status) ? { ...message.process, status: "succeeded" as const, hasReply: true,
+        finishedAt: message.process.finishedAt || Date.parse(task.updated_at), execution: message.process.execution?.filter(step => step.state !== "running") } : message.process;
+      const item = { ...message, agent: undefined, ...(process ? { process } : {}), ...(receipt ? { actionResult: receipt, approval: undefined,
+        ...(historical.result.action === "record" && receipt.status === "succeeded" ? { status: "saved" as const, savedDrafts: message.savedDrafts || message.drafts, commit: undefined } : {}) } : {}) };
+      return sameTaskValue(item, message) ? message : item;
+    });
+    if (updated.some((message, i) => message !== next[i])) next = updated;
+    }
+  }
+  return next;
+}
+function mergeAssistantTaskOutputs(
+  messages: AssistantConversationMessage[], tasks: AssistantTask[], conversationId: string, members: AssistantMember[], categories: AssistantCategory[], roots: Map<string, string>,
+): AssistantConversationMessage[] {
+  let next = messages;
+  for (const task of tasks) {
+    const rootId = roots.get(task.id) || task.id;
     let updatedBatchId: string | undefined;
     if (task.conversation_id !== conversationId || !UUID_PATTERN.test(task.id) || !UUID_PATTERN.test(task.user_message_id)) continue;
     const user = next.find(message => message.id === task.user_message_id);
-    if (user?.taskId === task.id && (user.taskAttempt || 0) > task.attempt) continue;
+    if (user?.taskId === rootId && (user.taskAttempt || 0) > task.attempt && (task.id === rootId || next.some(message => message.id === task.id))) continue;
     const imageProgress = restoreAssistantImageProgress(task.image_progress);
     if (!user && !task.input) continue;
     if (!user) next = [...next, { id: task.user_message_id, role: "user", text: task.input!.display_text,
-      images: restoreAssistantImages(task.input!.display_images, undefined, true), taskId: task.id, taskStatus: task.status, taskAttempt: task.attempt }];
+      images: restoreAssistantImages(task.input!.display_images, undefined, true), taskId: rootId, taskStatus: task.status, taskAttempt: task.attempt }];
     const incomplete = task.status === "succeeded" ? undefined : task.status === "cancelled" ? "stopped" : "interrupted";
     const currentUser = user || next[next.length - 1];
-    if (currentUser.taskId !== task.id || currentUser.taskStatus !== task.status || currentUser.taskAttempt !== task.attempt
+    if (currentUser.taskId !== rootId || currentUser.taskStatus !== task.status || currentUser.taskAttempt !== task.attempt
       || currentUser.incomplete !== incomplete || currentUser.error !== undefined || !sameTaskValue(currentUser.image_progress || null, imageProgress)) {
       next = next.map(message => message.id === task.user_message_id
-        ? { ...message, taskId: task.id, taskStatus: task.status, taskAttempt: task.attempt, incomplete, error: undefined, ...(imageProgress || currentUser.image_progress ? { image_progress: imageProgress } : {}) } : message);
+        ? { ...message, taskId: rootId, taskStatus: task.status, taskAttempt: task.attempt, incomplete, error: undefined, ...(imageProgress || currentUser.image_progress ? { image_progress: imageProgress } : {}) } : message);
     }
     // This flag is persisted on the stable reply, even when its drafts were moved
     // into a later member-selection card or removed by the user.
     const previousReply = next.find(message => message.id === task.id);
-    if (previousReply && assistantCardTarget(previousReply)) continue;
+    if (previousReply && assistantCardTarget(previousReply)) {
+      // Earlier versions replaced the whole message with an update marker.
+      // Restore the server-owned question in place without restoring its controls.
+      const result = task.result;
+      const question = result && assistantHistoryQuestion({ text: result.reply, eventChoices: result.event_choices, agent: result.agent });
+      if (question && (!previousReply.text || ["这张卡片已更新。", "这组账目卡片已更新。"].includes(previousReply.text))) {
+        next = next.map(message => message.id === previousReply.id ? { ...message, text: question } : message);
+      }
+      continue;
+    }
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
     const approvalHistory = restoreAssistantApprovalHistory(task.approval_history);
     const advanced = !!previousReply && task.attempt > (previousReply.taskAttempt || 1);
     // A stop receipt belongs to the existing action card. Keep its identity even
     // after executable approval controls are removed, including on fresh recovery.
-    if (agent?.status === "stopped" && (previousReply || task.result?.approval)) {
+    if (agent?.status === "stopped" && (previousReply || task.result?.approval || task.result?.drafts.length)) {
       const approval = previousReply?.approval || task.result?.approval;
       const actionId = previousReply?.actionResult?.id || approval?.id;
       const receipt = approvalHistory.find(entry => entry.approval.id === actionId)?.result;
       const stopped: AssistantConversationMessage = {
-        ...(previousReply || { id: task.id, role: "assistant", text: task.result?.reply || task.text, taskId: task.id }),
+        ...(previousReply || { id: task.id, role: "assistant", text: task.result?.reply || task.text, taskId: rootId,
+          ...(task.result?.drafts.length ? { drafts: task.result.drafts.map(draft => ({ ...draft, amount: (draft.amount_cents / 100).toFixed(2) })), status: "pending" as const } : {}) }),
         agent, approvalHistory, taskApplied: true, taskStatus: task.status, taskAttempt: task.attempt,
         actionResult: receipt || previousReply?.actionResult,
         actionPreview: previousReply?.actionPreview || approval?.preview,
@@ -376,6 +445,8 @@ export function mergeAssistantTasks(
       continue;
     }
     if (previousReply?.taskApplied && !advanced) {
+      if (agent?.status === "interrupted" && task.result?.action === "chat" && previousReply.text !== task.result.reply)
+        next = next.map(message => message.id === task.id ? { ...message, text: task.result!.reply } : message);
       if (!previousReply.proposalScope && task.result?.command) next = next.map(m => m.id === task.id ? { ...m,proposalScope:{resource:task.result!.command!.resource,operation:task.result!.command!.operation,ids:task.result!.command!.ids} } : m);
       const rebound = agent?.status === "waiting_approval" && task.result?.approval?.id === agent.pending_action_id
         && (previousReply.approval?.id || previousReply.actionResult?.id) !== agent.pending_action_id
@@ -404,7 +475,7 @@ export function mergeAssistantTasks(
       continue;
     }
     let reply: AssistantConversationMessage = { id: task.id, role: "assistant", text: task.text,
-      taskId: task.id, taskAttempt: task.attempt, taskStatus: task.status, process: assistantProcessFromTask(task), ...(imageProgress ? { image_progress: imageProgress } : {}) };
+      taskId: rootId, taskAttempt: task.attempt, taskStatus: task.status, process: assistantProcessFromTask(task), ...(imageProgress ? { image_progress: imageProgress } : {}) };
     if (task.status !== "succeeded" || !task.result) {
       reply = { ...reply, incomplete: task.status === "cancelled" ? "stopped" : "interrupted",
         error: task.error || (task.status === "cancelled" ? "已停止处理，可以重新识别。" : "处理未完成，请重试原请求。") };
@@ -502,7 +573,9 @@ export function mergeAssistantTasks(
     if (previousIndex !== -1) next = next.map(message => message.id === task.id ? reply : message);
     else {
       const userIndex = next.findIndex(message => message.id === task.user_message_id);
-      next = [...next.slice(0, userIndex + 1), reply, ...next.slice(userIndex + 1)];
+      const previousOutputIndex = rootId !== task.id ? next.findLastIndex(message => message.role === "assistant" && message.taskId === rootId) : -1;
+      const insertAt = Math.max(userIndex, previousOutputIndex) + 1;
+      next = [...next.slice(0, insertAt), reply, ...next.slice(insertAt)];
     }
     if (updatedBatchId) next = relocateAssistantDraftCard(next, updatedBatchId, task.id);
     if (advanced && previousReply) next = relocateAssistantCard(next,task.id,next.at(-1)!.id);
@@ -546,9 +619,9 @@ export function reconcileAssistantTaskSnapshots(current: AssistantTask[], receiv
       const previousAgent = restoreAssistantAgent(previous.agent || previous.result?.agent);
       const receivedAgent = restoreAssistantAgent(task.agent || task.result?.agent);
       const sameGoal = !!previousAgent && previousAgent.goal_id === receivedAgent?.goal_id;
-      const continuingGoal = sameGoal && previousAgent.status === "waiting_approval" && task.attempt > previous.attempt;
+      const continuingGoal = sameGoal && ["waiting_approval", "needs_input", "interrupted"].includes(previousAgent.status) && task.attempt > previous.attempt;
       const stoppedGoal = sameGoal && receivedAgent?.status === "stopped" && task.status === "cancelled";
-      const retryingGoal = sameGoal && task.attempt > previous.attempt && ["cancelled", "failed"].includes(previous.status) && assistantTaskActive(task);
+      const retryingGoal = sameGoal && task.attempt > previous.attempt && ["cancelled", "failed"].includes(previous.status) && (assistantTaskActive(task) || assistantTaskAnswerable(task));
       if (task.attempt < previous.attempt || (previous.status === "succeeded" && task.status !== "succeeded" && !continuingGoal && !stoppedGoal)
         || (previousAgent?.status === "stopped" && sameGoal && receivedAgent?.status !== "stopped" && !retryingGoal)) continue;
       if (task.attempt === previous.attempt) {
@@ -571,6 +644,7 @@ export function reconcileAssistantTaskSnapshots(current: AssistantTask[], receiv
       && previous.status === task.status && previous.phase === task.phase && previous.text === task.text
       && previous.error === task.error && previous.attempt === task.attempt && previous.created_at === task.created_at
       && previous.updated_at === task.updated_at && previous.result === result && previous.input === stableInput && previous.agent === stableAgent && sameTaskValue(previous.approval_history || [], stableApprovalHistory || [])
+      && sameTaskValue(previous.output_history || [], task.output_history || [])
       && sameTaskValue(previous.execution_steps || [], stableExecution || [])
       && sameTaskValue(previous.image_progress || null, stableProgress || null)) continue;
     // Heartbeats still advance updated_at so an older response cannot overwrite

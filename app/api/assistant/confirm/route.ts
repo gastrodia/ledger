@@ -17,6 +17,17 @@ export async function POST(request: NextRequest) {
     const hash = createHash("sha256").update(JSON.stringify(rows)).digest("hex");
     const draftIds = body.drafts.map((draft: { id?: unknown }) => draft.id === undefined ? randomUUID() : draft.id);
     if (draftIds.some((id: unknown) => typeof id !== "string" || !UUID_PATTERN.test(id)) || new Set(draftIds).size !== draftIds.length) return NextResponse.json({ error: "草稿编号无效。" }, { status: 400 });
+    const excluded = body.excluded_draft_ids ?? [];
+    if (!Array.isArray(excluded) || excluded.length > 20 || excluded.some((id: unknown) => typeof id !== "string" || !UUID_PATTERN.test(id) || draftIds.includes(id)) || new Set(excluded).size !== excluded.length) return NextResponse.json({ error: "排除的草稿编号无效。" }, { status: 400 });
+    if (excluded.length || body.task_id !== undefined) {
+      if (typeof body.task_id !== "string" || !UUID_PATTERN.test(body.task_id)) return NextResponse.json({ error: "草稿任务编号无效。" }, { status: 400 });
+      const tasks = await sql.query("SELECT agent_checkpoint FROM assistant_tasks WHERE user_id=$1 AND id=$2", [session.userId, body.task_id]);
+      const checkpoint = tasks[0]?.agent_checkpoint as { pending_batch?: { batch_id: string; draft_ids: string[] }; outputs?: Array<{ id: string; plan: { action: string; drafts: Array<{ id: string }> } }> } | null;
+      const original = checkpoint?.pending_batch && checkpoint.pending_batch.batch_id === body.batch_id ? checkpoint.pending_batch.draft_ids : checkpoint?.outputs?.find(output => output.id === body.batch_id && output.plan.action === "record")?.plan.drafts.map(draft => draft.id);
+      const selected = [...draftIds, ...excluded];
+      if (!original || selected.some(id => !original.includes(id)) || excluded.length > 0 && original.some(id => !selected.includes(id))) return NextResponse.json({ error: "本批草稿与原任务不一致，请核对最新卡片。", notSaved: true }, { status: 409 });
+    }
+    const excludedJson = JSON.stringify([...excluded].sort());
     const snapshot = JSON.stringify(body.drafts.map((draft: Record<string, unknown>, index: number) => ({
       id: draftIds[index], type: rows[index].type, amount_cents: rows[index].amount_cents,
       category_id: rows[index].category_id, member_id: rows[index].member_id,
@@ -36,7 +47,7 @@ export async function POST(request: NextRequest) {
       sql`SELECT id FROM members WHERE user_id=${session.userId} AND id IN
         (SELECT value->>'member_id' FROM jsonb_array_elements(${input}::jsonb)) FOR SHARE`,
       sql`WITH existing AS MATERIALIZED (
-        SELECT payload_hash,transaction_ids,revoked_at FROM assistant_batches
+        SELECT payload_hash,transaction_ids,revoked_at,excluded_draft_ids FROM assistant_batches
         WHERE user_id=${session.userId} AND id=${body.batch_id} FOR UPDATE
       ), input AS (
         SELECT * FROM jsonb_to_recordset(${input}::jsonb) AS r(id TEXT,draft_id TEXT,position INTEGER,type TEXT,amount_cents BIGINT,
@@ -45,23 +56,23 @@ export async function POST(request: NextRequest) {
         SELECT i.* FROM input i JOIN categories c ON c.id=i.category_id AND c.user_id=${session.userId} AND c.type=i.type
           JOIN members m ON m.id=i.member_id AND m.user_id=${session.userId}
       ), claimed AS (
-        INSERT INTO assistant_batches (user_id,id,payload_hash,transaction_ids,draft_snapshot,draft_transactions)
-        SELECT ${session.userId},${body.batch_id},${hash},(SELECT jsonb_agg(id ORDER BY position) FROM input),${snapshot}::jsonb,${mapping}::jsonb
+        INSERT INTO assistant_batches (user_id,id,payload_hash,transaction_ids,draft_snapshot,draft_transactions,excluded_draft_ids)
+        SELECT ${session.userId},${body.batch_id},${hash},(SELECT jsonb_agg(id ORDER BY position) FROM input),${snapshot}::jsonb,${mapping}::jsonb,${excludedJson}::jsonb
         WHERE (SELECT count(*) FROM valid)=(SELECT count(*) FROM input)
-        ON CONFLICT (user_id,id) DO NOTHING RETURNING payload_hash,transaction_ids,revoked_at
+        ON CONFLICT (user_id,id) DO NOTHING RETURNING payload_hash,transaction_ids,revoked_at,excluded_draft_ids
       ), inserted AS (
         INSERT INTO transactions (id,user_id,type,amount,category_id,member_id,transaction_date,description,created_at,updated_at)
         SELECT i.id,${session.userId},i.type,i.amount_cents::numeric/100,i.category_id,i.member_id,i.transaction_date,i.description,NOW(),NOW()
         FROM input i CROSS JOIN claimed RETURNING id
       )
-      SELECT payload_hash,transaction_ids,revoked_at,true AS created,(SELECT count(*) FROM inserted) AS inserted_count FROM claimed
+      SELECT payload_hash,transaction_ids,revoked_at,excluded_draft_ids,true AS created,(SELECT count(*) FROM inserted) AS inserted_count FROM claimed
       UNION ALL
-      SELECT payload_hash,transaction_ids,revoked_at,false AS created,0 AS inserted_count FROM existing`,
+      SELECT payload_hash,transaction_ids,revoked_at,excluded_draft_ids,false AS created,0 AS inserted_count FROM existing`,
     ], { isolationLevel: "Serializable" });
     const saved = result[0];
     if (!saved) return NextResponse.json({ error: "分类或成员已变更，请刷新后核对；本批次未保存。", notSaved: true }, { status: 409 });
     if (saved.revoked_at) return NextResponse.json({ error: "该批次已撤销，请使用恢复后的草稿重新确认。", batchRevoked: true, notSaved: true }, { status: 409 });
-    if (saved.payload_hash !== hash) return NextResponse.json({ error: "该批次已确认过不同内容，请先核对交易记录。", batchConflict: true }, { status: 409 });
+    if (saved.payload_hash !== hash || JSON.stringify(saved.excluded_draft_ids || []) !== excludedJson) return NextResponse.json({ error: "该批次已确认过不同内容，请先核对交易记录。", batchConflict: true }, { status: 409 });
     return NextResponse.json({ ids: saved.transaction_ids, count: (saved.transaction_ids as string[]).length, replayed: !saved.created }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof SyntaxError) return NextResponse.json({ error: "请求格式无效。" }, { status: 400 });

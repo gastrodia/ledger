@@ -825,3 +825,14 @@ test('real SDK carries draft removal targets separately from saved-transaction u
   assert.ok('remove' in schema.properties);
   assert.equal(f.calls.length, 1);
 });
+
+
+test('real SDK returns the same normalized step that the runtime accepts, including duplicate coverage', async () => {
+ const stepContract=loadModule('lib/assistant-agent-step.ts');
+ const stepSchema=loadModule('lib/assistant-agent-schema.ts',{ai,zod:require('zod'),'@/lib/assistant-agent-step':stepContract});
+ const raw={kind:'respond',operation_id:'record',covered_operation_ids:['record','record'],tool:null,arguments_json:'{}',plan_json:JSON.stringify({action:'record',reply:'请核对',drafts:[],query:null})};
+ const f=fixture(completion(JSON.stringify(raw)));const value=await f.adapter.bailianObject({model:'fixture-model',messages:prompt,schema:stepSchema.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA});
+ assert.deepEqual(JSON.parse(JSON.stringify(value)),JSON.parse(JSON.stringify(stepContract.parseAssistantAgentStep(raw,true))));assert.deepEqual(JSON.parse(JSON.stringify(value.covered_operation_ids)),['record']);
+ const invalid=fixture(completion(JSON.stringify({...raw,operation_id:'非法编号'})));
+ await assert.rejects(invalid.adapter.bailianObject({model:'fixture-model',messages:prompt,schema:stepSchema.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA}),error=>error.code==='invalid_output');
+});

@@ -245,15 +245,15 @@ test('sending an unrelated request preserves all waiting approvals and never sub
   const ref = current => ({ current });
   const exports = {};
   vm.runInNewContext(ts.transpileModule(`export ${send.getText(file)}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
-    exports, assistantCardTarget: load('lib/assistant-card-updates.ts').assistantCardTarget, crypto: require('node:crypto'), input: '小美生日，我送她一双200元鞋子和500元礼金', images: [], messages: waiting,
+    exports, assistantCardTarget: load('lib/assistant-card-updates.ts').assistantCardTarget, crypto: require('node:crypto'), answerTarget: undefined, setAnswerTarget() {}, input: '小美生日，我送她一双200元鞋子和500元礼金', images: [], messages: waiting,
     actionPendingRef: ref(false), busy: false, outboxRef: ref(null), sendLock: ref(false), saveLock: ref(false),
     draft: { hasDraft: false, status: 'ready', persist: snapshot => { persisted.push(plain(snapshot)); return true; } }, configured: true,
     conversationId: uuid(4), conversationEpoch: ref(0), currentConversation: () => true,
-    knownTasks: ref([task()]), assistantAgentWaiting: client.assistantAgentWaiting,
+    knownTasks: ref([task()]), assistantTaskAnswerable: client.assistantTaskAnswerable, assistantAgentWaiting: client.assistantAgentWaiting,
     cancelAssistantTaskCheckpoint: () => { throw new Error('New message must not cancel an old proposal'); },
     isActionStatusRequest: () => false, approvalDecision: () => null, localCalendarDate: () => '2026-10-09',
     setSending() {}, setOutbox() {}, setOutboxPersistable() {}, setMessages() {}, setInput() {}, setImages() {},
-    confirmationsRef: ref([]), undosRef: ref([]), toast: { error(message) { throw new Error(message); }, info() {} },
+    confirmationsRef: ref([]), undosRef: ref([]), restoreAssistantAgent: client.restoreAssistantAgent, toast: { error(message) { throw new Error(message); }, info() {} },
     submitTask: async request => submitted.push(plain(request)),
   });
   await exports.send();
@@ -298,6 +298,7 @@ test('member selection keeps question-answer-review order and the stable agent b
   assert.equal(selected.at(-1).drafts[0].member_id, uuid(13));
   assert.equal(selected[1].taskId, undefined, 'the static question cannot replay the old task');
   assert.equal(selected[1].draftCardLink, original.id, 'the old position links to the one current card');
+  assert.equal(selected[1].text,'支出人是谁？','the original member question stays visible before its answer');
   const restored = client.mergeAssistantTasks(plain(selected), [original], uuid(4), [{ id: uuid(13), name: '本人' }]);
   assert.deepEqual(plain(restored), plain(selected));
   assert.equal(client.completeAssistantMemberSelection(restored, original.id, { id: uuid(13), name: '本人' }, [{ id: uuid(13), name: '本人' }], answer.id, uuid(22)), restored, 'repeated acknowledgements cannot duplicate the card');
@@ -305,4 +306,105 @@ test('member selection keeps question-answer-review order and the stable agent b
   const next = client.mergeAssistantTasks(restored, [stopped], uuid(4), [{ id: uuid(13), name: '本人' }]);
   assert.deepEqual(plain(next.map(m => m.id)), plain(selected.map(m => m.id)));
   assert.equal(next.at(-1).drafts[0].member_id, uuid(13));
+});
+
+test('workflow recovery keeps independently identified outputs, original task identity and clarification order', () => {
+  const operations=[{id:'a',label:'早餐',action:'record',effect:'write',depends_on:[],status:'completed'},{id:'b',label:'生日送礼',action:'event',effect:'write',depends_on:[],status:'waiting_approval'}];
+  const first=uuid(61),question=uuid(62),current=uuid(63),answer=uuid(64);
+  const drafts=[{id:uuid(65),type:'expense',amount_cents:390,description:'早餐',member_id:null,category_id:null,transaction_date:'2026-10-10',payment_method:null,note:''}];
+  const resumed=task({attempt:3,user_message_id:answer,input:{message:'鞋子是估值',display_text:'鞋子是估值',display_images:[]},agent:agent({goal_id:uuid(3),output_id:current,operations}),result:plan({action:'event',approval,agent:undefined}),output_history:[
+    {id:first,user_message_id:user.id,input:{message:user.text,display_text:user.text,display_images:[]},attempt:1,result:plan({action:'record',drafts,agent:undefined}),receipt:{id:first,status:'succeeded',text:'已核实入账'}},
+    {id:question,user_message_id:user.id,input:{message:user.text,display_text:user.text,display_images:[]},attempt:2,result:plan({reply:'鞋子是估值还是付款？',agent:undefined})},
+  ]});
+  const restored=client.mergeAssistantTasks([], [resumed],uuid(4),[]);
+  assert.deepEqual(plain(restored.map(message=>message.id)),[user.id,first,question,answer,current]);
+  assert.equal(restored.find(message=>message.id===first).status,'saved');
+  assert.equal(restored.find(message=>message.id===current).taskId,uuid(3));
+  assert.ok(restored.filter(message=>message.role==='assistant'&&message.agent).length===1);
+  const again=client.mergeAssistantTasks(restored,[plain(resumed)],uuid(4),[]);
+  assert.equal(again,restored,'unchanged polls must keep the full conversation reference');
+  const advanced={...resumed,status:'queued',attempt:4,agent:{...resumed.agent,status:'running'}};
+  assert.equal(client.reconcileAssistantTaskSnapshots([resumed],[advanced])[0].attempt,4);
+});
+
+test('historical recovery restores erased event member questions without reactivating old choices or approvals', () => {
+  const question=uuid(71),answer=uuid(72),current=uuid(73);
+  const eventContext={status:'pending',event_id:null,input:{kind:'gift_given',operation:'create',counterparty:'小美',member_id:null}};
+  const resumed=task({attempt:3,user_message_id:answer,input:{message:'支出人是「本人」',display_text:'支出人是「本人」',display_images:[]},
+    agent:agent({output_id:current}),result:plan({action:'event',approval,event_context:{...eventContext,input:{...eventContext.input,member_id:uuid(13)}}}),
+    output_history:[{id:question,user_message_id:user.id,input:{message:user.text,display_text:user.text,display_images:[]},attempt:2,
+      result:plan({action:'event',reply:'这笔资金流水归属哪个成员？',agent:undefined,event_context:eventContext,event_choices:[{label:'本人',input:{...eventContext.input,member_id:uuid(13)}}]})}]});
+  const fresh=client.mergeAssistantTasks([], [resumed],uuid(4),[]);
+  assert.deepEqual(plain(fresh.map(message=>message.id)),[user.id,question,answer,current]);
+  assert.equal(fresh.find(message=>message.id===question).text,'这笔资金流水归属哪个成员？');
+  const erased=fresh.map(message=>message.id===question?{...message,text:'这张卡片已更新。'}:message);
+  const recovered=client.mergeAssistantTasks(erased,[plain(resumed)],uuid(4),[]);
+  const restoredQuestion=recovered.find(message=>message.id===question);
+  assert.equal(restoredQuestion.text,'这笔资金流水归属哪个成员？');
+  assert.equal(restoredQuestion.cardUpdatedLink,current);
+  assert.equal(restoredQuestion.eventChoices,undefined);
+  assert.equal(restoredQuestion.approval,undefined);
+  assert.equal(restoredQuestion.agent,undefined);
+  assert.equal(client.mergeAssistantTasks(recovered,[plain(resumed)],uuid(4),[]),recovered,'repeated polling preserves the repaired question and references');
+});
+
+test('needs-input answers can advance the same goal while stale attempts cannot restore questions', () => {
+  const waiting=task({agent:agent({status:'needs_input',awaiting_answer:true,output_id:uuid(61)})});
+  const queued={...waiting,status:'queued',attempt:2,agent:agent({status:'running',output_id:uuid(61)})};
+  const accepted=client.reconcileAssistantTaskSnapshots([waiting],[queued]);
+  assert.equal(accepted[0].attempt,2);
+  assert.equal(client.reconcileAssistantTaskSnapshots(accepted,[waiting]),accepted);
+});
+
+
+test('technical interruption refresh replaces stale fallback text without generating another question', () => {
+ const before=client.mergeAssistantTasks([user],[task({agent:agent({status:'needs_input',awaiting_answer:true}),result:plan({reply:'本次已达到步骤上限，账本更改尚需确认。请缩小范围或补充具体目标。'})})],uuid(4),[]);
+ const current=task({agent:agent({status:'interrupted',awaiting_answer:undefined}),result:plan({reply:'处理暂时中断，原任务进度已保留。'}),updated_at:'2026-10-09T00:02:00.000Z'});
+ const after=client.mergeAssistantTasks(plain(before),[current],uuid(4),[]);assert.equal(after.length,2);assert.equal(after[1].text,current.result.reply);assert.equal(after[1].agent.status,'interrupted');assert.equal(after[1].agent.awaiting_answer,undefined);
+ assert.equal(client.mergeAssistantTasks(after,[current],uuid(4),[]),after);
+ const retry=task({status:'queued',attempt:2,agent:agent({status:'running'}),result:current.result,updated_at:'2026-10-09T00:03:00.000Z'});
+ assert.equal(client.reconcileAssistantTaskSnapshots([current],[retry])[0].status,'queued');
+});
+
+
+test('a successful retry retires its stale running error placeholder and keeps one current response', () => {
+ const failed=task({status:'failed',result:null,error:'AI 服务暂时无法连接，请稍后重试。',agent:agent({status:'needs_input',pending_action_id:undefined})});
+ const before=client.mergeAssistantTasks([user],[failed],uuid(4),[]);assert.equal(before.length,2);
+ const running=task({status:'running',attempt:2,result:null,agent:agent({status:'running',pending_action_id:undefined}),updated_at:'2026-10-09T00:02:00.000Z'});
+ const waiting=client.mergeAssistantTasks(before,[running],uuid(4),[]);assert.equal(waiting[1].agent.status,'running');
+ const complete=task({attempt:2,agent:agent({status:'needs_input',output_id:uuid(50),awaiting_answer:true,pending_action_id:undefined}),result:plan({reply:'鞋子是实际购买还是估值？'}),updated_at:'2026-10-09T00:03:00.000Z'});
+ const after=client.mergeAssistantTasks(waiting,[complete],uuid(4),[]);assert.equal(after.filter(message=>message.role==='assistant').length,1);assert.equal(after[1].id,uuid(50));assert.equal(after[1].text,complete.result.reply);
+ assert.equal(client.mergeAssistantTasks(after,[complete],uuid(4),[]),after);
+});
+
+
+test('retiring a retry placeholder never removes an earlier business question', () => {
+ const question={id:uuid(40),role:'assistant',taskId:uuid(3),text:'鞋子是实际购买还是估值？'};
+ const latest=task({attempt:2,agent:agent({status:'needs_input',output_id:uuid(50),awaiting_answer:true,pending_action_id:undefined}),result:plan({reply:'这笔支出属于哪个成员？'})});
+ const after=client.mergeAssistantTasks([user,question],[latest],uuid(4),[]);assert.equal(after.find(message=>message.id===question.id),question);assert.ok(after.some(message=>message.id===uuid(50)));
+});
+
+
+test('a stopped clarification remains answerable while cancelled financial proposals do not', () => {
+ const paused=task({status:'cancelled',agent:agent({status:'stopped',awaiting_answer:true,output_id:uuid(50),pending_action_id:undefined})});
+ assert.equal(client.assistantTaskAnswerable(paused),true);
+ assert.equal(client.assistantTaskAnswerable({...paused,agent:{...paused.agent,awaiting_answer:false}}),false);
+ assert.equal(client.assistantTaskAnswerable({...paused,agent:{...paused.agent,pending_action_id:uuid(2)}}),false);
+ const resumed={...paused,status:'queued',attempt:2,agent:{...paused.agent,status:'running',awaiting_answer:undefined},updated_at:'2026-10-09T00:03:00.000Z'};
+ assert.equal(client.reconcileAssistantTaskSnapshots([paused],[resumed])[0].attempt,2);
+});
+
+test('the actual composer sends 已有物品 as an answer to the paused original goal', async () => {
+ const source=fs.readFileSync('app/dashboard/assistant/page.tsx','utf8');const file=ts.createSourceFile('page.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let send;
+ function visit(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='send')send=node;ts.forEachChild(node,visit);}visit(file);
+ const paused=task({status:'cancelled',agent:agent({status:'stopped',awaiting_answer:true,output_id:uuid(50),pending_action_id:undefined}),result:plan({reply:'鞋子是实际购买还是已有物品？'})});
+ const messages=client.mergeAssistantTasks([user],[paused],uuid(4),[]);const submitted=[],ref=current=>({current}),exports={};
+ vm.runInNewContext(ts.transpileModule(`export ${send.getText(file)}`,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{
+  exports,crypto:require('node:crypto'),input:'已有物品',images:[],messages,assistantCardTarget:load('lib/assistant-card-updates.ts').assistantCardTarget,
+  actionPendingRef:ref(false),busy:false,outboxRef:ref(null),sendLock:ref(false),saveLock:ref(false),draft:{hasDraft:false,status:'ready',persist:()=>true},configured:true,conversationId:uuid(4),conversationEpoch:ref(0),currentConversation:()=>true,
+  knownTasks:ref([paused]),assistantTaskAnswerable:client.assistantTaskAnswerable,restoreAssistantAgent:client.restoreAssistantAgent,isActionStatusRequest:()=>false,approvalDecision:()=>null,localCalendarDate:()=> '2026-10-10',
+  setSending(){},setOutbox(){},setOutboxPersistable(){},setMessages(){},setInput(){},setImages(){},confirmationsRef:ref([]),undosRef:ref([]),toast:{error(message){throw new Error(message);},info(){}},
+  stopTask(){throw new Error('An answer cannot stop its task');},submitTask:async request=>submitted.push(plain(request))
+ });
+ await exports.send();assert.equal(submitted.length,1);assert.equal(submitted[0].id,paused.id);assert.equal(submitted[0].message,'已有物品');assert.equal(submitted[0].continuation.kind,'answer');assert.equal(submitted[0].continuation.output_id,uuid(50));
 });

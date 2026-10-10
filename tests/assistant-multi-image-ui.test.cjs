@@ -1657,7 +1657,7 @@ test('completed ledger work retains a folded process before its answer without a
   } finally { h.unmount(); }
 });
 
-test('pending agent approval keeps preview controls and a quiet stop action beside the result after reload', async () => {
+test('pending agent approval keeps preview controls and its explicit cancellation without a task stop beside the result after reload', async () => {
   const h = await ready();
   try {
     const approval = { id: uuid(947), summary: '创建测试便利贴', expires_at: null,
@@ -1667,7 +1667,7 @@ test('pending agent approval keeps preview controls and a quiet stop action besi
     h.restore(h.value);
     assert.ok(h.text.includes('新建便利贴'));
     assert.ok(h.text.includes('测试提醒'));
-    assert.equal(h.control('停止任务').props.disabled, false);
+    assert.equal(h.all(node => node.props?.['aria-label'] === '停止任务').length, 0);
     assert.equal(h.all(node => node.props?.['data-assistant-agent-status'] !== undefined).length, 1);
     assert.doesNotMatch(h.text, /请核对下方方案|等待你的确认|处理结果见下方/);
     assert.ok(h.all(node => node.props?.onClick && text(node) === '取消').length);
