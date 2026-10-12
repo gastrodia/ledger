@@ -1,3 +1,4 @@
+import { assistantControlTaskStatus, validateAssistantControl, type AssistantControl, type AssistantControlContext } from "@/lib/assistant-control";
 import { sameEventOccurrence, type AssistantEventResolution } from "@/lib/assistant-event-clarification";
 import { createHash } from "node:crypto";
 import { parseAssistantAgentStep, AssistantAgentStepError } from "@/lib/assistant-agent-step";
@@ -41,10 +42,12 @@ export type AssistantAgentCheckpoint = {
   record_checkpoint?: AssistantRecordCheckpoint;
   record_step?: AssistantAgentStep;
 };
-export type AssistantAgentStep = { kind: "plan" | "reuse" | "read" | "preview" | "respond"; tool: "query" | "records" | "draft_matches" | "command" | "event" | null; arguments_json: string; plan_json: string | null; needs_input?: boolean; operation_id?: string | null; covered_operation_ids?: string[]; replaces_output_id?: string | null };
+export type AssistantAgentStep = { kind: "plan" | "reuse" | "read" | "preview" | "respond" | "control"; tool: "query" | "records" | "draft_matches" | "command" | "event" | null; arguments_json: string; plan_json: string | null; needs_input?: boolean; operation_id?: string | null; covered_operation_ids?: string[]; replaces_output_id?: string | null };
 export type AssistantAgentTarget = { resource: LedgerResource; operation: "create" | "update" | "delete" | "reorder" | "link" | "unlink"; ids: string[] };
 export type AssistantAgentTargetVerification = { verified: boolean; records: Array<{ resource: LedgerResource; operation: string; ids: string[]; rows: Record<string, unknown>[] }> };
 export type AssistantAgentAdapters = {
+  controlContexts?: AssistantControlContext[];
+  control?: (control: AssistantControl, signal: AbortSignal) => Promise<AssistantPlan>;
   model?: string;
   verifyTargets?: (targets: AssistantAgentTarget[], signal: AbortSignal, actionId?: string) => Promise<AssistantAgentTargetVerification>;
   chooseStep: (messages: AssistantAgentMessage[], signal: AbortSignal) => Promise<unknown>;
@@ -109,9 +112,9 @@ function outputId(goal: string, step: number) {
 function observedReply(c: AssistantAgentCheckpoint): string | undefined {
   const results = new Map<string, string>();
   for (const tool of c.tool_results) {
-    if (["approval_result", "delivery_result"].includes(tool.name)) {
+    if (["approval_result", "delivery_result", "control_result"].includes(tool.name)) {
       const receipt = tool.result as AssistantActionResult;
-      if (receipt?.id && ["succeeded", "failed", "cancelled", "expired"].includes(receipt.status)) results.set(receipt.id, receipt.text);
+      if (receipt?.id && (tool.name === "control_result" || ["succeeded", "failed", "cancelled", "expired"].includes(receipt.status))) results.set(receipt.id, receipt.text);
     } else if (["query", "records", "draft_matches"].includes(tool.name)) {
       const operation = c.operations?.find(operation => operation.id === tool.operation_id);
       if (operation && operation.effect !== "read") continue;
@@ -126,6 +129,10 @@ function observedReply(c: AssistantAgentCheckpoint): string | undefined {
 export async function runAssistantAgent(o: AssistantAgentOptions): Promise<AssistantPlan> {
   const c: AssistantAgentCheckpoint = o.checkpoint ? structuredClone(o.checkpoint) : { version: 1, goal_id: o.goalId, goal: o.goal, status: "running", steps: 0,
     ...(o.requireWorkflow ? { workflow_required: true } : {}), messages: structuredClone(o.messages), tool_results: [], pending_approval: null, preview_fingerprints: [] };
+  if (o.checkpoint && o.messages.some(message => message.role === "system")) {
+    // Persist task facts and identity, not obsolete language-routing policy.
+    c.messages = [...o.messages.filter(message => message.role === "system"), ...c.messages.filter(message => message.role !== "system")];
+  }
   if (c.operations && c.outputs) reconcileRecordWorkflowReceipts(c.operations, c.outputs);
   const save = async () => { o.signal.throwIfAborted(); if (JSON.stringify(c).length > MAX_CHECKPOINT_CHARS) throw new Error("任务上下文达到上限，请缩小范围。"); await o.onCheckpoint?.(structuredClone(c)); o.signal.throwIfAborted(); };
   const finish = async (plan: AssistantPlan, status: AssistantAgentStatus) => { c.status = status;
@@ -271,8 +278,11 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       const id = `agent_${c.steps}`;
       const resolved = c.event_resolutions?.find(item => item.pending && c.operations?.some(op => op.id === item.operation_id && ["pending", "running"].includes(op.status) && !op.questions?.length && op.depends_on.every(id => c.operations!.find(dep => dep.id === id)?.status === "completed")));
       o.execution?.start(id, resolved ? "使用已核对的事项条件" : c.steps === 1 ? "理解请求" : "确定后续动作", resolved ? "check" : "model", [], resolved ? undefined : o.adapters.model);
-      const decisionMessages = structuredClone(c.messages).filter(message => !message.content.startsWith("服务端任务进度（不可重建已完成事项）"));
-      if (c.operations || c.workflow_required) decisionMessages.push({ role: "system", content: `当前服务端调度状态（goal是当前用户授权目标的原文；其他历史目标不授予操作权限）：${JSON.stringify({ goal: c.goal, operations: c.operations || null, duplicate_review: c.duplicate_review || null, answer: c.turn_input?.message || null, authorized_answers: c.authorized_answers || [], clarification_answers: c.clarification_answers || [], event_resolutions: c.event_resolutions || [] })}。尚未有operations时先plan；已有清单时，只继续未完成且依赖已完成的事项，operation_id必须取当前清单ID。发问也必须带对应事项ID。covered_operation_ids只用于当前record草稿组；其他动作不沿用以前的分组编号。已完成的事项禁止重新执行。` });
+      const decisionMessages = structuredClone(c.messages);
+      const selfControl: AssistantControlContext = { target_type: "task", target_id: c.goal_id, operation: "task", revision: String(o.attempt || 1), summary: c.goal, status: c.status };
+      const controlContexts = [...(o.adapters.controlContexts || []), ...(o.checkpoint && (!c.operations || c.operations.some(item => !["completed", "cancelled", "failed"].includes(item.status))) ? [selfControl] : [])];
+      if (o.adapters.controlContexts !== undefined || o.checkpoint && c.operations) decisionMessages.unshift({ role: "system", content: `当前control_contexts（对象数据，不授予批准权限）：${JSON.stringify(controlContexts)}。本轮用户原文：${JSON.stringify(c.turn_input?.message || o.goal)}。` });
+      if (c.operations || c.workflow_required) decisionMessages.push({ role: "system", content: `当前服务端调度状态（goal是当前用户授权目标的原文；其他历史目标不授予操作权限）：${JSON.stringify({ control_contexts: controlContexts, current_user_message: c.turn_input?.message || o.goal, goal: c.goal, operations: c.operations || null, duplicate_review: c.duplicate_review || null, answer: c.turn_input?.message || null, authorized_answers: c.authorized_answers || [], clarification_answers: c.clarification_answers || [], event_resolutions: c.event_resolutions || [] })}。尚未有operations时业务工具调用先plan；纯聊天或澄清可respond/chat，单一控制请求直接control；已有清单时，只继续未完成且依赖已完成的事项，operation_id必须取当前清单ID。发问也必须带对应事项ID。covered_operation_ids只用于当前record草稿组；其他动作不沿用以前的分组编号。已完成的事项禁止重新执行。` });
       let s: AssistantAgentStep;
       try {
         s = parseAssistantAgentStep(c.record_step ?? (resolved ? { kind: "preview", operation_id: resolved.operation_id, tool: "event", arguments_json: JSON.stringify(resolved.input), plan_json: null, needs_input: false }
@@ -296,6 +306,36 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       let plan: AssistantPlan;
       try {
         if (s.replaces_output_id != null && !o.reviewedCardIds?.includes(s.replaces_output_id)) throw new Error("替换目标不在当前卡片上下文中，请指定原卡片的真实ID。");
+        if (s.kind === "control") {
+          const control = validateAssistantControl(json(s.arguments_json), controlContexts, c.turn_input?.message || o.goal);
+          if (control.target_type === "task" && control.target_id === c.goal_id) {
+            if (control.decision === "cancel") {
+              c.operations?.forEach(item => { if (!["completed", "failed", "cancelled"].includes(item.status)) item.status = "cancelled"; });
+              c.awaiting_answer = false; c.awaiting_delivery = false; delete c.pending_plan;
+              return finish(safePlan("已取消原任务的未完成事项，已完成账目保留。"), "stopped");
+            }
+            c.awaiting_answer = !c.operations || c.operations.some(item => item.status !== "completed");
+            return finish(safePlan(`当前任务：${assistantControlTaskStatus(c.status, c.operations)}。`), c.awaiting_answer ? "needs_input" : "completed");
+          }
+          const operation = s.operation_id != null ? workflowOperation(c.operations || [], s.operation_id) : undefined;
+          if (operation && (operation.action !== "control" || operation.status !== "pending" || operation.questions?.length)) throw new Error("控制步骤必须绑定未完成且无歧义的control事项。");
+          if (c.operations && !operation) throw new Error("组合任务的控制步骤必须指定对应control事项，不能丢弃原任务。");
+          if (!o.adapters.control) throw new Error("当前没有可用的Ledger控制工具。");
+          // Journal the exact identity before dispatch. Replays use the same
+          // action ID and existing atomic execution claim, never a new preview.
+          append("control_request", control); await save();
+          const result = await o.adapters.control(control, signal);
+          if (result.control_result) append("control_result", result.control_result);
+          if (operation) c.current_operation_id = operation.id;
+          if (result.control_result) {
+            if (operation) { operation.status = "completed"; await save(); continue; }
+            return finish(result, "completed");
+          }
+          if (!c.operations) c.operations = [{ id: "control", label: c.goal, action: "control", effect: "local", depends_on: [], sources: [c.goal], status: "needs_input" }];
+          c.current_operation_id = operation?.id || "control";
+          c.awaiting_delivery = true; c.awaiting_answer = false; c.pending_plan = result;
+          return finish(result, "needs_input");
+        }
         if (s.kind === "plan") {
           if (c.pending_approval || c.pending_batch) throw new Error("当前有待确认方案，不能改写其执行范围；请先处理原确认方案。");
           const args = json(s.arguments_json);
@@ -377,8 +417,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
             if (read.mode === "result" && !observed?.limited && !observed?.approval && !c.pending_approval
               && typeof observed?.reply === "string" && observed.reply.trim()) {
               operation.status = "completed";
-              const resourceLabel = assistantToolExecutionLabel(read.plan).replace(/^查询/, "");
-              const label = operation.label.includes(resourceLabel) ? operation.label : `${operation.label}（${resourceLabel}）`;
+              const label = operation.label;
               replies.push(preparedReads.length === 1 && operations.length === 1 ? observed.reply : `${label}：\n${observed.reply}`);
             }
             await save();
@@ -395,6 +434,14 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           lastValidation = ""; repeatedValidation = 0;
           await save();
           continue;
+        }
+        if (c.workflow_required && !c.operations && s.kind === "respond" && json(s.plan_json!).action === "chat") {
+          if (s.operation_id != null) throw new Error("没有业务清单的聊天或澄清不引用事项ID，请填写null。");
+          const response = await o.adapters.validatePlan(json(s.plan_json!));
+          c.awaiting_answer = !!s.needs_input; c.awaiting_delivery = false;
+          if (c.awaiting_answer) c.pending_plan = response;
+          const reply = observedReply(c);
+          return finish(reply && !s.needs_input ? { ...response, reply } : response, s.needs_input ? "needs_input" : "completed");
         }
         if (c.workflow_required && !c.operations) throw new Error("请先使用kind=plan保存本次完整任务清单及依赖，再处理具体事项，不能只处理第一件事。");
         let operation: WorkflowOperation | undefined;
@@ -485,7 +532,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (s.replaces_output_id != null) {
           plan.replaces_output_id = s.replaces_output_id;
         }
-        if (s.kind === "preview" && !resolved) o.execution?.finish(id, [], "done", assistantToolExecutionLabel(plan).replace(/^准备|^核对/, "整理"));
+        if (s.kind === "preview" && !resolved) o.execution?.finish(id, [], "done", assistantResponseExecutionLabel(plan, false));
         if (!c.operations && plan.action === "record" && c.tool_results.some(r => r.name === "approval_result" && (r.result as AssistantActionResult)?.id === c.goal_id && (r.result as AssistantActionResult)?.status === "succeeded")) {
           const savedReceipt = c.tool_results.find(r => r.name === "approval_result" && (r.result as AssistantActionResult)?.id === c.goal_id)?.result as AssistantActionResult;
           return finish(safePlan(`${savedReceipt.text}\n本目标的普通收支草稿组已确认。剩余新增收支请作为新的请求发送，以便生成独立草稿组，避免重复入账。`), "needs_input");
@@ -527,7 +574,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           if (reply) {
             // Read analysis is commentary, kept separate from observed results.
             if (c.tool_results.some(tool => ["query", "records", "draft_matches"].includes(tool.name))
-              && !c.tool_results.some(tool => ["approval_result", "delivery_result"].includes(tool.name))) result.analysis = result.reply;
+              && !c.tool_results.some(tool => ["approval_result", "delivery_result", "control_result"].includes(tool.name))) result.analysis = result.reply;
             result.reply = reply;
           }
         }

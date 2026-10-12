@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const crypto = require('node:crypto');
-const { NextResponse } = require('next/server');
+const { NextRequest, NextResponse } = require('next/server');
 
 const id = value => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`;
 const categoryId = id(1), memberId = id(2), taskId = id(3), conversationId = id(4), messageId = id(5);
@@ -165,11 +165,12 @@ test('all task endpoints authenticate before reading request data or scheduling 
   const f = fixture({ session: null });
   const collection = f.load('app/api/assistant/tasks/route.ts');
   const item = f.load('app/api/assistant/tasks/[id]/route.ts');
+  const controlRoute = f.load('app/api/assistant/tasks/[id]/control/route.ts');
   const unreadable = { json: () => assert.fail('must authenticate first'),
     get nextUrl() { assert.fail('must authenticate first'); } };
   const context = { get params() { assert.fail('must authenticate first'); } };
   for (const response of [await collection.POST(unreadable), await collection.GET(unreadable),
-    await collection.DELETE(unreadable), await item.GET(unreadable, context), await item.PATCH(unreadable, context)]) {
+    await collection.DELETE(unreadable), await item.GET(unreadable, context), await item.PATCH(unreadable, context), await controlRoute.POST(unreadable, context)]) {
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { error: '未登录' });
   }
@@ -1145,7 +1146,8 @@ if(PGlite) {
   const event={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:false};
   let models=0;const events=[];
   const f=await databaseFixture(t,{provider:{bailianObject:async()=>{models++;return models===1?{kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],sources:['小美生日送礼500元']}]}),plan_json:null}:{kind:'preview',tool:'event',operation_id:'gift',arguments_json:JSON.stringify(event),plan_json:null};}},extraDependencies:{
-   '@/lib/assistant-command-server':{prepareAssistantAgentPreview:async(_user,_conversation,_goal,_fp,_signal,work)=>work()},
+   '@/lib/assistant-control-server':{loadAssistantControlContexts:async()=>[]},
+   '@/lib/assistant-command-server':{ensureAssistantActionsSchema:async()=>{},prepareAssistantAgentPreview:async(_user,_conversation,_goal,_fp,_signal,work)=>work()},
    '@/lib/ledger-event-server':{prepareLedgerEvent:async(_user,_conversation,input)=>{events.push(input);return input.allow_duplicate?{reply:'请核对后确认',approval:{id:id(90),summary:'送礼',count:1,expires_at:null},event_context:{status:'pending',event_id:null,input},event_choices:[]}:{reply:'发现已登记事项，请核对是不是已经记过',event_context:{status:'pending',event_id:null,input},event_choices:[{label:'这是另外新发生的一笔，继续核对',input:{...input,allow_duplicate:true}}]};}}
   }});
   await f.tasks.createAssistantTask('owner',body({message:'小美生日送礼500元'}));await f.tasks.runAssistantTask('owner',taskId);
@@ -1223,4 +1225,35 @@ if (PGlite) {
     const result=await f.tasks.getAssistantTask('owner',taskId);assert.equal(result.status,'succeeded');assert.equal(result.result.drafts.length,47);assert.equal(result.image_progress.completed,1);assert.deepEqual(starts,[1,21,41]);
     assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows,[]);
   });
+}
+
+if (PGlite) {
+ test('real PostgreSQL: persisted control cancellation is fenced, account scoped, replay safe and resumes from the authoritative receipt',async t=>{
+  const f=await databaseFixture(t,{provider:{bailianObject:async()=>({kind:'respond',tool:null,operation_id:null,arguments_json:'{}',plan_json:JSON.stringify({action:'chat',reply:'模型完成文字不作为凭据',drafts:[],query:null})})}});
+  const message='早餐的修改先不用做了';
+  await f.tasks.createAssistantTask('owner',body({message,display_text:message}));
+  const commands=f.load('lib/assistant-command-server.ts');
+  const saved=await commands.saveAssistantApproval('owner',conversationId,{command:{resource:'transactions',operation:'update'},items:[],dependencies:[]},'早餐金额20改22，尚未执行。');
+  const other=await commands.saveAssistantApproval('owner',id(40),{command:{resource:'transactions',operation:'delete'},items:[],dependencies:[]},'其他对话的删除');
+  const server=f.load('lib/assistant-control-server.ts');
+  const contexts=await server.loadAssistantControlContexts('owner',conversationId,taskId);
+  const target=contexts.find(c=>c.target_id===saved.approval.id);
+  const control={target_type:'action',target_id:target.target_id,operation:target.operation,revision:target.revision,decision:'cancel',target_reference:'早餐',requested_operation:'update',changes_json:'{}',user_quote:message};
+  const output=id(80);
+  const c={version:1,workflow_required:true,goal_id:taskId,goal:message,status:'needs_input',steps:1,messages:[{role:'user',content:message}],tool_results:[],pending_approval:null,preview_fingerprints:[],output_id:output,current_operation_id:'control',awaiting_delivery:true,operations:[{id:'control',label:message,action:'control',effect:'local',depends_on:[],status:'needs_input',sources:[message]}],pending_plan:{action:'control',control,reply:'等待执行',drafts:[],query:null}};
+  await f.db.query("UPDATE assistant_tasks SET status='succeeded',agent_checkpoint=$2::jsonb WHERE id=$1",[taskId,JSON.stringify(c)]);
+  const route=f.load('app/api/assistant/tasks/[id]/control/route.ts');
+  const request=attempt=>new NextRequest('http://ledger.test/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attempt,output_id:output})});
+  const context={params:Promise.resolve({id:taskId})};
+  assert.equal((await route.POST(request(0),context)).status,400);
+  for(let i=0;i<2;i++) { const response=await route.POST(request(1),context);assert.equal(response.status,200);assert.equal((await response.json()).status,'cancelled'); }
+  assert.equal((await commands.getAssistantAction('owner',other.approval.id)).status,'pending');
+  const delivered=await f.tasks.createAssistantTask('owner',body({message:'继续原任务',display_text:'继续原任务',continuation:{kind:'delivery',attempt:1,output_id:output,ok:true}}));
+  assert.equal(delivered.attempt,2);assert.equal((await route.POST(request(1),context)).status,400,'consumed control cannot execute again');
+  await f.tasks.runAssistantTask('owner',taskId);
+  const done=await f.tasks.getAssistantTask('owner',taskId);assert.equal(done.agent.status,'completed');assert.match(done.result.reply,/取消/);assert.doesNotMatch(done.result.reply,/模型完成文字/);
+  const checkpoint=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks WHERE id=$1',[taskId])).rows[0].agent_checkpoint;
+  assert.equal(checkpoint.tool_results.filter(r=>r.name==='control_result').length,1);assert.equal(checkpoint.operations[0].status,'completed');
+  assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
+ });
 }

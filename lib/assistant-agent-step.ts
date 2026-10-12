@@ -17,7 +17,7 @@ export function parseAssistantAgentStep(raw: unknown, requireReference = false):
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("step", "必须为对象");
   const value = raw as Record<string, unknown>;
   if (Object.keys(value).some(key => !keys.has(key))) fail("step", "含有不支持的字段");
-  if (typeof value.kind !== "string" || !["plan", "reuse", "read", "preview", "respond"].includes(value.kind)) fail("kind", "不在允许范围内");
+  if (typeof value.kind !== "string" || !["plan", "reuse", "read", "preview", "respond", "control"].includes(value.kind)) fail("kind", "不在允许范围内");
   if (requireReference && !("operation_id" in value)) fail("operation_id", "必须显式填写，计划与最终总结为null");
   if (value.operation_id != null && (typeof value.operation_id !== "string" || !identifier.test(value.operation_id))) fail("operation_id", "必须为任务清单中的合法编号");
   if (value.covered_operation_ids !== undefined && (!Array.isArray(value.covered_operation_ids) || value.covered_operation_ids.length > 32
@@ -41,7 +41,8 @@ export function parseAssistantAgentStep(raw: unknown, requireReference = false):
     }
     s.plan_json = null;
   }
-  if (["plan", "reuse"].includes(s.kind)) {
+  if (s.kind === "control" && (s.plan_json !== null || s.needs_input || s.replaces_output_id != null || s.covered_operation_ids?.length)) fail("control", "只能提交单一控制决定，不能附带修改、替换或其他动作");
+  if (["plan", "reuse", "control"].includes(s.kind)) {
     if (s.tool !== null) fail("tool", "在plan/reuse时必须为null");
   } else if (s.kind === "respond") {
     if (s.tool !== null) fail("tool", "在respond时必须为null");

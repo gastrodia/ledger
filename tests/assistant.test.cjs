@@ -268,7 +268,7 @@ test('draft recognition leaves an unspecified member unresolved, even after earl
   assert.equal(f.calls[0][0].schemaName, 'ledger_plan');
   assert.equal(f.calls[0][0].schema.jsonSchema.type, 'object');
   assert.equal(f.calls[0][0].thinking, false);
-  assert.match(f.calls[0][0].messages[0].content, /不要沿用历史账单中的成员/);
+  assert.match(f.calls[0][0].messages[0].content, /不沿用历史成员或默认成员/);
   assert.ok(!f.calls[0][0].messages[0].content.includes('default_member_id'));
 });
 
@@ -687,8 +687,8 @@ test('asking to change a draft member returns a structured picker target without
   assert.equal(body.query, null);
   assert.equal(f.calls.length, 1);
   assert.equal(f.transactions.length, 0);
-  assert.match(f.calls[0][0].messages[0].content, /已有成员的账单也允许重新选择/);
-  assert.match(f.calls[0][0].messages[0].content, /多笔时只说“这笔”/);
+  assert.match(f.calls[0][0].messages[0].content, /修改draft_batch中明确选定草稿的成员/);
+  assert.match(f.calls[0][0].messages[0].content, /指代不能唯一定位时询问/);
 });
 
 test('invalid editable contexts and out-of-batch model updates fail without financial writes', async () => {
@@ -791,7 +791,7 @@ test('non-undo record and query plans cannot claim undo execution while their in
 
 test('undo prompt requires an explicit operation request and distinguishes capability questions from execution', () => {
   assert.match(helper.ASSISTANT_SYSTEM_PROMPT, /用户必须明确要求现在执行撤销/);
-  assert.match(helper.ASSISTANT_SYSTEM_PROMPT, /“能撤销吗”“如何撤销”“撤销会怎样”.*应action=chat解释，不执行撤销，不生成undo目标/);
+  assert.match(helper.ASSISTANT_SYSTEM_PROMPT, /能力和后果询问只解释，不能准备撤销/);
 });
 
 test('natural-language saved undo returns only a validated operation for the client to execute', async () => {
@@ -810,8 +810,8 @@ test('natural-language saved undo returns only a validated operation for the cli
   assert.equal(f.transactions.length, 0);
   assert.ok(f.queries.every(query => query.values[0] === 'owner'));
   assert.match(f.calls[0][0].messages[0].content, /saved_batch/);
-  assert.match(f.calls[0][0].messages[0].content, /只有一笔时“撤销这笔”选择该行/);
-  assert.match(f.calls[0][0].messages[0].content, /多笔时只说“这笔”/);
+  assert.match(f.calls[0][0].messages[0].content, /按提供的ID、显示顺序和明确范围选目标/);
+  assert.match(f.calls[0][0].messages[0].content, /指代不能唯一定位时询问/);
   assert.ok(f.calls[0][0].messages[0].content.includes(draft.id));
 });
 

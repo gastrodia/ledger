@@ -41,7 +41,8 @@ export function applyDraftEdit<T extends AssistantDraft & { amount?: string }>(d
     return next;
   });
 }
-export const ASSISTANT_DRAFT_ACTION_PROMPT = `
-edit：对当前draft_batch任意字段做单笔或批量修改，使用edit={batch_id,edits:[{draft_id,要修改的字段}]}，其他动作字段null、drafts=[]、query=null。支持type、amount_cents(整数分)、category_id、member_id、transaction_date、description、payment_method、note；未提及字段必须省略，不填null覆盖原值。支持“第二笔改成28.5”“都改为昨天”“加油归交通”“红包是收入”“这几笔用微信付的”。依当前显示顺序、描述、金额、日期选择目标，有歧义先问。多笔可分别修改不同值。金额/日期条件必须依据draft_batch提供的数据，不凭历史猜。修改成员也可用update成员按钮。改单笔收支类型须匹配分类，无法确定分类时置null待补。不能通过edit修改已入账记录（使用manage）。
-confirm：要求把当前草稿入账，返回confirm={batch_id,draft_ids:要入账的草稿ID}，其他动作字段null、drafts=[]、query=null。既支持本组全部也支持选定若干笔。只生成确认请求，页面展示金额与明细后等用户批准，不能声称已入账。缺分类或成员时引导补全，不让模型猜。
-navigate：打开功能页，navigation={page:assistant/transactions/stats/loans/giftbooks/gifts_given/categories/members/notes,operation:open,batch_id:null,order:null}；整理当前草稿顺序用operation=sort、batch_id为当前草稿组、order=original/date-asc/date-desc；清空对话用operation=clear_chat，其余字段null，必须经用户确认。无模型决定的URL，不离开本应用，不自动操作真实付款或账户安全设置。`;
+export const ASSISTANT_DRAFT_ACTION_PROMPT = `草稿动作只使用当前draft_batch的真实组ID和行ID，按明确描述、显示顺序或范围定位；有歧义时询问，不从历史重建或猜目标。已保存流水使用manage或event更正。
+edit={batch_id,edits:[{draft_id,修改字段}]}：支持type、amount_cents、category_id、member_id、transaction_date、description、payment_method、note。amount_cents为整数分，只提供明确修订字段；改类型须类别匹配，无法确定的类别可为null待选择。保留其余行和字段。
+confirm={batch_id,draft_ids}：准备明确范围内草稿的入账确认，页面展示金额与明细后等待批准；缺分类或成员须补充，不声称已入账。对已有确认方案的批准使用control，不重复生成确认卡。
+navigation={page,operation,batch_id,order}：page仅assistant/transactions/stats/loans/giftbooks/gifts_given/categories/members/notes。operation=open展示对应入口；sort仅调整当前草稿组，order=original/date-asc/date-desc；clear_chat须确认且不删除已保存账本。不能提供模型自行决定的URL或离开Ledger。
+这些动作的drafts=[]、query=null，其他动作字段为null或省略；页面实际应用或执行后的回执才构成结果。`;

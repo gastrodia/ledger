@@ -286,7 +286,7 @@ test('event choice selection requires an offered structured choice instead of in
   c.outputs = [{ id: id(3), user_message_id: id(4), input: { message: '送礼', display_text: '送礼', display_images: [] }, attempt: 1,
     plan: { action: 'event', reply: '任意问题措辞', drafts: [], event_context: { input }, event_choices: [choice] } }];
   for (const answer of ['好的', '新发生的一笔', '不是同一笔']) assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', answer), undefined);
-  assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', choice.label).input.allow_duplicate, true);
+  assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', choice.label), undefined, 'typed label must be interpreted by the agent');
   assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', '', choice.input).source_output_id, id(3));
   assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', '', { ...choice.input, amount_cents: 60000 }), undefined);
 });

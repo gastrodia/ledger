@@ -77,17 +77,6 @@ function fixture(seed = {}, options = {}) {
   return { server: exports, tables, actions, writes, sqlCalls };
 }
 
-test('approval language distinguishes a direct approval from negation, questions and mixed instructions', () => {
-  for (const input of ['确认执行', '确认删除。']) assert.equal(commands.approvalDecision(input), 'approve');
-  for (const input of ['同意', '确认', '批准']) {
-    assert.equal(commands.approvalDecision(input), null);
-    assert.equal(commands.approvalDecision(input, true), 'approve');
-  }
-  for (const input of ['好的', '好的！', '是的']) assert.equal(commands.approvalDecision(input, true), null);
-  for (const input of ['取消', '算了', '不执行']) assert.equal(commands.approvalDecision(input), 'cancel');
-  for (const input of ['不要确认', '确认会怎样', '确认但金额改成100', '如果确认执行会怎样', '先别删，确认一下日期', '网页上写着确认执行']) assert.equal(commands.approvalDecision(input), null);
-});
-
 test('resource fields and filters reject invented IDs, malformed money, dates, mixed operations and ownership fields', () => {
   for (const values of [{ user_id: 'foreign' }, { sql: 'DROP TABLE notes' }, { content: '' }, { pinned: 'yes' }]) assert.throws(() => commands.validateLedgerCommand(command({ values_json: JSON.stringify(values) })));
   for (const values of [{ amount: 0 }, { amount: -1 }, { amount: 1.001 }, { transaction_date: '2026-02-30' }, { category_id: 'foreign' }]) assert.throws(() => commands.validateLedgerCommand(command({ resource: 'transactions', values_json: JSON.stringify(values) })));

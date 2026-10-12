@@ -43,6 +43,12 @@ function memoryStorage() {
   };
 }
 
+function controlPlan(body, target, decision = 'approve') {
+  const control = { target_type: target.target_type, target_id: target.target_id, operation: target.operation, revision: target.revision, decision, target_reference: null, requested_operation: null, changes_json: '{}', user_quote: body.message };
+  return { action: 'control', control, reply: '正在处理具体方案', drafts: [], query: null,
+    agent: { goal_id: body.id, goal: body.message, output_id: body.id, status: 'needs_input', steps: 1, tool_calls: 0, awaiting_delivery: true } };
+}
+
 function harness({ post, decode, taskStore = new Map(), persist = () => true, speechStart, realDraft = false, storage = memoryStorage() } = {}) {
   const slots = [], calls = [], notices = [], revoked = [], scrolls = [], blobs = new Map(), listeners = new Map();
   let cursor = 0, pending = [], layoutPending = [], tree, config, epoch = 0, logout, blobId = 0;
@@ -106,6 +112,7 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
       calls.push({ url, body, options });
       if (!options.method && url === '/api/auth/me') return response({ user: { id: uuid(900) } });
       if (!options.method && url === '/api/assistant') return response({ categories: [category], members: [member], configured: true });
+      if (url.endsWith('/control') && options.method === 'POST') return post(url, body, options);
       if (url.startsWith('/api/assistant/tasks')) {
         const id = url.split('/')[4]?.split('?')[0];
         if (!options.method) {
@@ -1170,23 +1177,23 @@ test('real draft hook acknowledges clear normalization and accepts the next mess
   } finally { h.unmount(); }
 });
 
-test('conversational approval executes a saved-data preview only after an explicit yes and cancels without writing', async () => {
-  const approval = { id: uuid(70), summary: '将删除 1 条记录：早餐。尚未执行。回复确认执行或取消。', count: 1, expires_at: '2099-10-09T00:00:00Z' };
-  for (const decision of ['确认执行', '取消']) {
-    const h = await ready({ post: async (url, body) => url.startsWith('/api/assistant/actions/')
-      ? response({ id: approval.id, status: body.decision === 'approve' ? 'succeeded' : 'cancelled', text: body.decision === 'approve' ? '已删除 1 条收支记录。' : '已取消本次操作。' })
-      : response({ action: 'manage', reply: approval.summary, drafts: [], query: null, approval }) });
-    h.control('记一笔，或问问账本').props.onChange({ target: { value: '删除已入账早餐' } }); h.render(); h.click('发送'); await h.flush();
-    assert.ok(h.text.includes('尚未执行'));
-    assert.equal(h.calls.filter(c => c.url.startsWith('/api/assistant/actions/')).length, 0);
-    h.control('记一笔，或问问账本').props.onChange({ target: { value: decision } }); h.render(); h.click('发送'); await h.flush();
-    const requests = h.calls.filter(c => c.url.startsWith('/api/assistant/actions/'));
-    assert.equal(requests.length, 1);
-    assert.equal(requests[0].body.decision, decision === '取消' ? 'cancel' : 'approve');
+test('conversational approval is sent to the agent and dispatches only its persisted decision', async () => {
+  const approval = { id: uuid(70), summary: '删除早餐的具体预览，尚未执行', count: 1, expires_at: null };
+  for (const [message, decision] of [['就按这个方案处理吧', 'approve'], ['早餐这项操作先不用做了', 'cancel']]) {
+    const h = await ready({ post: async (url, body) => url.endsWith('/control')
+      ? response({ id: approval.id, status: decision === 'approve' ? 'succeeded' : 'cancelled', text: decision === 'approve' ? '已删除早餐' : '已取消本次操作' })
+      : body.message === message ? response(controlPlan(body, { target_type: 'action', target_id: approval.id, operation: 'delete', revision: 'server-version' }, decision))
+      : body.continuation ? response(chat('已依据原执行凭据处理')) : response({ action: 'manage', reply: approval.summary, drafts: [], query: null, approval }) });
+    writeComposer(h, '删除已入账早餐'); h.click('发送'); await settleDraft(h);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/control')).length, 0);
+    writeComposer(h, message); h.click('发送'); await settleDraft(h);
+    assert.equal(h.calls.filter(c => c.url === '/api/assistant/tasks' && c.body.message === message).length, 1);
+    const requests = h.calls.filter(c => c.url.endsWith('/control'));
+    assert.equal(requests.length, 1, JSON.stringify({messages:h.value.messages,calls:h.calls.map(c=>({url:c.url,body:c.body}))})); assert.deepEqual(Object.keys(requests[0].body).sort(), ['attempt', 'output_id']);
     assert.equal(h.value.messages.some(m => m.approval), false);
-    assert.equal(h.value.messages.filter(m => m.role === "user").at(-1).localHandled, true);
-    const restored = h.restore(h.value);
-    assert.equal(restored.messages.at(-1).incomplete, undefined, 'approved and cancelled replies do not become unsent messages after refresh');
+    const before = requests.length; h.restore(h.value); await settleDraft(h);
+    assert.equal(h.calls.filter(c => c.url.endsWith('/control')).length, before, 'refresh does not replay a consumed decision');
+    h.unmount();
   }
 });
 
@@ -1195,30 +1202,30 @@ test('a conversational draft confirmation posts only the reviewed subset and pre
   const batch = draftGroup(60, drafts);
   const h = await ready({ post: async (url, body) => url === '/api/assistant/confirm'
     ? response({ count: body.drafts.length, transaction_ids: [uuid(99)] })
-    : response({ action: 'confirm', reply: '', drafts: [], query: null, confirm: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
+    : body.message === '确认执行' ? response(controlPlan(body, body.control_contexts[0])) : body.continuation ? response(chat('已处理原卡片')) : response({ action: 'confirm', reply: '', drafts: [], query: null, confirm: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
   h.restore({ messages: [batch], input: '', images: [] });
-  h.control('记一笔，或问问账本').props.onChange({ target: { value: '只把第一笔入账' } }); h.render(); h.click('发送'); await h.flush();
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '只把第一笔入账' } }); h.render(); h.click('发送'); await settleDraft(h);
   assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm').length, 0);
   assert.ok(h.text.includes('准备将以下 1 笔草稿入账'));
-  h.control('记一笔，或问问账本').props.onChange({ target: { value: '确认执行' } }); h.render(); h.click('发送'); await h.flush();
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '确认执行' } }); h.render(); h.click('发送'); await settleDraft(h);
   const posts = h.calls.filter(c => c.url === '/api/assistant/confirm');
   assert.equal(posts.length, 1);
   assert.deepEqual(posts[0].body.drafts.map(d => d.id), [drafts[0].id]);
   assert.deepEqual(h.value.messages.find(m => m.id === batch.id).drafts.map(d => d.id), [drafts[1].id]);
   assert.ok(h.value.messages.some(m => m.status === 'saved' && m.drafts[0].id === drafts[0].id));
-  assert.ok(h.value.messages.some(m => m.role === 'user' && m.text === '确认执行' && m.localHandled));
+  assert.ok(h.calls.some(c => c.url === '/api/assistant/tasks' && c.body.message === '确认执行'));
 });
 
 test('changing a draft after preview invalidates conversational approval; no posting occurs', async () => {
   const drafts = [datedDraft(101, '2026-10-09', member.id)];
   const batch = draftGroup(60, drafts);
-  const h = await ready({ post: async () => response({ action: 'confirm', reply: '', drafts: [], query: null, confirm: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
+  const h = await ready({ post: async (_url, body) => body.message === '确认执行' ? response(controlPlan(body, body.control_contexts[0])) : body.continuation ? response(chat('原草稿未入账')) : response({ action: 'confirm', reply: '', drafts: [], query: null, confirm: { batch_id: batch.id, draft_ids: [drafts[0].id] } }) });
   h.restore({ messages: [batch], input: '', images: [] });
-  h.control('记一笔，或问问账本').props.onChange({ target: { value: '把这笔入账' } }); h.render(); h.click('发送'); await h.flush();
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '把这笔入账' } }); h.render(); h.click('发送'); await settleDraft(h);
   const snapshot = h.value;
   snapshot.messages.find(m => m.id === batch.id).drafts[0].amount = '99.00';
   h.restore(snapshot);
-  h.control('记一笔，或问问账本').props.onChange({ target: { value: '确认执行' } }); h.render(); h.click('发送'); await h.flush();
+  h.control('记一笔，或问问账本').props.onChange({ target: { value: '确认执行' } }); h.render(); h.click('发送'); await settleDraft(h);
   assert.equal(h.calls.filter(c => c.url === '/api/assistant/confirm').length, 0);
   assert.ok(h.text.includes('草稿在确认期间已变化'));
 });
@@ -1240,7 +1247,7 @@ test('event choices preserve context, a single approval completes both ledgers, 
   assert.equal(selected.event_selection.member_id,member.id);
   assert.equal(selected.event_context.input.amount_cents,50000);
   assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,0);
-  writeComposer(h,'确认执行');h.click('发送');await settleDraft(h);
+  clickTextButton(h,'确认执行');await settleDraft(h);
   assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,1);
   assert.equal(h.value.messages.find(m=>m.eventContext?.status==='saved').eventContext.event_id,uuid(711));
   h.unmount();
@@ -1487,8 +1494,8 @@ test('failed approval retains its card and retry controls, clearing stale errors
 test('a new meal draft preserves the pending gift approval through restore and only its button executes it', async () => {
   const preview={title:'记录送礼',metrics:[],sections:[],notices:[]};
   const approval={id:uuid(901),summary:'准备记录给大伯送礼',count:1,expires_at:null,preview};
-  const h=await ready({post:async url=>url.startsWith('/api/assistant/actions/')
-    ? response({id:approval.id,status:'succeeded',text:'送礼已保存'}) : response({...record,drafts:[{...row(903,2000,member.id),description:'吃饭'}],import_summary:null})});
+  const h=await ready({post:async (url,body)=>url.startsWith('/api/assistant/actions/')
+    ? response({id:approval.id,status:'succeeded',text:'送礼已保存'}) : body.message === '今天吃饭花了20' ? response({...record,drafts:[{...row(903,2000,member.id),description:'吃饭'}],import_summary:null}) : response(chat('当前有多个待处理方案或账单，请指定具体对象'))});
   try {
     h.restore({messages:[{id:uuid(902),role:'assistant',text:approval.summary,approval,actionPreview:preview}],input:''});
     writeComposer(h,'今天吃饭花了20');h.click('发送');await h.flush();
@@ -1503,7 +1510,7 @@ test('a new meal draft preserves the pending gift approval through restore and o
       writeComposer(h,decision);h.click('发送');await h.flush();
       assert.ok(h.text.includes('当前有多个待处理方案或账单'));
       assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')||c.url==='/api/assistant/confirm').length,0);
-      assert.equal(h.calls.filter(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').length,1);
+      assert.equal(h.calls.filter(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').length,2+['确认','确认入账','取消'].indexOf(decision));
       assert.equal(h.value.messages.find(m=>m.id===uuid(902)).approval.id,approval.id);
     }
     clickTextButton(h,'确认执行');await h.flush();
@@ -1517,9 +1524,9 @@ test('a new meal draft preserves the pending gift approval through restore and o
 test('multiple pending approvals survive new requests and cancelling one card preserves the other', async () => {
   const gift={id:uuid(910),summary:'准备记录送礼',count:1,expires_at:null};
   const note={id:uuid(911),summary:'准备创建便利贴',count:1,expires_at:null};
-  const h=await ready({post:async url=>url.startsWith('/api/assistant/actions/')
+  const h=await ready({post:async (url,body)=>url.startsWith('/api/assistant/actions/')
     ? response({id:gift.id,status:'cancelled',text:'已取消送礼'})
-    : response({action:'manage',reply:note.summary,drafts:[],query:null,approval:note})});
+    : body.message==='帮我记下买鸡蛋' ? response({action:'manage',reply:note.summary,drafts:[],query:null,approval:note}) : response(chat('请指定需要处理的方案'))});
   try {
     h.restore({messages:[{id:uuid(912),role:'assistant',text:gift.summary,approval:gift}],input:''});
     writeComposer(h,'帮我记下买鸡蛋');h.click('发送');await h.flush();
@@ -1542,14 +1549,14 @@ test('multiple pending approvals survive new requests and cancelling one card pr
 test('an unrelated request retains a reviewed draft confirmation without double-counting its source card', async () => {
   const batch=draftGroup(920,[datedDraft(921,'2026-10-09',member.id)]);
   const choice={batch_id:batch.id,draft_ids:[batch.drafts[0].id],snapshot:JSON.stringify(batch.drafts)};
-  const h=await ready({post:async url=>url==='/api/assistant/confirm'
-    ? response({count:1,transaction_ids:[uuid(923)]}) : response(chat('你好'))});
+  const h=await ready({post:async (url,body)=>url==='/api/assistant/confirm'
+    ? response({count:1,transaction_ids:[uuid(923)]}) : body.message==='确认执行' ? response(controlPlan(body,body.control_contexts[0])) : response(chat('你好'))});
   try {
     h.restore({messages:[batch,{id:uuid(922),role:'assistant',text:'请核对后入账',confirmChoice:choice}],input:''});
-    writeComposer(h,'你好');h.click('发送');await h.flush();
+    writeComposer(h,'你好');h.click('发送');await settleDraft(h);
     h.restore(h.value);
     assert.equal(h.value.messages.find(m=>m.id===uuid(922)).confirmChoice.batch_id,batch.id);
-    writeComposer(h,'确认执行');h.click('发送');await h.flush();
+    writeComposer(h,'确认执行');h.click('发送');await settleDraft(h);
     assert.equal(h.calls.filter(c=>c.url==='/api/assistant/confirm').length,1);
     assert.equal(h.value.messages.find(m=>m.id===batch.id).status,'saved');
   } finally {h.unmount();}

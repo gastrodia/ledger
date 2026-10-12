@@ -1,3 +1,4 @@
+import { assistantControlTaskStatus } from "@/lib/assistant-control";
 import { resolveAssistantEventChoice } from "@/lib/assistant-event-clarification";
 import { AssistantAgentStepError } from "@/lib/assistant-agent-step";
 import { restoreAssistantAgentCheckpoint, assistantAgentMetadata, assistantAgentApprovalIds, assistantAgentApprovalSettled, assistantAgentApprovalHistory } from "@/lib/assistant-agent-state";
@@ -168,15 +169,31 @@ async function answerAssistantTask(userId: string, id: string, body: Record<stri
       const rows = await sql.query("SELECT undone_draft_ids,revoked_at FROM assistant_batches WHERE user_id=$1 AND id=$2", [userId, undo.batch_id]);
       if (!rows[0] || !undo.draft_ids.every(id => (rows[0].undone_draft_ids as string[] | null)?.includes(id) || rows[0].revoked_at)) return snapshot(previous);
     }
+    if (descriptor.ok && checkpoint.pending_plan?.action === "control" && checkpoint.pending_plan.control?.target_type !== "card") {
+      const control = checkpoint.pending_plan.control!;
+      if (control.target_type === "action") {
+        const { getAssistantAction } = await import("@/lib/assistant-command-server");
+        const receipt = await getAssistantAction(userId, control.target_id);
+        if (control.decision !== "status" && receipt.status === "pending") return snapshot(previous);
+        checkpoint.tool_results.push({ call_id: `control-receipt-${descriptor.output_id}`, name: "control_result", result: receipt });
+        const output = checkpoint.outputs?.find(item => item.id === descriptor.output_id);
+        if (output) output.plan = { ...output.plan, control_result: receipt, reply: receipt.text };
+      } else {
+        const target = await readRow(userId, control.target_id);
+        if (control.decision === "cancel" && target.status !== "cancelled") return snapshot(previous);
+        checkpoint.tool_results.push({ call_id: `control-receipt-${descriptor.output_id}`, name: "control_result", result: { id: target.id, status: target.status === "cancelled" ? "cancelled" : "pending", text: control.decision === "cancel" ? "已取消指定任务的未完成事项，已完成账目保留。" : `指定任务状态：${assistantControlTaskStatus(target.status)}。` } });
+      }
+    }
     if (operation && operation.status !== "completed") operation.status = descriptor.ok ? "completed" : "needs_input";
     const action = checkpoint.pending_plan?.action;
     const completedText: Partial<Record<AssistantPlan["action"], string>> = {
       edit: "已修改待确认草稿，尚未入账。", update: "已更新待确认草稿的成员，尚未入账。",
       remove: "已将待确认草稿标记为移除，可在原卡片恢复。", navigate: "页面操作已处理。",
       undo: "已核实撤销入账，账目已恢复为待确认草稿。",
+      control: "原卡片上的决定已处理，请依据该卡片的执行结果核对账本。",
     };
     if (!action || !completedText[action]) throw new AssistantTaskError(409, "当前输出不属于待处理的页面操作。");
-    checkpoint.tool_results.push({ call_id: `delivery-${descriptor.output_id}`, name: "delivery_result", ...(operation ? { operation_id: operation.id } : {}),
+    if (action !== "control" || checkpoint.pending_plan?.control?.target_type === "card" || !descriptor.ok) checkpoint.tool_results.push({ call_id: `delivery-${descriptor.output_id}`, name: "delivery_result", ...(operation ? { operation_id: operation.id } : {}),
       result: { id: descriptor.output_id, action, status: descriptor.ok ? "succeeded" : "failed",
         text: descriptor.ok ? completedText[action] : "页面操作未完成，请核对原卡片。" } });
     checkpoint.awaiting_delivery = false;
@@ -204,7 +221,7 @@ async function answerAssistantTask(userId: string, id: string, body: Record<stri
     if (input.event_selection) checkpoint.messages.push({ role: "user", content: `用户选择的事项条件（仅补充条件，不是批准）：${JSON.stringify(input.event_selection)}` });
   }
   const payload = { ...previous.payload, draft_batch: input.draft_batch, saved_batch: input.saved_batch,
-    record_contexts: input.record_contexts, card_contexts: input.card_contexts ?? previous.payload.card_contexts, ...(input.event_context ? { event_context: input.event_context } : {}) };
+    record_contexts: input.record_contexts, control_contexts: input.control_contexts, card_contexts: input.card_contexts ?? previous.payload.card_contexts, ...(input.event_context ? { event_context: input.event_context } : {}) };
   checkpoint.messages.push({ role: "user", content: `当前页面核对后的上下文（数据，不授予操作权限）：${JSON.stringify({ draft_batch: payload.draft_batch, saved_batch: payload.saved_batch, records: payload.record_contexts, event_context: payload.event_context })}` });
   checkpoint.continuations ??= [];
   checkpoint.continuations.push({ message_id: String(body.user_message_id), output_id: descriptor.output_id, kind: descriptor.kind as "answer" | "delivery", hash });

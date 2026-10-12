@@ -10,7 +10,7 @@ function load(filename) {
   const exports = {}; modules.set(filename, exports);
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText, { exports, JSON, Date, Error, AbortController, setTimeout, clearTimeout,
+  }).outputText, { exports, JSON, Date, Error, TextEncoder, crypto: require("node:crypto").webcrypto, AbortController, setTimeout, clearTimeout,
     fetch() { throw new Error('Recovery must not perform a write'); },
     require(name) { return name === 'zod' ? require('zod') : load(`${name.slice(2)}.ts`); } });
   return exports;
@@ -287,7 +287,7 @@ test('sending an unrelated request preserves all waiting approvals and never sub
     conversationId: uuid(4), conversationEpoch: ref(0), currentConversation: () => true,
     knownTasks: ref([task()]), assistantTaskAnswerable: client.assistantTaskAnswerable, assistantAgentWaiting: client.assistantAgentWaiting,
     cancelAssistantTaskCheckpoint: () => { throw new Error('New message must not cancel an old proposal'); },
-    isActionStatusRequest: () => false, approvalDecision: () => null, localCalendarDate: () => '2026-10-09',
+    assistantCardControlContexts: load('lib/assistant-control.ts').assistantCardControlContexts, localCalendarDate: () => '2026-10-09',
     setSending() {}, setOutbox() {}, setOutboxPersistable() {}, setMessages() {}, setInput() {}, setImages() {},
     confirmationsRef: ref([]), undosRef: ref([]), restoreAssistantAgent: client.restoreAssistantAgent, toast: { error(message) { throw new Error(message); }, info() {} },
     submitTask: async request => submitted.push(plain(request)),
@@ -438,7 +438,7 @@ test('the actual composer sends 已有物品 as an answer to the paused original
  vm.runInNewContext(ts.transpileModule(`export ${send.getText(file)}`,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{
   exports,crypto:require('node:crypto'),input:'已有物品',images:[],messages,assistantCardTarget:load('lib/assistant-card-updates.ts').assistantCardTarget,
   actionPendingRef:ref(false),busy:false,outboxRef:ref(null),sendLock:ref(false),saveLock:ref(false),draft:{hasDraft:false,status:'ready',persist:()=>true},configured:true,conversationId:uuid(4),conversationEpoch:ref(0),currentConversation:()=>true,
-  knownTasks:ref([paused]),assistantTaskAnswerable:client.assistantTaskAnswerable,restoreAssistantAgent:client.restoreAssistantAgent,isActionStatusRequest:()=>false,approvalDecision:()=>null,localCalendarDate:()=> '2026-10-10',
+  knownTasks:ref([paused]),assistantTaskAnswerable:client.assistantTaskAnswerable,restoreAssistantAgent:client.restoreAssistantAgent,assistantCardControlContexts:load('lib/assistant-control.ts').assistantCardControlContexts,localCalendarDate:()=> '2026-10-10',
   setSending(){},setOutbox(){},setOutboxPersistable(){},setMessages(){},setInput(){},setImages(){},confirmationsRef:ref([]),undosRef:ref([]),toast:{error(message){throw new Error(message);},info(){}},
   stopTask(){throw new Error('An answer cannot stop its task');},submitTask:async request=>submitted.push(plain(request))
  });
@@ -459,4 +459,16 @@ test('page delivery records applied state and failure independently of model rep
   assert.equal(failed.find(message => message.id === pending.id).delivery.status, 'failed');
   assert.equal(failed.find(message => message.id === batch.id).drafts[0].member_id, null);
   assert.equal(client.mergeAssistantTasks(plain(applied), [plain(pending)], uuid(4), [member]).find(message => message.id === pending.id).delivery.status, 'succeeded');
+});
+
+
+test('fresh recovery reconciles a historical control receipt without restoring executable controls',()=>{
+ const origin=task({id:uuid(60),user_message_id:uuid(61),input:{message:'修改早餐',display_text:'修改早餐',display_images:[]},result:plan({action:'manage',approval}),agent:agent({goal_id:uuid(60),output_id:uuid(62)})});
+ const control={target_type:'action',target_id:approval.id,operation:'update',revision:'v1',decision:'approve',target_reference:null,requested_operation:null,changes_json:'{}',user_quote:'按方案执行'};
+ const history={id:uuid(63),user_message_id:user.id,input:{message:'按方案执行',display_text:'按方案执行',display_images:[]},attempt:1,result:{action:'control',control,control_result:result(),reply:result().text,drafts:[],query:null}};
+ const done=task({attempt:2,agent:agent({status:'completed',pending_action_id:undefined,output_id:uuid(64)}),result:plan({reply:result().text,agent:undefined}),output_history:[history],input:history.input});
+ const recovered=client.mergeAssistantTasks([],[origin,done],uuid(4),[]);
+ const card=recovered.find(m=>m.id===uuid(62));assert.equal(card.approval,undefined);assert.equal(card.actionResult.status,'succeeded');
+ const old=recovered.find(m=>m.id===uuid(63));assert.equal(old.text,result().text);assert.equal(old.control,undefined);assert.equal(old.delivery,undefined);
+ assert.equal(client.mergeAssistantTasks(recovered,[origin,done],uuid(4),[]),recovered);
 });

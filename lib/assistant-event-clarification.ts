@@ -20,12 +20,11 @@ export function offeredAssistantEventChoices(c: AssistantAgentCheckpoint, operat
   if (!output) return;
   return { output_id: output.id, input: normalized(result.event_context.input)!, choices: output.plan.event_choices! };
 }
-export function resolveAssistantEventChoice(c: AssistantAgentCheckpoint, operationId: string, answer: string, selection?: LedgerEventInput): AssistantEventResolution | undefined {
+export function resolveAssistantEventChoice(c: AssistantAgentCheckpoint, operationId: string, _answer: string, selection?: LedgerEventInput): AssistantEventResolution | undefined {
   const offered = offeredAssistantEventChoices(c, operationId);
   if (!offered) return;
   let choice: LedgerEventChoice | undefined;
   if (selection) choice = offered.choices.find(item => equal(item.input, selection));
-  else choice = offered.choices.find(item => item.label === answer.trim());
   if (!choice) return;
   return { operation_id: operationId, source_output_id: offered.output_id, input: normalized(choice.input)!, pending: true };
 }

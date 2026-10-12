@@ -66,10 +66,11 @@ export type AssistantConversationMessage = {
   taskAttempt?: number;
   image_progress?: AssistantImageProgress | null;
   process?: AssistantProcess;
+  control?: import("@/lib/assistant-control").AssistantControl;
   /** Remains set after editing/deleting/moving drafts so recovery cannot replay them. */
   taskApplied?: boolean;
   /** Recorded by the page operation itself; never derived from reply text. */
-  delivery?: { action: "edit" | "update" | "remove" | "navigate" | "undo"; status: "succeeded" | "failed" | "waiting" };
+  delivery?: { action: "edit" | "update" | "remove" | "navigate" | "undo" | "control"; status: "succeeded" | "failed" | "waiting" };
   agent?: NonNullable<AssistantPlan["agent"]>;
   /** Earlier checkpoint outputs remain visible when this stable reply advances. */
   taskHistory?: AssistantTaskOutput[];
@@ -437,7 +438,7 @@ function mergeAssistantTaskOutputs(
       // Restore the server-owned question in place without restoring its controls.
       const result = task.result;
       const question = result && assistantHistoryQuestion({ text: result.reply, eventChoices: result.event_choices, agent: result.agent });
-      if (question && (!previousReply.text || ["这张卡片已更新。", "这组账目卡片已更新。"].includes(previousReply.text))) {
+      if (question && previousReply.text !== question) {
         next = next.map(message => message.id === previousReply.id ? { ...message, text: question } : message);
       }
       continue;
@@ -512,7 +513,19 @@ function mergeAssistantTaskOutputs(
       reply = { ...reply, text: result.reply, updatesCardId: result.replaces_output_id, analysis: result.analysis, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
       if (["edit", "update", "remove", "navigate", "undo"].includes(result.action))
         reply.delivery = { action: result.action as NonNullable<AssistantConversationMessage["delivery"]>["action"], status: "failed" };
-      if (result.action === "manage" || result.action === "event") {
+      if (result.action === "control" && result.control) {
+        reply.replyKind = "result";
+        if (result.control_result) {
+          const receipt = result.control_result;
+          next = next.map(message => (message.approval?.id || message.actionResult?.id) !== receipt.id ? message : {
+            ...message, actionResult: receipt, actionPreview: receipt.preview || message.actionPreview,
+            ...(receipt.replacement_approval ? { approval: receipt.replacement_approval, text: receipt.replacement_approval.summary }
+              : { text: receipt.text, ...(["succeeded", "failed", "cancelled", "expired"].includes(receipt.status) ? { approval: undefined } : {}) }),
+            ...(receipt.event_context ? { eventContext: receipt.event_context } : {}),
+          });
+          if (receipt.transaction_updates?.length) next = syncSavedTransactionCards(next, receipt.transaction_updates);
+        } else { reply.control = result.control; reply.delivery = { action: "control", status: "waiting" }; }
+      } else if (result.action === "manage" || result.action === "event") {
         reply = { ...reply, ...(result.command ? { proposalScope: {resource:result.command.resource,operation:result.command.operation,ids:result.command.ids} } : {}), eventContext: result.event_context, eventChoices: result.event_choices, approval: result.approval, actionPreview: result.approval?.preview, exportFile: result.export_file, ledgerContext: result.record_context, replyView: result.record_context ? recordReplyView(result.record_context.resource, result.record_context.rows, result.command, members, categories) : result.reply_view };
       } else if (result.action === "edit") {
         reply.replyKind = "result";
@@ -534,7 +547,7 @@ function mergeAssistantTaskOutputs(
             ? { batch_id: target.id, status: "pending", drafts: target.drafts.filter(d => !d.ignored && !d.softRemoved) } : null);
           const selected = target!.drafts!.filter(d => choice.draft_ids.includes(d.id));
           reply.confirmChoice = { ...choice, snapshot: JSON.stringify(selected) };
-          reply.text = `准备将以下 ${selected.length} 笔草稿入账：\n${selected.map(d => `- ${d.description} · ${d.transaction_date} · ${d.type === "income" ? "收入" : "支出"} ¥${d.amount} · ${members.find(m => m.id === d.member_id)?.name || "未选成员"} · ${categories.find(c => c.id === d.category_id)?.name || "未选分类"}`).join("\n")}\n尚未入账。回复“确认执行”批准，或回复“取消”。`;
+          reply.text = `准备将以下 ${selected.length} 笔草稿入账：\n${selected.map(d => `- ${d.description} · ${d.transaction_date} · ${d.type === "income" ? "收入" : "支出"} ¥${d.amount} · ${members.find(m => m.id === d.member_id)?.name || "未选成员"} · ${categories.find(c => c.id === d.category_id)?.name || "未选分类"}`).join("\n")}\n尚未入账，请核对后明确批准或取消此方案。`;
         } catch { reply.text = changed; }
       } else if (result.action === "navigate" && result.navigation) {
         const nav = result.navigation;

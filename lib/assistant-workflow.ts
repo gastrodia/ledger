@@ -1,5 +1,5 @@
 /** A bounded agenda of existing Ledger operations; execution remains in domain adapters. */
-export const WORKFLOW_ACTIONS = ["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event"] as const;
+export const WORKFLOW_ACTIONS = ["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event", "control"] as const;
 export type WorkflowAction = typeof WORKFLOW_ACTIONS[number];
 export type WorkflowOperation = {
   id: string; label: string; action: WorkflowAction; effect: "read" | "write" | "local"; depends_on: string[];
@@ -23,12 +23,12 @@ export function validateWorkflow(value: unknown, restore = false): WorkflowOpera
       || (item.questions !== undefined && (!Array.isArray(item.questions) || item.questions.length > 8 || item.questions.some(question => typeof question !== "string" || !question.trim() || question.length > 500)))
       || new Set(item.depends_on).size !== item.depends_on.length || (restore && !statuses.has(item.status))
       || (item.receipt_id !== undefined && (typeof item.receipt_id !== "string" || item.receipt_id.length > 100))) throw new Error("任务事项格式无效。");
-    return { id: item.id, label: item.label, action: item.action, effect: item.effect || (["query", "chat"].includes(item.action) ? "read" : ["edit", "update", "remove", "navigate"].includes(item.action) ? "local" : "write"), depends_on: [...item.depends_on], status: restore ? item.status : "pending" as const,
+    return { id: item.id, label: item.label, action: item.action, effect: item.effect || (["query", "chat"].includes(item.action) ? "read" : ["edit", "update", "remove", "navigate", "control"].includes(item.action) ? "local" : "write"), depends_on: [...item.depends_on], status: restore ? item.status : "pending" as const,
       ...(item.sources ? { sources: [...item.sources] } : {}),
       ...(item.questions?.length ? { questions: [...item.questions] } : {}),
       ...(restore && item.receipt_id ? { receipt_id: item.receipt_id } : {}) };
   });
-  if (operations.some(item => ["record", "event", "confirm", "undo"].includes(item.action) && item.effect !== "write" || ["edit", "update", "remove", "navigate"].includes(item.action) && item.effect !== "local" || ["query", "chat"].includes(item.action) && item.effect !== "read")) throw new Error("事项执行类型与业务动作不一致。");
+  if (operations.some(item => ["record", "event", "confirm", "undo"].includes(item.action) && item.effect !== "write" || ["edit", "update", "remove", "navigate", "control"].includes(item.action) && item.effect !== "local" || ["query", "chat"].includes(item.action) && item.effect !== "read")) throw new Error("事项执行类型与业务动作不一致。");
   const byId = new Map(operations.map(item => [item.id, item]));
   if (byId.size !== operations.length) throw new Error("任务事项编号重复。");
   const visited = new Set<string>(), visiting = new Set<string>();

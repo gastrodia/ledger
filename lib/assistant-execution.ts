@@ -102,7 +102,7 @@ export function assistantToolExecutionLabel(plan: AssistantPlan): string {
 
 export function assistantResponseExecutionLabel(plan: AssistantPlan, hasRead: boolean): string {
   const labels: Record<AssistantPlan["action"], string> = {
-    record: "生成记账草稿", query: "整理查询条件", chat: hasRead ? "整理查询结果" : "生成回复", update: "整理草稿成员修改",
+    control: "处理指定方案或任务", record: "生成记账草稿", query: "整理查询条件", chat: hasRead ? "整理查询结果" : "生成回复", update: "整理草稿成员修改",
     undo: "准备撤销入账方案", remove: "准备删除草稿方案", manage: "整理账本操作条件", edit: "整理草稿修改",
     confirm: "准备确认草稿", navigate: "确定要打开的页面", event: "整理事项条件",
   };
@@ -111,7 +111,7 @@ export function assistantResponseExecutionLabel(plan: AssistantPlan, hasRead: bo
 
 export function assistantPlanExecutionDetails(plan: AssistantPlan): string[] {
   const labels: Record<AssistantPlan["action"], string> = {
-    record: "生成记账草稿", query: "查询账本", chat: "对话回复", update: "修改草稿成员", undo: "准备撤销入账",
+    control: "处理指定方案或任务", record: "生成记账草稿", query: "查询账本", chat: "对话回复", update: "修改草稿成员", undo: "准备撤销入账",
     remove: "准备删除草稿", manage: "整理账本操作", edit: "修改草稿", confirm: "准备确认草稿",
     navigate: "打开相关页面", event: "整理生活事件",
   };

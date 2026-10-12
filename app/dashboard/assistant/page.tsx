@@ -6,7 +6,8 @@ import { AssistantDraftMatchCard } from "@/components/assistant/draft-match-card
 import { AssistantDraftCard, AssistantDraftRow } from "@/components/assistant/draft-card";
 import { AssistantReplyShell, AssistantReplyCard, AssistantReplyNotice, assistantChoiceClass } from "@/components/assistant/reply-primitives";
 import { draftReplyView, recordReplyView, resultReplyView } from "@/lib/assistant-reply-view";
-import { approvalDecision, isActionStatusRequest, type AssistantActionResult } from "@/lib/assistant-commands";
+import { type AssistantActionResult } from "@/lib/assistant-commands";
+import { assistantCardControlContexts, validateAssistantControl } from "@/lib/assistant-control";
 import NextImage from "next/image";
 import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type ClipboardEvent } from "react";
 import { ArrowDown, ArrowLeftRight, ArrowUp, BarChart3, Check, Copy, Gift, ImagePlus, LayoutGrid, Loader2, MessageCircle, Mic, Plus, Search, Square, StickyNote, Trash2, Undo2, Users } from "lucide-react";
@@ -540,21 +541,66 @@ export default function AssistantPage() {
     } finally { resumingAgents.current.delete(key); finishController(controller); }
   }
 
+  async function applyAgentControl(task: AssistantTask) {
+    const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+    const output = messagesRef.current.find(message => message.id === agent?.output_id);
+    const control = output?.control;
+    if (!output || !control || output.delivery?.status !== "waiting") return;
+    const key = `control:${task.id}:${task.attempt}:${output.id}`;
+    if (resumingAgents.current.has(key)) return;
+    resumingAgents.current.add(key);
+    const epoch = conversationEpoch.current;
+    const controller = newController();
+    try {
+      if (control.target_type !== "card") {
+        const result: AssistantActionResult = await responseJson(await fetch(`/api/assistant/tasks/${task.id}/control`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal, body: JSON.stringify({ attempt: task.attempt, output_id: output.id }),
+        }));
+        if (!currentConversation(epoch) || controller.signal.aborted) return;
+        const target = messagesRef.current.find(message => (message.approval?.id || message.actionResult?.id) === result.id);
+        if (target) patchMessage(target.id, { actionResult: result, text: result.replacement_approval?.summary || result.text,
+          approval: result.replacement_approval || (["succeeded", "failed", "cancelled", "expired"].includes(result.status) ? undefined : target.approval),
+          actionPreview: result.preview || target.actionPreview, ...(result.event_context ? { eventContext: result.event_context } : {}) });
+        if (result.transaction_updates?.length) setMessages(current => syncSavedTransactionCards(current, result.transaction_updates!));
+        patchMessage(output.id, { text: result.text, control: undefined, delivery: { action: "control", status: "succeeded" } });
+        return;
+      }
+      const userMessage = task.input?.message || messagesRef.current.find(message => message.id === task.user_message_id)?.text;
+      const contexts = await assistantCardControlContexts(messagesRef.current);
+      if (!currentConversation(epoch) || controller.signal.aborted) return;
+      validateAssistantControl(control, contexts, userMessage || "");
+      const target = messagesRef.current.find(message => message.id === control.target_id)!;
+      if (control.decision === "status") {
+        patchMessage(output.id, { text: "该卡片仍在等待确认，尚未执行。", control: undefined, delivery: { action: "control", status: "succeeded" } });
+      } else {
+        const consumed = messagesRef.current.map(message => message.id === output.id ? { ...message, control: undefined, delivery: { action: "control" as const, status: "failed" as const } } : message);
+        if (!draft.persist({ conversationId: conversationId || undefined, messages: consumed, input, images, confirmations, undos, outbox })) throw new Error("无法保存本机决定，本次尚未执行。");
+        messagesRef.current = consumed; setMessages(consumed);
+        const applied = await decideConversationAction(target, control.decision);
+        patchMessage(output.id, { text: "请查看原卡片上的处理结果。", delivery: { action: "control", status: applied ? "succeeded" : "failed" } });
+      }
+    } catch (error) {
+      if (!currentConversation(epoch) || controller.signal.aborted) return;
+      patchMessage(output.id, { control: undefined, text: error instanceof Error ? error.message : "原卡片未处理，请重新核对。", delivery: { action: "control", status: "failed" } });
+    } finally { resumingAgents.current.delete(key); finishController(controller); }
+  }
+
   const recoverAgentCheckpoints = useEffectEvent(() => {
     if (saveLock.current || sendLock.current || actionPendingRef.current) return;
     for (const task of knownTasks.current) {
       if (assistantAgentWaiting(task)) void continueAgentCheckpoint(task);
+      else if (task.status === "succeeded" && task.result?.control && !task.result.control_result && messagesRef.current.some(message => message.id === restoreAssistantAgent(task.agent || task.result?.agent)?.output_id && message.control && message.delivery?.status === "waiting")) void applyAgentControl(task);
       else if (task.status === "succeeded" && restoreAssistantAgent(task.agent || task.result?.agent)?.awaiting_delivery) void deliverAgentCheckpoint(task);
     }
   });
-  useEffect(() => { recoverAgentCheckpoints(); }, [tasks, messages]);
+  useEffect(() => { recoverAgentCheckpoints(); }, [tasks, messages, sending, savingId, actionPending]);
 
   async function decideConversationAction(message: Message, decision: "approve" | "cancel", read = false, userReply?: Message) {
     if (actionPendingRef.current || saveLock.current || sendLock.current || busy || messagesRef.current.some(m => m.id === message.id && assistantCardTarget(m))) return;
     actionPendingRef.current = true;
     setActionPending({ id: message.id, phase: read ? "read" : decision });
     patchMessage(message.id, { error: undefined });
-    try { await performConversationAction(message, decision, read, userReply); }
+    try { return await performConversationAction(message, decision, read, userReply); }
     finally { actionPendingRef.current = false; if (live.current) setActionPending(null); }
   }
 
@@ -568,8 +614,7 @@ export default function AssistantPage() {
         const response = await fetch(`/api/assistant/actions/${message.approval?.id || message.actionResult!.id}`, read ? { cache: "no-store" } : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision }) });
         const result: AssistantActionResult = await responseJson(response);
         if (!currentConversation(epoch)) return;
-        const summary = message.approval?.summary.replace(/\n尚未执行。[\s\S]*$/, "");
-        patchMessage(message.id, { error: undefined, actionPreview: result.preview || message.actionPreview || message.approval?.preview || (message.eventContext ? eventActionPreview(message.eventContext.input, message.approval?.summary || message.text) : summaryActionPreview(message.approval?.summary || message.text)), text: result.status === "pending" && message.approval ? message.approval.summary : summary ? `${summary}\n\n${result.text}` : result.text, actionResult: result, ...(result.event_context ? { eventContext: result.event_context, eventChoices: undefined } : {}),
+        patchMessage(message.id, { error: undefined, actionPreview: result.preview || message.actionPreview || message.approval?.preview || (message.eventContext ? eventActionPreview(message.eventContext.input, message.approval?.summary || message.text) : summaryActionPreview(message.approval?.summary || message.text)), text: result.status === "pending" && message.approval ? message.approval.summary : result.text, actionResult: result, ...(result.event_context ? { eventContext: result.event_context, eventChoices: undefined } : {}),
           ...(["succeeded", "failed", "cancelled", "expired"].includes(result.status) ? { approval: undefined } : {}) });
         if (result.transaction_updates?.length) setMessages(current => {
           let next = syncSavedTransactionCards(current,result.transaction_updates!);
@@ -591,16 +636,16 @@ export default function AssistantPage() {
     if (decision === "cancel") {
       patchMessage(message.id, { confirmChoice: undefined, removeChoice: undefined, clearChoice: undefined, undoChoice: undefined, replyKind: "result", text: "已取消本次操作，未执行。" });
       if (message.agent?.operations && message.taskId) await stopTask(message.taskId);
-      return;
+      return true;
     }
     if (message.removeChoice) {
-      setMessages(current => approveAssistantDraftRemoval(current, message.id, members)); return;
+      setMessages(current => approveAssistantDraftRemoval(current, message.id, members)); return true;
     }
-    if (message.clearChoice) { clearConversation(); return; }
+    if (message.clearChoice) { clearConversation(); return true; }
     if (message.undoChoice) {
       const target = messages.find(m => m.id === message.undoChoice!.batch_id);
       const saved = await undoSaved(target, message.undoChoice.draft_ids);
-      patchMessage(message.id, { undoChoice: undefined, delivery: { action: "undo", status: saved ? "succeeded" : "failed" }, replyKind: "result", text: saved ? "已撤销入账，并恢复为待确认草稿。" : "请查看原账单卡片核对撤销结果。" }); return;
+      patchMessage(message.id, { undoChoice: undefined, delivery: { action: "undo", status: saved ? "succeeded" : "failed" }, replyKind: "result", text: saved ? "已撤销入账，并恢复为待确认草稿。" : "请查看原账单卡片核对撤销结果。" }); return saved;
     }
     if (message.confirmChoice) {
       const choice = message.confirmChoice;
@@ -628,6 +673,7 @@ export default function AssistantPage() {
       setMessages(updated);
       const saved = await confirm(batch);
       patchMessage(message.id, { confirmChoice: undefined, replyKind: "result", text: saved ? `已将 ${selected.length} 笔草稿记入账本。` : "入账未确认，请查看原卡片的提示并核对结果。" });
+      return saved;
     }
   }
 
@@ -646,46 +692,6 @@ export default function AssistantPage() {
     const answering = !sentImages.length
       ? eventCardId ? answerCandidates.find(task => restoreAssistantAgent(task.agent || task.result?.agent)?.output_id === eventCardId) : answerCandidates[0]
       : undefined;
-    if (answering && approvalDecision(text, false) === "cancel") {
-      setInput(""); setMessages(current => [...current, { id: crypto.randomUUID(), role: "user", text, localHandled: true }]);
-      await stopTask(answering.id); return;
-    }
-    const pendingApprovals = messages.filter(m => !assistantCardTarget(m) && (m.approval || m.confirmChoice || m.removeChoice || m.clearChoice || m.undoChoice));
-    const pendingApproval = pendingApprovals.at(-1);
-    // A reviewed draft operation and its source card represent one choice.
-    const reviewedBatches = new Set(pendingApprovals.flatMap(m => m.confirmChoice ? [m.confirmChoice.batch_id] : m.removeChoice ? [m.removeChoice.batch_id] : []));
-    const pendingDrafts = messages.filter(m => m.status === "pending" && !m.commit && m.drafts?.some(d => !d.ignored && !d.softRemoved) && !reviewedBatches.has(m.id));
-    const pendingCount = pendingApprovals.length + pendingDrafts.length;
-    if (!sentImages.length && isActionStatusRequest(text)) {
-      if (pendingApprovals.filter(m => m.approval).length > 1) {
-        setInput("");
-        setMessages(current => [...current, { id: crypto.randomUUID(), role: "user", text, localHandled: true }, { id: crypto.randomUUID(), role: "assistant", text: "当前有多个待确认方案，请在对应卡片上核对执行状态。" }]);
-        return;
-      }
-      const action = [...messages].reverse().find(m => m.approval || m.actionResult);
-      setInput("");
-      if (action) await decideConversationAction(action, "approve", true);
-      else setMessages(current => [...current, { id: crypto.randomUUID(), role: "assistant", text: "当前没有已提交的管理操作。入账或撤销结果请查看对应账单卡片。" }]);
-      return;
-    }
-    const decision = !sentImages.length && !answering ? approvalDecision(text, !!pendingApproval || pendingCount > 1) : null;
-    if (decision && pendingCount > 1) {
-      setInput("");
-      setMessages(current => [...current, { id: crypto.randomUUID(), role: "user", text, localHandled: true }, { id: crypto.randomUUID(), role: "assistant", text: "当前有多个待处理方案或账单，请在要操作的卡片上点击确认或取消；本次未执行任何操作。" }]);
-      return;
-    }
-    if (pendingApproval && decision) {
-      setInput("");
-      const userReply: Message = { id: crypto.randomUUID(), role: "user", text, localHandled: true };
-      setMessages(current => [...current, userReply]);
-      await decideConversationAction(pendingApproval, decision, false, userReply);
-      return;
-    }
-    if (decision === "approve" && !pendingApproval && text !== "确认入账") {
-      setInput("");
-      setMessages(current => [...current, { id: crypto.randomUUID(), role: "user", text }, { id: crypto.randomUUID(), role: "assistant", text: "当前没有待批准的操作。请先说明要确认入账、修改或删除哪些记录。" }]);
-      return;
-    }
     if (configured === false) { toast.error("请先在服务端配置百炼 API Key。"); return; }
     if (messages.length >= 78 && !answering) { toast.info("当前对话已较长，请先确认待处理账单，再清空对话。"); return; }
     const latestBatch = draftBatchId ? messages.find(m => m.id === draftBatchId) : [...messages].reverse().find(m => m.drafts?.length);
@@ -711,12 +717,14 @@ export default function AssistantPage() {
         ...(eventSelection ? { event_selection: eventSelection } : {}),
         ...([...messages].reverse().find(m => m.eventContext)?.eventContext ? { event_context: [...messages].reverse().find(m => m.eventContext)!.eventContext } : {}),
         record_contexts: messages.flatMap(m => [...(m.taskHistory || []).flatMap(output => output.ledgerContext ? [output.ledgerContext] : []), ...(m.ledgerContext ? [m.ledgerContext] : [])]).slice(-3),
+        control_contexts: await assistantCardControlContexts(messages),
         card_contexts: messages.filter(message => message.role === "assistant" && !assistantCardTarget(message)
           && (message.approval || message.eventChoices?.length || message.replyView || message.ledgerContext)).slice(-10)
           .map(message => ({ id: message.id, summary: (message.approval?.summary || message.text).slice(0, 4000) })),
         history: messages.filter(m => !m.incomplete && !assistantCardTarget(m)).slice(-8).map(m => ({ role: m.role, content: m.drafts
           ? `${m.text.slice(0, 500)}\n卡片当前状态：${m.status === "saved" ? "已保存" : m.status === "deleted" ? "已删除，未入账" : m.status === "conflict" ? "保存冲突待核对" : "待确认"}。以下是用户核对编辑后的账单，以此为准，不要重复生成：\n${JSON.stringify(sortedAssistantDrafts(m.drafts, m.draftSort).map(d => ({ type: d.type, amount_cents: Math.round(Number(d.amount) * 100), date: d.transaction_date, description: d.description.slice(0, 40), excluded_from_posting: !!d.softRemoved })))}`.slice(0, 4000)
           : [m.text, m.analysis ? `分析说明（仅供参考，不是执行凭据）：${m.analysis}` : ""].filter(Boolean).join("\n").slice(0, 4000) })) };
+      if (!currentConversation(epoch)) return;
       const nextMessages = [...messages.map(message => ({ ...message, memberChoice: undefined, eventChoices: undefined })), userMessage];
       // Persist stable identifiers and the original upload before dispatch. The
       // outbox is dropped only after the server has acknowledged this exact ID.
@@ -875,13 +883,12 @@ export default function AssistantPage() {
     } finally { finishController(controller); if (currentConversation(epoch)) { sendLock.current = false; setSending(false); } }
   }
 
-  function revealInvalidDraft(message: Message, error: string) {
+  function revealInvalidDraft(message: Message) {
     if (message.commit) return;
-    const preferred: DraftValidationField | undefined = error.includes("金额") ? "amount" : error.includes("分类") ? "category" : error.includes("成员") ? "member" : error.includes("日期") ? "date" : undefined;
     const drafts = sortedAssistantDrafts(message.drafts || [], message.draftSort).filter(d => !d.ignored && !d.softRemoved);
     for (const d of drafts) {
       const invalid = invalidDraftFields(d, categories, members);
-      const field = preferred ? (invalid[preferred] ? preferred : undefined) : (Object.keys(invalid) as DraftValidationField[]).find(key => invalid[key]);
+      const field = (Object.keys(invalid) as DraftValidationField[]).find(key => invalid[key]);
       if (!field) continue;
       setExpandedDrafts(current => ({ ...current, [d.id]: true }));
       setValidationTarget({ draftId: d.id, field });
@@ -893,7 +900,7 @@ export default function AssistantPage() {
     if (saveLock.current || busy || confirmationControllers.current.has(message.id)) return;
     let submitted: AssistantDraft[];
     try { submitted = message.commit || submittedDrafts(message.drafts || []); confirmationRows(submitted); }
-    catch (error) { const text = error instanceof Error ? error.message : "请核对账单。"; patchMessage(message.id, { error: text }); toast.error(text); revealInvalidDraft(message, text); return; }
+    catch (error) { const text = error instanceof Error ? error.message : "请核对账单。"; patchMessage(message.id, { error: text }); toast.error(text); revealInvalidDraft(message); return; }
     // Persist the exact payload before the request. A lost response/reload retries
     // the same batch; edits remain locked until its outcome has been established.
     saveLock.current = true; setSavingId(message.id); patchMessage(message.id, { commit: submitted, error: undefined });
@@ -1191,7 +1198,7 @@ export default function AssistantPage() {
         if (cardTarget) {
           const target = messages.find(item => item.id === cardTarget && item.role === "assistant" && !assistantCardTarget(item));
           return <div key={message.id} className="mb-5" data-message-role="assistant" data-message-id={message.id}>
-            {!!message.text && message.text !== "这组账目卡片已更新。" && message.text !== "这张卡片已更新。" && <div className={`${bubbleClass} mb-2 text-foreground`}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div>}
+            {!!message.text && <div className={`${bubbleClass} mb-2 text-foreground`}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div>}
             <Button type="button" variant="ghost" className={cn(buttonClass, "gap-2 rounded-xl border border-border bg-muted/35 px-3 py-2.5 text-[13px] text-muted-foreground hover:bg-muted")} disabled={!target}
               onClick={() => jumpToDraftCard(cardTarget)} aria-label="已更新，查看最新卡片">
               <Check size={14} aria-hidden="true" /><span>已更新</span><span className="text-primary">查看最新卡片</span><ArrowDown size={14} aria-hidden="true" />
@@ -1279,7 +1286,7 @@ export default function AssistantPage() {
                 if (busy || saveLock.current || sendLock.current || actionPendingRef.current) return;
                 setMessages(current => toggleAssistantDraftRemoval(current, message.id, record.id!));
               }}>{record.excluded ? "恢复" : "不移除"}</Button> : undefined}>{actionControls}</AssistantActionCard> : actionControls}
-          {replyView?.title === "重复入账核对" && !replyView.draftComparison ? <AssistantReplyShell label="历史核对结果" title="核对规则已更新">
+          {replyView?.kind === "draft_matches" && !replyView.draftComparison ? <AssistantReplyShell label="历史核对结果" title="核对规则已更新">
             <div className="space-y-3 p-4"><AssistantReplyNotice>旧结果仅按金额和日期召回，可能包含无关记录。请按当前草稿重新核对。</AssistantReplyNotice>
               <Button type="button" size="sm" variant="outline" disabled={composerDisabled} onClick={() => void send("重新核对当前草稿是否已经入账，排除仅金额相同的无关记录")}>重新核对</Button></div>
           </AssistantReplyShell> : replyView?.draftComparison ? <AssistantDraftMatchCard preview={replyView} disabled={composerDisabled || !!savingId}

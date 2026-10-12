@@ -19,7 +19,7 @@ export function relocateAssistantCard(messages: Message[], cardId: string, after
   let prefix = (parseInt(afterId.slice(0, 8), 16) ^ 0x80000000) >>> 0;
   let markerId = `${prefix.toString(16).padStart(8,"0")}${afterId.slice(8)}`;
   while (ids.has(markerId)) { prefix = (prefix + 1) >>> 0; markerId = `${prefix.toString(16).padStart(8,"0")}${afterId.slice(8)}`; }
-  const marker: Message = { id: markerId, role: "assistant", text: assistantHistoryQuestion(source) || (source.drafts?.length ? "这组账目卡片已更新。" : "这张卡片已更新。"), ...(source.drafts?.length ? {draftCardLink:cardId} : {cardUpdatedLink:cardId}) };
+  const marker: Message = { id: markerId, role: "assistant", text: assistantHistoryQuestion(source) || "", ...(source.drafts?.length ? {draftCardLink:cardId} : {cardUpdatedLink:cardId}) };
   const next = messages.map(m => m.id === cardId ? marker : m.memberChoice?.batch_id === cardId ? { ...m, memberChoice: undefined } : m);
   return [...next.slice(0,afterIndex+1),source,...next.slice(afterIndex+1)];
 }
@@ -35,7 +35,7 @@ export function reconcileAssistantCardUpdate(messages: Message[], newId: string,
   const candidates = messages.slice(0, index).filter(message => pending(message) && message.id === explicitPreviousId);
   if (candidates.length !== 1) return messages;
   const old = candidates[0];
-  const marker: Message = { id: old.id, role: "assistant", text: assistantHistoryQuestion(old) || "这张卡片已更新。", cardUpdatedLink: newId,
+  const marker: Message = { id: old.id, role: "assistant", text: assistantHistoryQuestion(old) || "", cardUpdatedLink: newId,
     taskId: old.taskId, taskAttempt: old.taskAttempt, taskStatus: old.taskStatus, taskApplied: true,
     ...(old.approval ? { supersededApproval: { id: old.approval.id } } : {}) };
   return messages.map(m => m.id === old.id ? marker : assistantCardTarget(m) === old.id
@@ -58,6 +58,6 @@ export function linkAssistantEventCards(messages: Message[], newId: string, even
   if (!UUID_PATTERN.test(eventId) || !messages.some(m => m.id === newId)) return messages;
   const oldIds = new Set(messages.filter(m => m.id !== newId && m.role === "assistant" && !assistantCardTarget(m) && m.eventContext?.event_id === eventId).map(m => m.id));
   if (!oldIds.size) return messages;
-  return messages.map(m => oldIds.has(m.id) ? { id:m.id,role:"assistant",text:assistantHistoryQuestion(m) || "这张卡片已更新。",cardUpdatedLink:newId,taskId:m.taskId,taskAttempt:m.taskAttempt,taskStatus:m.taskStatus,taskApplied:true }
+  return messages.map(m => oldIds.has(m.id) ? { id:m.id,role:"assistant",text:assistantHistoryQuestion(m) || "",cardUpdatedLink:newId,taskId:m.taskId,taskAttempt:m.taskAttempt,taskStatus:m.taskStatus,taskApplied:true }
     : oldIds.has(assistantCardTarget(m) || "") ? { ...m, ...(m.cardUpdatedLink ? {cardUpdatedLink:newId} : {draftCardLink:newId}) } : m);
 }

@@ -9,7 +9,7 @@ export type AssistantDraftComparison = {
   rows: { draft_id: string; snapshot: { description: string; type: string; amount_cents: number | null; transaction_date: string | null; member_id: string | null; category_id: string | null };
     candidates: { id: string; description: string; date: string; amount: string; member: string; category: string; reason: string; dateDifference: number }[] }[];
 };
-export type AssistantReplyView = AssistantActionPreview & { analysis?: boolean; draftComparison?: AssistantDraftComparison };
+export type AssistantReplyView = AssistantActionPreview & { kind?: "draft_matches"; analysis?: boolean; draftComparison?: AssistantDraftComparison };
 const money = (value: unknown) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? `${Number(value) < 0 ? "-" : ""}¥${Math.abs(Number(value)).toFixed(2)}` : "金额待核对";
 const day = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value || "").slice(0, 10);
 const names: Record<string, string> = { income: "收入", expense: "支出", lent: "借出", owed: "借入", money: "钱款", item: "物品", cash: "礼金", unpaid: "未还", partial: "部分归还", outstanding: "未结清", settled: "已结清", archived: "已归档", active: "未归档", pinned: "已置顶" };
@@ -19,7 +19,7 @@ const display = (value: unknown): string => value == null || value === "" ? "未
 export function draftMatchesReplyView(matches: Pick<AssistantDraftMatches, "rows" | "date_window_days"> & { batch_id?: string }, members: AssistantMember[] = [], categories: AssistantCategory[] = [], batch?: AssistantDraftBatch): AssistantReplyView {
   const suspected = matches.rows.filter(row => row.candidates.some(candidate => candidate.same_description)).length;
   const review = matches.rows.filter(row => row.status === "incomplete" || (row.status === "possible_match" && !row.candidates.some(candidate => candidate.same_description))).length;
-  return { draftComparison: matches.batch_id && batch ? { batch_id: matches.batch_id, rows: matches.rows.map(row => {
+  return { kind: "draft_matches", draftComparison: matches.batch_id && batch ? { batch_id: matches.batch_id, rows: matches.rows.map(row => {
       const draft = batch.drafts.find(d => d.id === row.draft_id)!;
       return { draft_id: row.draft_id, snapshot: { description: draft.description, type: row.type, amount_cents: row.amount_cents, transaction_date: row.transaction_date, member_id: draft.member_id ?? null, category_id: draft.category_id ?? null },
         candidates: row.candidates.map(c => ({ id: c.id, description: c.description || "未填写用途", date: c.transaction_date, amount: money(c.amount_cents / 100), member: members.find(m => m.id === c.member_id)?.name || "未选成员", category: categories.find(category => category.id === c.category_id)?.name || "未选分类", reason: draftMatchReasonLabel[c.match_reason] || "匹配依据不足，请重新核对", dateDifference: c.date_difference_days })) };

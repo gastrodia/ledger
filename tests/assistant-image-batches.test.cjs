@@ -94,7 +94,7 @@ test('batch instructions constrain preceding-image context and require evidence 
   assert.match(text, /(?:上下文|参考)/);
   assert.match(text, /(?:目标|当前)/);
   assert.match(text, /(?:日期|月份)/);
-  assert.match(text, /(?:可靠证据|明确证据|证据明确)/);
+  assert.match(text, /可靠连续证据/);
   assert.match(text, /needs_clarification/);
   assert.match(text, /(?:不能|不得).{0,12}(?:猜|编造|推断)/);
 });

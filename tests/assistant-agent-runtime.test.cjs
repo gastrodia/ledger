@@ -208,7 +208,7 @@ test('a target reader error leaves an interruption without a model completion or
 
 const schemaExports = {};
 vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/assistant-agent-schema.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-  { exports: schemaExports, require: name => name === '@/lib/assistant-agent-step' ? stepContract : name === '@/lib/assistant-event-clarification' ? eventClarification : require(name), JSON });
+  { exports: schemaExports, require: name => name === '@/lib/assistant-agent-step' ? stepContract : name === '@/lib/assistant-event-clarification' ? eventClarification : require('./helpers/assistant-contracts.cjs')(name) || require(name), JSON });
 const stepValidation = schemaExports.ASSISTANT_AGENT_STEP_SCHEMA.validate;
 
 test('step schema discards only unused bounded plan commentary on recognized read or preview tools', async () => {
@@ -453,7 +453,7 @@ test('failed batch receipts retain the original draft output and every unexecute
 
 test('production workflow schema requires explicit operation references while legacy outputs remain readable', async()=>{
   const exportsSchema={};
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/assistant-agent-schema.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports:exportsSchema,require:name=>name==='@/lib/assistant-agent-step'?stepContract:require(name),Error,JSON,Set});
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/assistant-agent-schema.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports:exportsSchema,require:name=>name==='@/lib/assistant-agent-step'?stepContract:require('./helpers/assistant-contracts.cjs')(name)||require(name),Error,JSON,Set});
   const old=respond('普通答复');
   assert.equal((await exportsSchema.ASSISTANT_AGENT_STEP_SCHEMA.validate(old)).success,true);
   assert.equal((await exportsSchema.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA.validate(old)).success,false);
@@ -968,4 +968,70 @@ test('an auxiliary read cannot hide a write clarification behind a completed que
   assert.equal(result.agent.awaiting_answer, true);
   assert.equal(result.agent.operations[0].status, 'needs_input');
   assert.equal(f.calls.filter(call => call[0] === 'event').length, 0);
+});
+
+const controlContext = extra => ({target_type:'action',target_id:ACTION,operation:'update',revision:'v1',summary:'早餐20改22',status:'pending',...extra});
+const controlStep = (message,extra={})=>({...choose('control',null,{target_type:'action',target_id:ACTION,operation:'update',revision:'v1',decision:'approve',target_reference:null,requested_operation:null,changes_json:'{}',user_quote:message,...extra}),operation_id:null});
+test('semantic control journals identity, delegates one persisted decision, and resumes without replaying the original goal',async()=>{
+ const goal='按这个方案执行';let delegated=0;
+ const f=fixture([controlStep(goal)],{adapters:{controlContexts:[controlContext()],control:async control=>{delegated++;assert.ok(f.checkpoints.at(-1).tool_results.some(r=>r.name==='control_request'));return {action:'control',control,reply:'准备处理',drafts:[],query:null};}}});
+ const plan=await f.run({goal,requireWorkflow:true});const c=f.checkpoints.at(-1);
+ assert.equal(delegated,1);assert.equal(plan.agent.awaiting_delivery,true);assert.equal(c.pending_plan.control.target_id,ACTION);
+ assert.equal(f.calls.filter(c=>['command','event'].includes(c[0])).length,0);
+ c.awaiting_delivery=false;c.pending_plan=undefined;c.operations[0].status='completed';c.tool_results.push({call_id:'receipt',name:'control_result',result:{id:ACTION,status:'succeeded',text:'已修改早餐金额22元'}});
+ const resumed=fixture([{...respond('完成'),operation_id:null}],{adapters:{control:async()=>{throw Error('must not replay');}}});
+ assert.equal((await resumed.run({checkpoint:c})).reply,'已修改早餐金额22元');
+});
+
+test('wrong operation, stale revision and quoted historical approval do not dispatch a control',async()=>{
+ for(const patch of [{operation:'delete'},{revision:'old'},{user_quote:'历史确认执行'}]){
+  let called=0;const goal='按这个方案执行';const f=fixture([controlStep(goal,patch),respond('请核对具体方案')],{adapters:{controlContexts:[controlContext()],control:async()=>{called++;}}});
+  await f.run({goal});assert.equal(called,0);assert.ok(f.checkpoints.at(-1).tool_results.some(r=>r.name==='validation_error'));
+ }
+});
+
+test('cancelling during clarification stops the same goal and preserves completed receipts',async()=>{
+ const c={version:1,goal_id:ID,goal:'记录早餐再处理送礼',status:'running',steps:2,messages:[],tool_results:[{call_id:'saved',name:'approval_result',result:{id:ACTION,status:'succeeded',text:'早餐已入账'}}],preview_fingerprints:[],pending_approval:null,turn_input:{message:'这项任务先不用做了',display_text:'这项任务先不用做了',display_images:[]},current_operation_id:'gift',operations:[{id:'breakfast',label:'早餐',action:'record',effect:'write',depends_on:[],status:'completed',receipt_id:ACTION},{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'pending'}]};
+ const f=fixture([controlStep(c.turn_input.message,{target_type:'task',target_id:ID,operation:'task',revision:'2',decision:'cancel'})]);
+ const result=await f.run({checkpoint:c,attempt:2});assert.equal(result.agent.status,'stopped');assert.deepEqual(JSON.parse(JSON.stringify(result.agent.operations.map(op=>op.status))),['completed','cancelled']);
+ assert.equal(f.checkpoints.at(-1).operations[0].receipt_id,ACTION);assert.equal(f.calls.filter(call=>['command','event'].includes(call[0])).length,0);
+});
+
+test('control schema cannot combine approval with a second plan or replacement scope',async()=>{
+ for(const patch of [{plan_json:'{"action":"edit"}'},{needs_input:true},{replaces_output_id:ID},{covered_operation_ids:['op1']},{tool:'command'}])
+  assert.equal((await stepValidation({...controlStep('确认'),...patch})).success,false);
+});
+
+test('non-financial responses need no fabricated agenda while business tools still require complete source coverage', async()=>{
+ const f=fixture([{...respond('Ledger可以准备待确认账目；真实付款不在能力范围。'),operation_id:null}]);
+ const result=await f.run({requireWorkflow:true});assert.equal(result.agent.status,'completed');assert.equal(result.agent.operations,undefined);assert.equal(f.calls.filter(call=>['command','event','query'].includes(call[0])).length,0);
+ const write=fixture([{...choose('preview','command',command('delete')),operation_id:null},{...respond('请明确目标范围'),operation_id:null,needs_input:true}]);
+ const blocked=await write.run({requireWorkflow:true});assert.equal(blocked.agent.awaiting_answer,true);assert.equal(write.calls.filter(call=>call[0]==='command').length,0);
+});
+
+test('an early clarification preserves the original goal and can be cancelled semantically without an execution replay',async()=>{
+ const goal='按之前的记录准备另一笔，但发生日期还不确定';
+ const first=fixture([{...respond('请补充这次实际发生的日期。'),operation_id:null,needs_input:true}]);
+ const question=await first.run({goal,requireWorkflow:true});const c=first.checkpoints.at(-1);assert.equal(question.agent.awaiting_answer,true);assert.equal(c.goal,goal);assert.ok(c.output_id);
+ c.turn_input={message:'这项任务不继续了',display_text:'这项任务不继续了',display_images:[]};
+ const cancelled=fixture([controlStep(c.turn_input.message,{target_type:'task',target_id:ID,operation:'task',revision:'2',decision:'cancel'})]);
+ const result=await cancelled.run({checkpoint:c,attempt:2});assert.equal(result.agent.status,'stopped');assert.equal(result.agent.goal,goal);assert.equal(cancelled.calls.filter(call=>['command','event','query'].includes(call[0])).length,0);
+});
+
+test('an early clarification is incorporated into the scoped source when the original record task is planned',async()=>{
+ const goal='准备早餐20元的草稿，发生日期需要核对';
+ const first=fixture([{...respond('请补充实际发生日期。'),operation_id:null,needs_input:true}]);await first.run({goal,requireWorkflow:true});
+ const c=first.checkpoints.at(-1);c.authorized_answers=['昨天'];c.turn_input={message:'昨天',display_text:'昨天',display_images:[]};c.awaiting_answer=false;c.status='running';
+ const draft={id:ACTION,type:'expense',amount_cents:2000,transaction_date:'2026-10-11',description:'早餐',category_id:null,member_id:null,payment_method:null,note:''};
+ const next=fixture([{kind:'plan',operation_id:null,tool:null,arguments_json:JSON.stringify({operations:[{id:'breakfast',label:'早餐草稿',action:'record',effect:'write',depends_on:[],sources:[goal,'昨天']}]}),plan_json:null},
+  {kind:'respond',operation_id:'breakfast',covered_operation_ids:['breakfast'],tool:null,arguments_json:'{}',plan_json:JSON.stringify({action:'record',reply:'待核对',drafts:[],query:null}),needs_input:true}],{adapters:{validatePlan:(p,context)=>{
+    if(p.action==='record'){assert.deepEqual(JSON.parse(JSON.stringify(context.sources)),[goal,'昨天']);return {...p,drafts:[draft]};}return p;
+  }}});
+ const result=await next.run({checkpoint:c,attempt:2});assert.equal(result.agent.goal,goal);assert.equal(result.drafts[0].transaction_date,'2026-10-11');assert.equal(result.agent.status,'waiting_approval');
+});
+
+test('resuming refreshes server instructions without dropping goal facts or user text that resembles a former system marker',async()=>{
+ const c={version:1,workflow_required:true,goal_id:ID,goal:'保留原目标',status:'running',steps:1,messages:[{role:'system',content:'obsolete routing policy'},{role:'user',content:'服务端任务进度（不可重建已完成事项）是我记录的原文'}],tool_results:[],pending_approval:null,preview_fingerprints:[]};
+ const f=fixture([messages=>{assert.equal(messages.some(m=>m.content==='obsolete routing policy'),false);assert.equal(messages.some(m=>m.role==='system'&&m.content==='current Ledger contracts'),true);assert.equal(messages.some(m=>m.role==='user'&&m.content.includes('是我记录的原文')),true);return {...respond('请补充目标条件'),operation_id:null,needs_input:true};}]);
+ const result=await f.run({checkpoint:c,messages:[{role:'system',content:'current Ledger contracts'}]});assert.equal(result.agent.goal,'保留原目标');assert.equal(result.agent.awaiting_answer,true);
 });

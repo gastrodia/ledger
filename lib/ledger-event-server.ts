@@ -24,7 +24,7 @@ const normalizedItems = (items: unknown) => JSON.stringify((Array.isArray(items)
   item_name: item.item_name, quantity: Number(item.quantity), unit: item.unit || null,
   estimated_value: item.estimated_value == null ? null : Number(item.estimated_value),
 })));
-function giftSummary(input: LedgerEventInput, hasFlow: boolean) {
+function giftSummary(input: LedgerEventInput, hasFlow: boolean, saved = false) {
   if (input.kind !== "gift_given") return "";
   const known = (input.items || []).every(item => item.estimated_value !== null);
   const value = (input.amount_cents || 0) + giftItemsValue(input);
@@ -32,7 +32,7 @@ function giftSummary(input: LedgerEventInput, hasFlow: boolean) {
     `- 礼金：${money(input.amount_cents || 0)}\n` +
     (input.items || []).map(item => `- 物品：${item.item_name} × ${item.quantity}${item.unit || ""}，${item.estimated_value === null ? "未填写估值" : `该行价值 ${money(cents(item.estimated_value))}`}\n`).join("") +
     (input.items?.length ? `- 送礼合计价值：${known ? money(value) : "部分物品未估值，不合计"}（物品估值不另记支出）\n` : "") +
-    (hasFlow && input.payment_recipient ? `- 付款用途待核对：转给${input.payment_recipient}用于代办给${input.counterparty}的送礼，请确认此关联理解\n` : "") +
+    (hasFlow && input.payment_recipient ? `- ${saved ? "付款用途" : "付款用途待核对"}：转给${input.payment_recipient}用于代办给${input.counterparty}的送礼${saved ? "" : "，请确认此关联理解"}\n` : "") +
     (hasFlow && known && eventCashflowCents(input) !== value ? `- 金额差异：实际付款 ${money(eventCashflowCents(input)!)}，送礼价值 ${money(value)}；付款${eventCashflowCents(input)! > value ? "多于" : "少于"}送礼价值 ${money(Math.abs(eventCashflowCents(input)! - value))}，仅保留差异，不自动补记或调整\n` : "");
 }
 async function rowById(userId: string, table: string, id: string): Promise<Row | undefined> {
@@ -291,7 +291,7 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
   const targetResource = kind === "gift_given" ? "gifts_given" : kind === "gift_received" ? "gift_records" : eventIsRepayment(kind) ? "repayments" : "loans";
   result.targets = [{ resource: targetResource, operation: input.operation === "undo" ? "delete" : input.operation, ids: [p.sourceId] },
     ...(p.transactionId ? [{ resource: "transactions" as const, operation: input.operation === "undo" ? p.ownsTransaction ? "delete" as const : "update" as const : input.operation === "create" && p.ownsTransaction ? "create" as const : "update" as const, ids: [p.transactionId] }] : [])];
-  if (kind === "gift_given" && (input.items?.length || input.transaction_amount_cents !== null)) result.text += `\n${giftSummary(input, !!p.transactionId).replace("付款用途待核对：", "付款用途：").replace("，请确认此关联理解", "")}${p.transactionId ? `关联支出：${money(eventCashflowCents(input)!)}。` : ""}`;
+  if (kind === "gift_given" && (input.items?.length || input.transaction_amount_cents !== null)) result.text += `\n${giftSummary(input, !!p.transactionId, true)}${p.transactionId ? `关联支出：${money(eventCashflowCents(input)!)}。` : ""}`;
   query("UPDATE assistant_actions SET status='succeeded',result=$3::jsonb,updated_at=NOW() WHERE user_id=$1 AND id=$2", [userId, actionId, JSON.stringify(result)]);
   try {
     await sql.transaction(statements, { isolationLevel: "Serializable" });
