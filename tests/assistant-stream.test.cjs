@@ -139,7 +139,7 @@ test('malformed events, unknown phases, invalid UTF-8 and unusable results fail 
 
 test('event, reply and total transport budgets bound malformed and runaway streams', async () => {
   const fixtures = [
-    'x'.repeat(256 * 1024 + 1),
+    'x'.repeat(2 * 1024 * 1024 + 1),
     line({ type: 'delta', text: 'x'.repeat(32 * 1024) }).repeat(3),
     '\n'.repeat(2 * 1024 * 1024 + 1),
   ];

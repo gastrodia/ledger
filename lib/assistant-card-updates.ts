@@ -6,7 +6,7 @@ export function assistantCardTarget(message: Message) { return message.cardUpdat
 export function assistantHistoryQuestion(message: Pick<Message, "text" | "agent" | "memberChoice" | "eventChoices" | "memberFlow" | "drafts">): string | undefined {
   const text = message.text?.trim();
   if (!text) return;
-  return /[？?]/.test(text) || message.agent?.awaiting_answer || message.memberChoice || message.eventChoices?.length
+  return message.agent?.awaiting_answer || message.memberChoice || message.eventChoices?.length
     || message.memberFlow && message.drafts?.some(draft => draft.member_id === null) ? text : undefined;
 }
 export function relocateAssistantCard(messages: Message[], cardId: string, afterId: string): Message[] {
@@ -23,31 +23,16 @@ export function relocateAssistantCard(messages: Message[], cardId: string, after
   const next = messages.map(m => m.id === cardId ? marker : m.memberChoice?.batch_id === cardId ? { ...m, memberChoice: undefined } : m);
   return [...next.slice(0,afterIndex+1),source,...next.slice(afterIndex+1)];
 }
-function family(message: Message): string | undefined {
-  if (message.eventContext) return `event:${message.eventContext.input.kind}:${message.eventContext.input.operation}`;
-  if (message.proposalScope) return `command:${message.proposalScope.resource}:${message.proposalScope.operation}:${[...message.proposalScope.ids].sort().join(",")}`;
-  if (message.ledgerContext) return `records:${message.ledgerContext.resource}`;
-  if (message.replyView?.analysis) return "analysis";
-  return;
-}
 function pending(message: Message) {
   return !assistantCardTarget(message) && message.role === "assistant" && (!message.actionResult || message.actionResult.status === "pending")
     && (message.approval || message.eventContext?.status === "pending" || message.replyView?.analysis || message.ledgerContext);
 }
-/** A correction replaces a scoped proposal; an additional request stays independent. */
-export function reconcileAssistantCardUpdate(messages: Message[], newId: string, userText: string, explicitPreviousId?: string): Message[] {
+/** Supersession requires a declared output ID; text and similarity never select a card. */
+export function reconcileAssistantCardUpdate(messages: Message[], newId: string, explicitPreviousId?: string): Message[] {
   const index = messages.findIndex(m => m.id === newId), current = messages[index];
-  if (!current || !pending(current) || (!current.approval && !current.eventChoices?.length && !current.replyView?.analysis && !current.ledgerContext) || !family(current)) return messages;
-  const correction = /记错|查错|更正|纠正|修改|刷新(?:刚才|上次|原)|更新(?:刚才|上次|原)|改(?:为|成|一下|下|到)|应该是|不是.{1,40}(?:是|而是)|(?:金额|日期|成员|分类|支出人|收入所属人).{0,10}(?:改|是|调整|增加|减少)/.test(userText);
-  const previous = messages.slice(0,index).filter(m => pending(m) && family(m) === family(current));
-  const selectedChoice = previous.filter(m => m.eventChoices?.some(choice => choice.label === userText));
-  const explicit = explicitPreviousId ? messages.slice(0,index).filter(m => m.id === explicitPreviousId && m.role === "assistant" && !assistantCardTarget(m) && m.eventContext?.status === "pending") : [];
-  if (!explicit.length && ((!correction || /另外|另记|再记|新增|又一笔|再送|再借/.test(userText)) && selectedChoice.length !== 1)) return messages;
-  let candidates = explicit.length === 1 ? explicit : selectedChoice.length === 1 ? selectedChoice : previous;
-  if (candidates.length > 1 && current.eventContext) candidates = candidates.filter(m => m.eventContext?.input.event_id
-    ? m.eventContext.input.event_id === current.eventContext!.input.event_id
-    : m.eventContext?.input.counterparty === current.eventContext!.input.counterparty);
-  if (candidates.length > 1 && /刚才|上一(?:张|个|次)|最后一/.test(userText)) candidates = candidates.slice(-1);
+  if (!current || !pending(current) || (!current.approval && !current.eventChoices?.length && !current.replyView?.analysis && !current.ledgerContext)) return messages;
+  if (!explicitPreviousId) return messages;
+  const candidates = messages.slice(0, index).filter(message => pending(message) && message.id === explicitPreviousId);
   if (candidates.length !== 1) return messages;
   const old = candidates[0];
   const marker: Message = { id: old.id, role: "assistant", text: assistantHistoryQuestion(old) || "这张卡片已更新。", cardUpdatedLink: newId,
@@ -56,14 +41,14 @@ export function reconcileAssistantCardUpdate(messages: Message[], newId: string,
   return messages.map(m => m.id === old.id ? marker : assistantCardTarget(m) === old.id
     ? { ...m, ...(m.cardUpdatedLink ? {cardUpdatedLink:newId} : {draftCardLink:newId}) } : m);
 }
-/** Upgrade conversations saved before all card types supported update markers. */
+/** Restore recorded supersession links without reinterpreting historical prose. */
 export function reconcileAssistantCardHistory(messages: Message[]): Message[] {
   let next = messages;
   for (const message of messages) {
     if (message.role !== "assistant" || assistantCardTarget(message)) continue;
     const index = next.findIndex(m => m.id === message.id);
     const user = [...next.slice(0,index)].reverse().find(m => m.role === "user");
-    if (user) next = reconcileAssistantCardUpdate(next,message.id,user.text,user.updatesCardId);
+    if (user) next = reconcileAssistantCardUpdate(next,message.id,message.updatesCardId || user.updatesCardId);
   }
   return next;
 }

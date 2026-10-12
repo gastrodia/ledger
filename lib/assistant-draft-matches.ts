@@ -11,7 +11,7 @@ export type AssistantDraftMatches = {
   reply: string;
   reply_view: AssistantReplyView;
   batch_id: string;
-  basis: "amount_date_and_merchant_or_purpose";
+  basis: "amount_date_and_literal_description";
   date_window_days: number;
   same_description_is_only_suspected: true;
   rows: Array<{
@@ -26,10 +26,10 @@ function draftMatchesReply(rows: AssistantDraftMatches["rows"]) {
   const label = (description: string) => description.replace(/[\r\n]/g, " ") || "未填写用途";
   return `逐笔核对结果：\n${rows.map((row, i) => {
     const detail = row.status === "incomplete" ? "金额或日期不完整，暂未核对。"
-      : row.status === "no_match" ? `前后 ${DATE_WINDOW_DAYS} 天未找到有商户或用途关联的记录；仅同金额的流水已排除。`
+      : row.status === "no_match" ? `前后 ${DATE_WINDOW_DAYS} 天未找到描述一致的记录；仅同金额的流水已排除。`
       : `找到 ${row.candidate_count} 笔待核对候选：${row.candidates.map(candidate => `${label(candidate.description)}｜${candidate.transaction_date}｜${money(candidate.amount_cents)}（${draftMatchReasonLabel[candidate.match_reason]}；${candidate.date_difference_days === 0 ? "日期相同" : `账本日期比草稿${candidate.date_difference_days < 0 ? "早" : "晚"} ${Math.abs(candidate.date_difference_days)} 天`}）`).join("、")}${row.candidates_limited ? "；仅列出前三笔候选" : ""}。`;
     return `${i + 1}. ${label(row.description)}｜${row.transaction_date ?? "日期缺失"}｜${money(row.amount_cents)}：${detail}`;
-  }).join("\n")}\n\n已检查草稿日期前后 ${DATE_WINDOW_DAYS} 天。日期不同也可能是同一交易，请核对原始日期；仅金额相同的记录已排除；用途相关或缺少用途仅提示核对。没有更改草稿或账本。`;
+  }).join("\n")}\n\n已检查草稿日期前后 ${DATE_WINDOW_DAYS} 天。日期不同也可能是同一交易，请核对原始日期；仅金额相同的记录已排除；原账缺少用途仅提示资料不足。没有更改草稿或账本。`;
 }
 
 /** Compare pending drafts with saved transactions, including a single saved match.
@@ -51,11 +51,10 @@ export async function readAssistantDraftMatches(userId: string, input: Assistant
       AND t.transaction_date >= d.transaction_date-${DATE_WINDOW_DAYS}
       AND t.transaction_date < d.transaction_date+${DATE_WINDOW_DAYS + 1}
     ORDER BY d.id,t.id`, [userId, JSON.stringify(complete.map(d => ({ id: d.id, type: d.type, amount_cents: d.amount_cents, transaction_date: d.transaction_date })))]) : [];
-  const specificCategories = new Set(categories.filter(c => !/^(其他|其它|支出|收入|未分类|日常|消费|购物|线上购物|线下购物)$/.test(c.name.trim())).map(c => c.id));
   const rows: AssistantDraftMatches["rows"] = batch.drafts.map(draft => {
     const candidates = matches.filter(row => row.draft_id === draft.id).flatMap(row => {
       const saved = { ...row, amount_cents: Number(row.amount_cents), date_difference_days: Number(row.date_difference_days) } as Candidate;
-      const reason = draftMatchReason(draft, saved, specificCategories);
+      const reason = draftMatchReason(draft, saved);
       return reason ? [{ ...saved, same_description: reason === "merchant", match_reason: reason }] : [];
     }).sort((a, b) => Number(b.same_description) - Number(a.same_description) || Math.abs(a.date_difference_days) - Math.abs(b.date_difference_days) || a.id.localeCompare(b.id));
     const count = candidates.length;
@@ -64,5 +63,5 @@ export async function readAssistantDraftMatches(userId: string, input: Assistant
       status: draft.amount_cents === undefined || draft.transaction_date === undefined ? "incomplete" : count ? "possible_match" : "no_match",
       candidate_count: count, candidates: candidates.slice(0, CANDIDATE_LIMIT), candidates_limited: count > CANDIDATE_LIMIT };
   });
-  return { batch_id: batch.batch_id, basis: "amount_date_and_merchant_or_purpose", date_window_days: DATE_WINDOW_DAYS, same_description_is_only_suspected: true, rows, reply: draftMatchesReply(rows), reply_view: draftMatchesReplyView({ batch_id: batch.batch_id, rows, date_window_days: DATE_WINDOW_DAYS }, members, categories, batch) };
+  return { batch_id: batch.batch_id, basis: "amount_date_and_literal_description", date_window_days: DATE_WINDOW_DAYS, same_description_is_only_suspected: true, rows, reply: draftMatchesReply(rows), reply_view: draftMatchesReplyView({ batch_id: batch.batch_id, rows, date_window_days: DATE_WINDOW_DAYS }, members, categories, batch) };
 }

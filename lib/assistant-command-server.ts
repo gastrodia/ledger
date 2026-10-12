@@ -351,7 +351,7 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
   const preview = items.map((item, i) => `${i + 1}. ${describe(item.before || values)}${["create", "update", "link"].includes(command.operation) ? `\n${Object.entries(values).map(([key, value]) => `   ${fieldNames[key]}：${item.before ? `${show(key === "pinned" ? !!item.before.pinned_at : key === "archived" ? !!item.before.archived_at : key === "attachment_key" ? item.before[key] ? "已有附件" : null : item.before[key])} → ` : ""}${show(value)}`).join("\n")}` : ""}`).join("\n");
   const children = dependencies.filter(dep => ["repayments", "gift_records"].includes(dep.resource));
   const groupScope = links?.[0]?.group_rows;
-  const summary = `将${verb} ${items.length} 条${resourceNames[command.resource]}：\n${preview}${parent ? `\n所属：${describe(parent.row)}` : ""}${groupScope?.length ? `\n收礼按整组关联，影响本组 ${groupScope.length} 条明细：\n${groupScope.map(row => `- ${describe(row)}`).join("\n")}` : ""}${command.operation === "reorder" ? `\n新顺序：${command.ids.map(id => label(rows.find(row => row.id === id)!)).join(" → ")}` : ""}${children.length ? `\n同时删除 ${children.length} 条关联明细：\n${children.map(dep => `- ${describe(dep.row)}`).join("\n")}` : ""}${command.operation === "delete" ? "\n删除后无法通过本次对话恢复；记录附带的附件也可能被删除。" : ""}${["loans", "repayments", "giftbooks", "gift_records", "gifts_given"].includes(command.resource) ? "\n这只更新相应台账，不会自动新增或改动普通收支记录。" : ""}\n尚未执行。回复“确认执行”批准，或回复“取消”。`;
+  const summary = `将${verb} ${items.length} 条${resourceNames[command.resource]}：\n${preview}${parent ? `\n所属：${describe(parent.row)}` : ""}${groupScope?.length ? `\n收礼按整组关联，影响本组 ${groupScope.length} 条明细：\n${groupScope.map(row => `- ${describe(row)}`).join("\n")}` : ""}${command.operation === "reorder" ? `\n新顺序：${command.ids.map(id => label(rows.find(row => row.id === id)!)).join(" → ")}` : ""}${command.operation === "delete" && children.length ? `\n同时删除 ${children.length} 条关联明细：\n${children.map(dep => `- ${describe(dep.row)}`).join("\n")}` : ""}${command.operation === "delete" ? "\n删除后无法通过本次对话恢复；记录附带的附件也可能被删除。" : ""}${["loans", "repayments", "giftbooks", "gift_records", "gifts_given"].includes(command.resource) ? "\n这只更新相应台账，不会自动新增或改动普通收支记录。" : ""}\n尚未执行。回复“确认执行”批准，或回复“取消”。`;
   const actionPreview: AssistantActionPreview = command.resource === "notes" && command.operation === "create" ? {
     title: "创建便利贴", approveLabel: "创建便利贴", metrics: [],
     sections: [{ title: "便利贴内容", rows: Object.entries(values).map(([key, value]) => ({ label: fieldNames[key], value: show(value) })) }],
@@ -363,7 +363,26 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
         const format = (input: unknown) => key === "amount" ? `¥${Number(input).toFixed(2)}` : key === "transaction_date" ? calendar(input) : show(input);
         return { label: fieldNames[key], value: `${format(item.before![key])} → ${format(value)}` };
       }) })), sections: [], notices: [{ text: "确认后修改原记录，其余信息保持不变，不会新增账目。", tone: "info" }],
-  } : summaryActionPreview(summary);
+  } : {
+    title: `${verb}${resourceNames[command.resource]}`, metrics: [],
+    records: items.map(item => ({ title: label(item.before || values),
+      rows: ["create", "update", "link"].includes(command.operation) ? Object.entries(values).map(([key, value]) => {
+        const before = item.before && (key === "pinned" ? !!item.before.pinned_at : key === "archived" ? !!item.before.archived_at : key === "attachment_key" ? item.before[key] ? "已有附件" : null : item.before[key]);
+        return { label: fieldNames[key], value: item.before ? `${show(before)} → ${show(value)}` : show(value) };
+      }) : [],
+    })),
+    sections: [
+      ...(parent ? [{ title: "所属记录", rows: [{ label: "所属", value: describe(parent.row) }] }] : []),
+      ...(groupScope?.length ? [{ title: "关联范围", rows: groupScope.map(row => ({ label: "收礼明细", value: describe(row) })) }] : []),
+      ...(command.operation === "reorder" ? [{ title: "新顺序", rows: command.ids.map((id, i) => ({ label: String(i + 1), value: label(rows.find(row => row.id === id)!) })) }] : []),
+      ...(command.operation === "delete" && children.length ? [{ title: "同时删除的关联明细", rows: children.map(child => ({ label: resourceNames[child.resource], value: describe(child.row) })) }] : []),
+    ],
+    notices: [
+      { text: "尚未执行，请核对范围后确认。", tone: "info" },
+      ...(command.operation === "delete" ? [{ text: "删除后无法通过本次对话恢复；记录附带的附件也可能被删除。", tone: "attention" as const }] : []),
+      ...(["loans", "repayments", "giftbooks", "gift_records", "gifts_given"].includes(command.resource) ? [{ text: "仅更新相应台账，不会自动新增或改动普通收支。", tone: "info" as const }] : []),
+    ],
+  };
   return saveAssistantApproval(userId, conversationId, { command, items, dependencies, summary, links }, summary, items.length, actionPreview);
 }
 

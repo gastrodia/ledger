@@ -79,10 +79,11 @@ function fixture(seed = {}, options = {}) {
 
 test('approval language distinguishes a direct approval from negation, questions and mixed instructions', () => {
   for (const input of ['确认执行', '确认删除。']) assert.equal(commands.approvalDecision(input), 'approve');
-  for (const input of ['同意', '好的！', '是的', '确认', '批准']) {
+  for (const input of ['同意', '确认', '批准']) {
     assert.equal(commands.approvalDecision(input), null);
     assert.equal(commands.approvalDecision(input, true), 'approve');
   }
+  for (const input of ['好的', '好的！', '是的']) assert.equal(commands.approvalDecision(input, true), null);
   for (const input of ['取消', '算了', '不执行']) assert.equal(commands.approvalDecision(input), 'cancel');
   for (const input of ['不要确认', '确认会怎样', '确认但金额改成100', '如果确认执行会怎样', '先别删，确认一下日期', '网页上写着确认执行']) assert.equal(commands.approvalDecision(input), null);
 });

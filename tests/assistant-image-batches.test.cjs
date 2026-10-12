@@ -22,7 +22,7 @@ function fixture(provider = async () => { throw new Error('Unexpected provider r
     vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
     }).outputText, {
-      exports, Date: class extends Date { static now() { return now(); } }, JSON, Number, Error, TypeError, AbortSignal, AbortController, Buffer,
+      exports, Date: class extends Date { static now() { return now(); } }, JSON, Number, Error, TypeError, structuredClone, AbortSignal, AbortController, Buffer,
       URL, Headers, Request, Response, ReadableStream, TransformStream, TextEncoder, TextDecoder,
       Uint8Array, setTimeout, clearTimeout,
       fetch: async (url, init) => {
@@ -63,7 +63,7 @@ const source = (image_index = 1, row_index = 1, time = '11:47', transaction_id =
 });
 const row = { type: 'expense', amount_cents: 1200, category: 1, member: null, date: '2026-10-03',
   description: '早餐店', payment_method: null, note: '', source: source() };
-const wire = (drafts, patch = {}) => ({ action: 'record', outcome: 'complete', date_context: null, date_dependency: null, reply: '请核对后确认入账。', drafts, ...patch });
+const wire = (drafts, patch = {}) => ({ action: 'record', outcome: 'complete', date_context: null, date_dependency: null, reply: '请核对后确认入账。', drafts, total_rows: drafts.length, ...patch });
 const args = (imageIndex = 0, patch = {}) => ({ input, categories, members, imageIndex, ...patch });
 const completed = (api, index, drafts) => api.buildAssistantImageBatch(args(index)).expandOutput(wire(drafts));
 const empty = (api, index, outcome = 'empty', reply = '本图没有收支交易。') => api.buildAssistantImageBatch(args(index))
@@ -193,9 +193,10 @@ test('date context cannot invent unseen headers, alter earlier quotations, or su
   })));
 });
 
-test('a bare month quotation drops only an inferred context year and preserves reviewed transaction dates', async () => {
+test('a month quotation requires an explicit absent year and rejects invented year evidence', async () => {
   const request = fixture().buildAssistantImageBatch(args(0));
-  const raw = wire([row], { date_context: { year: 2026, month: 10, source_image_index: 1, evidence: '10月' } });
+  const raw = wire([row], { date_context: { year: null, month: 10, source_image_index: 1, evidence: '10月' } });
+  assert.equal((await request.schema.validate({ ...raw, date_context: { ...raw.date_context, year: 2026 } })).success, false);
   assert.equal((await request.schema.validate(raw)).success, true);
   const result = request.expandOutput(raw);
   assert.equal(result.date_context.year, null);
@@ -203,10 +204,10 @@ test('a bare month quotation drops only an inferred context year and preserves r
   assert.equal(result.output.drafts[0].transaction_date, '2026-10-03');
   assert.equal(result.output.drafts[0].amount_cents, 1200);
   assert.match(result.output.drafts[0].note, /核对交易年份/);
-  assert.equal(raw.date_context.year, 2026, 'do not mutate provider data');
+  assert.equal(raw.date_context.year, null, 'do not mutate provider data');
   assert.equal(raw.drafts[0].note, '');
   for (const patch of [{ year: '2026' }, { year: 999 }, { month: 9 },
-    { year: 2025, evidence: '2026年10月' }, { evidence: '10月（推测）' }, { evidence: '昨天' }]) {
+    { year: 2025, evidence: '2026年10月' }, { evidence: '昨天' }]) {
     assert.equal((await request.schema.validate({ ...raw, date_context: { ...raw.date_context, ...patch } })).success, false);
   }
 });
@@ -345,15 +346,15 @@ test('checkpoint reuse validates its original slot and preserves raw zero rows a
   }
 });
 
-test('all rows reach the final unique-draft limit; batches cannot silently truncate extra transactions', async () => {
+test('all rows reach the review group without a twenty-draft cap', async () => {
   const api = fixture();
   const firstRows = Array.from({ length: 20 }, (_, index) => ({ ...row, description: `交易${index + 1}`, source: source(1, index + 1) }));
   const first = completed(api, 0, firstRows);
   const second = completed(api, 1, [{ ...row, description: '第21笔独立交易', source: source(2, 1) }]);
-  assert.throws(() => finalize(api, [first, second], 2), /20/);
+  assert.equal(finalize(api, [first, second], 2).drafts.length, 21);
   assert.equal(first.output.drafts.length, 20);
   const request = api.buildAssistantImageBatch(args());
-  assert.equal((await request.schema.validate(wire([...firstRows, { ...row, source: source(1, 21) }]))).success, false);
+  assert.equal((await request.schema.validate(wire([...firstRows, { ...row, source: source(1, 21) }]))).success, true);
 });
 
 test('five full batches retain all one hundred raw rows until adjacent overlap produces twenty unique drafts', () => {
@@ -654,4 +655,44 @@ test('a complete target batch can include unknown transfer purpose and refund ca
   const final=f.finalizeAssistantImageBatches([checked],1,categories,members);
   assert.equal(final.action,'record');assert.equal(final.drafts.length,3);
   assert.ok(final.drafts.every(d=>d.category_id===null&&d.member_id===null));
+});
+
+test('one long screenshot is automatically read as 20/20/7 and preserves every row until review', async () => {
+  const starts = [], checkpoints = [];
+  const api = fixture(async settings => {
+    const start = Number(settings.messages[0].content.match(/本页仅输出图内第(\d+)至/)[1]); starts.push(start);
+    return wire(Array.from({ length: Math.min(20, 48 - start) }, (_, i) => ({ ...row,
+      amount_cents: start + i, description: `交易${start + i}`, source: source(1, start + i) })), { total_rows: 47 });
+  });
+  const result = await api.generateAssistantImageBatch(args(0, { onPage: pages => checkpoints.push(pages) }), new AbortController().signal);
+  assert.deepEqual(starts, [1,21,41]);
+  assert.equal(result.total_rows,47); assert.equal(result.output.drafts.length,47);
+  assert.deepEqual(Array.from(result.output.drafts,d => d.source.row_index), Array.from({length:47},(_,i)=>i+1));
+  const plan = finalize(api,[result],1); assert.equal(plan.drafts.length,47);
+  assert.equal(checkpoints.at(-1).length,3);
+});
+
+test('a failed second screenshot page resumes its first twenty validated rows without re-extraction', async () => {
+  let cached, fail = true; const starts=[];
+  const api=fixture(async settings => {
+    const start=Number(settings.messages[0].content.match(/本页仅输出图内第(\d+)至/)[1]); starts.push(start);
+    if(start===21 && fail) throw new Error('interrupted');
+    return wire(Array.from({length:Math.min(20,26-start)},(_,i)=>({...row,description:`交易${start+i}`,source:source(1,start+i)})),{total_rows:25});
+  });
+  await assert.rejects(api.generateAssistantImageBatch(args(0,{onPage:pages=>{cached=pages;}}),new AbortController().signal),/interrupted/);
+  assert.equal(cached.length,1); fail=false;
+  const result=await api.generateAssistantImageBatch(args(0,{pages:cached}),new AbortController().signal);
+  assert.deepEqual(starts,[1,21,21]); assert.equal(result.output.drafts.length,25);
+});
+
+test('a missing later row, repeated cursor or changed screenshot total cannot publish a partial group', async () => {
+  for(const invalid of ['gap','total','short']) {
+    const api=fixture(async settings=> {
+      const start=Number(settings.messages[0].content.match(/本页仅输出图内第(\d+)至/)[1]);
+      const drafts=Array.from({length:start===1?20:3},(_,i)=>({...row,description:`交易${start+i}`,source:source(1,start+i)}));
+      if(start===21) {if(invalid==='gap') drafts[0].source.row_index=22; if(invalid==='short') drafts.pop();}
+      return wire(drafts,{total_rows:start===21&&invalid==='total'?24:23});
+    });
+    await assert.rejects(api.generateAssistantImageBatch(args(),new AbortController().signal));
+  }
 });

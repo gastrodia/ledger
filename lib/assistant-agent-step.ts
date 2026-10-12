@@ -10,7 +10,7 @@ export class AssistantAgentStepError extends Error {
 }
 const fail = (field: string, rule: string): never => { throw new AssistantAgentStepError(field, rule); };
 const identifier = /^[a-zA-Z0-9_-]{1,64}$/;
-const keys = new Set(["kind", "operation_id", "covered_operation_ids", "tool", "arguments_json", "plan_json", "needs_input"]);
+const keys = new Set(["kind", "operation_id", "covered_operation_ids", "tool", "arguments_json", "plan_json", "needs_input", "replaces_output_id"]);
 const limit = 24_000;
 /** Shared by provider final validation and the runtime. Domain validation follows. */
 export function parseAssistantAgentStep(raw: unknown, requireReference = false): AssistantAgentStep {
@@ -22,6 +22,7 @@ export function parseAssistantAgentStep(raw: unknown, requireReference = false):
   if (value.operation_id != null && (typeof value.operation_id !== "string" || !identifier.test(value.operation_id))) fail("operation_id", "必须为任务清单中的合法编号");
   if (value.covered_operation_ids !== undefined && (!Array.isArray(value.covered_operation_ids) || value.covered_operation_ids.length > 32
     || value.covered_operation_ids.some(id => typeof id !== "string" || !identifier.test(id)))) fail("covered_operation_ids", "必须为最多32个合法事项编号");
+  if (value.replaces_output_id != null && (typeof value.replaces_output_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.replaces_output_id))) fail("replaces_output_id", "必须为原卡片的合法UUID");
   if (value.needs_input !== undefined && typeof value.needs_input !== "boolean") fail("needs_input", "必须为布尔值");
   if (typeof value.arguments_json !== "string" || value.arguments_json.length > limit) fail("arguments_json", "必须为有界JSON字符串");
   if (value.plan_json !== null && (typeof value.plan_json !== "string" || value.plan_json.length > limit)) fail("plan_json", "必须为null或有界JSON字符串");

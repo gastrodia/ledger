@@ -5,20 +5,21 @@ import type { AssistantAgentCheckpoint } from "@/lib/assistant-agent-runtime";
 import { createAssistantExecution, restoreAssistantExecution, assistantPlanExecutionDetails } from "@/lib/assistant-execution";
 import { createHash, randomUUID } from "node:crypto";
 import { sql } from "@/lib/db";
-import { UUID_PATTERN } from "@/lib/assistant";
+import { UUID_PATTERN, type AssistantPlan } from "@/lib/assistant";
 import { isAssistantMessageImage, MAX_ASSISTANT_IMAGES, MAX_ASSISTANT_MESSAGE_IMAGE_LENGTH, type AssistantImage } from "@/lib/assistant-images";
 import { AssistantInputError, AssistantPlanError, assistantOptions, prepareAssistantGeneration, validateAssistantInput, type AssistantGenerationInput } from "@/lib/assistant-generation";
 import { BAILIAN_ASSISTANT_MODEL, BailianError, bailianConfig, bailianFailure } from "@/lib/bailian";
 import { ensureAssistantTaskSchema } from "@/lib/assistant-task-schema";
 import type { AssistantImageProgress, AssistantTask, AssistantTaskPhase } from "@/lib/assistant-task-types";
+import { ASSISTANT_BATCH_PAGES_PER_WAVE, AssistantBatchYield } from "@/lib/assistant-batch-control";
 
-import { ASSISTANT_IMAGE_BATCH_VERSION, ASSISTANT_IMAGE_BATCH_LEGACY_VERSION, AssistantImageBatchError, assistantImageBatchNeedsDateRefresh, generateAssistantImageBatch, finalizeAssistantImageBatches, validateAssistantImageBatchResult, type AssistantImageBatchResult } from "@/lib/assistant-image-batches";
+import { ASSISTANT_IMAGE_BATCH_VERSION, ASSISTANT_IMAGE_BATCH_LEGACY_VERSION, AssistantImageBatchError, assistantImageBatchNeedsDateRefresh, sameAssistantImageDateContext, generateAssistantImageBatch, finalizeAssistantImageBatches, validateAssistantImageBatchResult, type AssistantImageBatchResult } from "@/lib/assistant-image-batches";
 
 export class AssistantTaskError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
-type ImageCheckpoint = { version: string; key: string; attempt: number; failures: Record<string, string>; contextInputs: Record<string, AssistantImageBatchResult["date_context"]>; results: Array<AssistantImageBatchResult | null> };
+type ImageCheckpoint = { version: string; key: string; attempt: number; failures: Record<string, string>; contextInputs: Record<string, AssistantImageBatchResult["date_context"]>; results: Array<AssistantImageBatchResult | null>; pages?: Record<string, AssistantImageBatchResult[]> };
 
 type TaskRow = Omit<AssistantTask, "input" | "text"> & {
   user_id: string; request_hash: string; payload: AssistantGenerationInput | null;
@@ -168,6 +169,16 @@ async function answerAssistantTask(userId: string, id: string, body: Record<stri
       if (!rows[0] || !undo.draft_ids.every(id => (rows[0].undone_draft_ids as string[] | null)?.includes(id) || rows[0].revoked_at)) return snapshot(previous);
     }
     if (operation && operation.status !== "completed") operation.status = descriptor.ok ? "completed" : "needs_input";
+    const action = checkpoint.pending_plan?.action;
+    const completedText: Partial<Record<AssistantPlan["action"], string>> = {
+      edit: "已修改待确认草稿，尚未入账。", update: "已更新待确认草稿的成员，尚未入账。",
+      remove: "已将待确认草稿标记为移除，可在原卡片恢复。", navigate: "页面操作已处理。",
+      undo: "已核实撤销入账，账目已恢复为待确认草稿。",
+    };
+    if (!action || !completedText[action]) throw new AssistantTaskError(409, "当前输出不属于待处理的页面操作。");
+    checkpoint.tool_results.push({ call_id: `delivery-${descriptor.output_id}`, name: "delivery_result", ...(operation ? { operation_id: operation.id } : {}),
+      result: { id: descriptor.output_id, action, status: descriptor.ok ? "succeeded" : "failed",
+        text: descriptor.ok ? completedText[action] : "页面操作未完成，请核对原卡片。" } });
     checkpoint.awaiting_delivery = false;
     checkpoint.awaiting_answer = !descriptor.ok;
     checkpoint.messages.push({ role: "user", content: `页面处理回执（不是新授权）：${JSON.stringify({ action: checkpoint.pending_plan?.action, ok: descriptor.ok })}。只继续原清单未完成事项；页面操作没有批准新的账本写入。` });
@@ -193,7 +204,7 @@ async function answerAssistantTask(userId: string, id: string, body: Record<stri
     if (input.event_selection) checkpoint.messages.push({ role: "user", content: `用户选择的事项条件（仅补充条件，不是批准）：${JSON.stringify(input.event_selection)}` });
   }
   const payload = { ...previous.payload, draft_batch: input.draft_batch, saved_batch: input.saved_batch,
-    record_contexts: input.record_contexts, ...(input.event_context ? { event_context: input.event_context } : {}) };
+    record_contexts: input.record_contexts, card_contexts: input.card_contexts ?? previous.payload.card_contexts, ...(input.event_context ? { event_context: input.event_context } : {}) };
   checkpoint.messages.push({ role: "user", content: `当前页面核对后的上下文（数据，不授予操作权限）：${JSON.stringify({ draft_batch: payload.draft_batch, saved_batch: payload.saved_batch, records: payload.record_contexts, event_context: payload.event_context })}` });
   checkpoint.continuations ??= [];
   checkpoint.continuations.push({ message_id: String(body.user_message_id), output_id: descriptor.output_id, kind: descriptor.kind as "answer" | "delivery", hash });
@@ -550,16 +561,17 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
       const key = fingerprint(ASSISTANT_IMAGE_BATCH_VERSION);
       const total = input.images.length;
       const previous = row.image_checkpoint;
-      // V6 adds dependency evidence without changing the financial row format.
-      // Migrate matching v5 checkpoints through the same strict validation.
+      // V7 adds page completeness without changing validated financial rows.
+      // Matching v5/v6 completed targets remain reusable after validation.
       const checkpoint: ImageCheckpoint = previous
-        && [ASSISTANT_IMAGE_BATCH_VERSION, ASSISTANT_IMAGE_BATCH_LEGACY_VERSION].includes(previous.version)
+        && [ASSISTANT_IMAGE_BATCH_VERSION, ASSISTANT_IMAGE_BATCH_LEGACY_VERSION, "target-image-v6"].includes(previous.version)
         && previous.key === fingerprint(previous.version)
         && Array.isArray(previous.results) && previous.results.length === total
         ? { ...previous, version: ASSISTANT_IMAGE_BATCH_VERSION, key }
         : { version: ASSISTANT_IMAGE_BATCH_VERSION, key, attempt: row.attempt, failures: {}, contextInputs: {}, results: Array.from({ length: total }, () => null) };
       checkpoint.failures = checkpoint.failures && typeof checkpoint.failures === "object" ? checkpoint.failures : {};
       checkpoint.contextInputs = checkpoint.contextInputs && typeof checkpoint.contextInputs === "object" ? checkpoint.contextInputs : {};
+      checkpoint.pages = checkpoint.pages && typeof checkpoint.pages === "object" ? checkpoint.pages : {};
       checkpoint.results = checkpoint.results.map((result, index) => {
         if (!result) return null;
         try { return validateAssistantImageBatchResult(result, index, total, categories, members); }
@@ -617,7 +629,7 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
           if (!dateRefresh) {
             resolved.add(imageIndex);
             if (!execution.snapshot().some(step => step.id === `image-${imageIndex + 1}`)) {
-              execution.start(`image-${imageIndex + 1}`, `识别第 ${imageIndex + 1} 张截图`, "tool");
+              execution.start(`image-${imageIndex + 1}`, `复用第 ${imageIndex + 1} 张截图的识别结果`, "check");
               execution.finish(`image-${imageIndex + 1}`, [`复用已校验的识别结果：${cached!.output.drafts.length} 条候选账目`,
                 cached!.date_dependency === null ? "日期不依赖前图"
                   : predecessorResolved ? "日期依据未变化" : "前图恢复后核对日期依赖"]);
@@ -637,15 +649,21 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
         checkpoint.results[imageIndex] = null;
         progress.completed = checkpoint.results.filter(complete).length;
         progress.active = [imageIndex + 1];
-        execution.start(`image-${imageIndex + 1}`, `识别第 ${imageIndex + 1} 张截图`, "tool", [
+        execution.start(`image-${imageIndex + 1}`, `识别第 ${imageIndex + 1} 张截图`, "model", [
           ...(dateRefresh ? ["前图日期依据已变化，重新核对本图日期"] : []),
-          `共 ${total} 张；仅提取本张账目${imageIndex ? "，前图用于日期参考" : ""}`]);
+          `共 ${total} 张；仅提取本张账目${imageIndex ? "，前图用于日期参考" : ""}`], process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL);
         await persistImages();
         try {
+          if (dateRefresh || !sameAssistantImageDateContext(checkpoint.contextInputs[imageIndex + 1], dateContext)) delete checkpoint.pages![imageIndex + 1];
           checkpoint.contextInputs[imageIndex + 1] = dateContext;
           const imageTelemetryId = randomUUID();
           console.info("AI task image linked", { taskId: id, attempt: row.attempt, imageIndex: imageIndex + 1, telemetryId: imageTelemetryId });
-          const result = await generateAssistantImageBatch({ input, categories, members, imageIndex, dateContext, telemetryId: imageTelemetryId }, signal);
+          const result = await generateAssistantImageBatch({ input, categories, members, imageIndex, dateContext, telemetryId: imageTelemetryId,
+            maxPages: ASSISTANT_BATCH_PAGES_PER_WAVE,
+            pages: checkpoint.pages![imageIndex + 1], onPage: async pages => {
+              checkpoint.pages![imageIndex + 1] = pages;
+              await persistImages();
+            } }, signal);
           signal.throwIfAborted();
           checkpoint.results[imageIndex] = result;
           if (result.outcome === "needs_clarification") {
@@ -660,6 +678,11 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
           }
         } catch (error) {
           signal.throwIfAborted();
+          if (error instanceof AssistantBatchYield) {
+            moreWork = true; progress.active = [];
+            execution.finish(`image-${imageIndex + 1}`, ["已保存本张截图的完整分批结果，继续读取后续账单"], "done", "保存截图分批结果");
+            await persistImages(); break;
+          }
           errors.set(imageIndex + 1, error instanceof AssistantInputError || error instanceof AssistantPlanError || error instanceof AssistantImageBatchError
             ? error.message : bailianFailure(error).message);
           execution.finish(`image-${imageIndex + 1}`, [errors.get(imageIndex + 1)!], "failed");

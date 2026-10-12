@@ -6,9 +6,9 @@ export const draftEditSchema = z.object({ batch_id: id, edits: z.array(z.object(
   draft_id: id, type: z.enum(["income", "expense"]).optional(), amount_cents: z.number().int().positive().max(999_999_999_999).optional(),
   category_id: id.nullable().optional(), member_id: id.nullable().optional(), transaction_date: date.optional(),
   description: z.string().max(500).optional(), payment_method: z.string().max(40).nullable().optional(), note: z.string().max(200).optional(),
-}).strict()).min(1).max(20) }).strict();
+}).strict()).min(1) }).strict();
 export type AssistantDraftEdit = z.infer<typeof draftEditSchema>;
-export const draftConfirmSchema = z.object({ batch_id: id, draft_ids: z.array(id).min(1).max(20) }).strict();
+export const draftConfirmSchema = z.object({ batch_id: id, draft_ids: z.array(id).min(1) }).strict();
 export type AssistantDraftConfirm = z.infer<typeof draftConfirmSchema>;
 export const navigationSchema = z.object({ page: z.enum(["assistant", "transactions", "stats", "loans", "giftbooks", "gifts_given", "categories", "members", "notes"]),
   operation: z.enum(["open", "clear_chat", "sort"]), batch_id: id.nullable(), order: z.enum(["original", "date-asc", "date-desc"]).nullable(),

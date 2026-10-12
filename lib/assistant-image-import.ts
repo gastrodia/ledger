@@ -99,9 +99,8 @@ export function mergeAssistantImageImport(raw: unknown, imageCount: number): { o
     if (plan.query !== null || (plan.update !== undefined && plan.update !== null)
       || (plan.undo !== undefined && plan.undo !== null)) throw new Error("AI 返回的操作不一致，请重试。");
   }
-  // A bounded response is required before considering overlap. validatePlan
-  // still enforces the 20 unique draft limit after every visible row is read.
-  if (drafts.length > imageCount * 20) throw new Error("识别到的账目过多，一次最多生成20笔独立草稿，请分批上传。");
+  // Provider pages are complete before overlap matching. The review group
+  // retains every independent transaction regardless of its total size.
   const summary: AssistantImageImportSummary = {
     image_count: imageCount, extracted_count: drafts.length, removed_duplicates: 0,
     retained_count: drafts.length, review_required: false, warnings: [],
@@ -184,4 +183,12 @@ export function mergeAssistantImageImport(raw: unknown, imageCount: number): { o
     for (const row of forward.length ? forward : backward) removed.add(row);
   }
   return finish();
+}
+
+/** Recognition counts and warnings come from the completed import, not model prose. */
+export function assistantImageImportReply(summary: AssistantImageImportSummary): string {
+  return `已生成 ${summary.retained_count} 笔待确认草稿，请核对金额、日期、年份、分类和成员后确认入账。`
+    + (summary.skipped_zero_amounts ? `已忽略 ${summary.skipped_zero_amounts} 条零金额记录。` : "")
+    + (summary.removed_duplicates ? `已按相邻截图重叠证据合并 ${summary.removed_duplicates} 条重复显示的记录。` : "")
+    + summary.warnings.join("；");
 }

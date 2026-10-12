@@ -12,7 +12,7 @@ export type AssistantStreamEvent = AssistantProgressEvent
   | { type: "error"; message: string };
 
 const MAX_STREAM_BYTES = 2 * 1024 * 1024;
-const MAX_EVENT_LENGTH = 256 * 1024;
+const MAX_EVENT_LENGTH = MAX_STREAM_BYTES;
 const MAX_REPLY_LENGTH = 64 * 1024;
 const INVALID_RESPONSE = "AI 回复格式无效，请重试。";
 const INCOMPLETE_RESPONSE = "AI 回复中断，请重试。";
@@ -27,7 +27,7 @@ function nullableString(value: unknown): value is string | null {
 
 function target(value: unknown): value is Record<string, unknown> {
   return object(value) && typeof value.batch_id === "string"
-    && Array.isArray(value.draft_ids) && value.draft_ids.length > 0 && value.draft_ids.length <= 20
+    && Array.isArray(value.draft_ids) && value.draft_ids.length > 0
     && value.draft_ids.every(id => typeof id === "string");
 }
 
@@ -36,7 +36,9 @@ function target(value: unknown): value is Record<string, unknown> {
 function plan(value: unknown): AssistantPlan {
   if (!object(value) || !["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event"].includes(value.action as string)
     || typeof value.reply !== "string" || value.reply.length > MAX_REPLY_LENGTH
-    || !Array.isArray(value.drafts) || value.drafts.length > 20) throw new Error(INVALID_RESPONSE);
+    || (value.replaces_output_id !== undefined && typeof value.replaces_output_id !== "string")
+    || (value.analysis !== undefined && (typeof value.analysis !== "string" || value.analysis.length > MAX_REPLY_LENGTH))
+    || !Array.isArray(value.drafts)) throw new Error(INVALID_RESPONSE);
   for (const draft of value.drafts) {
     if (!object(draft) || typeof draft.id !== "string" || !["income", "expense"].includes(draft.type as string)
       || !Number.isSafeInteger(draft.amount_cents) || (draft.amount_cents as number) <= 0

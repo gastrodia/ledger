@@ -1,11 +1,13 @@
-import { recoverAssistantEventResolution, sameEventOccurrence, isDuplicateEventQuestion, type AssistantEventResolution } from "@/lib/assistant-event-clarification";
+import { sameEventOccurrence, type AssistantEventResolution } from "@/lib/assistant-event-clarification";
 import { createHash } from "node:crypto";
 import { parseAssistantAgentStep, AssistantAgentStepError } from "@/lib/assistant-agent-step";
 import type { AssistantPlan, AssistantQuery } from "@/lib/assistant";
 import type { AssistantActionResult, LedgerCommand, LedgerResource } from "@/lib/assistant-commands";
 import type { LedgerEventInput } from "@/lib/ledger-event";
+import type { AssistantRecordCheckpoint } from "@/lib/assistant-record-batches";
+import { AssistantBatchYield } from "@/lib/assistant-batch-control";
 import { assistantToolExecutionLabel, assistantResponseExecutionLabel, type AssistantExecutionReporter } from "@/lib/assistant-execution";
-import { validateWorkflow, assertWorkflowCoverage, workflowOperation, matchingRecordOperations, reconcileRecordWorkflowReceipts, type WorkflowOperation } from "@/lib/assistant-workflow";
+import { validateWorkflow, assertWorkflowCoverage, workflowOperation, reconcileRecordWorkflowReceipts, type WorkflowOperation } from "@/lib/assistant-workflow";
 
 export type AssistantAgentStatus = "running" | "waiting_approval" | "completed" | "stopped" | "needs_input" | "interrupted";
 export type AssistantAgentMetadata = { goal_id: string; goal: string; status: AssistantAgentStatus; steps: number; tool_calls: number; pending_action_id?: string; pending_batch_id?: string; output_id?: string; operations?: WorkflowOperation[]; awaiting_answer?: boolean; awaiting_delivery?: boolean };
@@ -28,7 +30,7 @@ export type AssistantAgentCheckpoint = {
   output_id?: string;
   turn_message_id?: string;
   turn_input?: { message: string; display_text: string; display_images: [] };
-  outputs?: Array<{ id: string; user_message_id: string; input: { message: string; display_text: string; display_images: [] }; plan: AssistantPlan; attempt: number; receipt?: AssistantActionResult }>;
+  outputs?: Array<{ id: string; user_message_id: string; input: { message: string; display_text: string; display_images: [] }; plan: AssistantPlan; attempt: number; operation_ids?: string[]; receipt?: AssistantActionResult }>;
   awaiting_answer?: boolean;
   awaiting_delivery?: boolean;
   event_resolutions?: AssistantEventResolution[];
@@ -36,17 +38,20 @@ export type AssistantAgentCheckpoint = {
   rebound_task_id?: string;
   authorized_answers?: string[];
   continuations?: Array<{ message_id: string; output_id: string; kind: "answer" | "delivery"; hash: string }>;
+  record_checkpoint?: AssistantRecordCheckpoint;
+  record_step?: AssistantAgentStep;
 };
-export type AssistantAgentStep = { kind: "plan" | "reuse" | "read" | "preview" | "respond"; tool: "query" | "records" | "draft_matches" | "command" | "event" | null; arguments_json: string; plan_json: string | null; needs_input?: boolean; operation_id?: string | null; covered_operation_ids?: string[] };
+export type AssistantAgentStep = { kind: "plan" | "reuse" | "read" | "preview" | "respond"; tool: "query" | "records" | "draft_matches" | "command" | "event" | null; arguments_json: string; plan_json: string | null; needs_input?: boolean; operation_id?: string | null; covered_operation_ids?: string[]; replaces_output_id?: string | null };
 export type AssistantAgentTarget = { resource: LedgerResource; operation: "create" | "update" | "delete" | "reorder" | "link" | "unlink"; ids: string[] };
 export type AssistantAgentTargetVerification = { verified: boolean; records: Array<{ resource: LedgerResource; operation: string; ids: string[]; rows: Record<string, unknown>[] }> };
 export type AssistantAgentAdapters = {
+  model?: string;
   verifyTargets?: (targets: AssistantAgentTarget[], signal: AbortSignal, actionId?: string) => Promise<AssistantAgentTargetVerification>;
   chooseStep: (messages: AssistantAgentMessage[], signal: AbortSignal) => Promise<unknown>;
   trustedIds?: () => string[];
   domainInstructions?: (resource: string) => string;
   toolDetails?: (plan: AssistantPlan) => string[];
-  validatePlan: (raw: unknown) => Promise<AssistantPlan> | AssistantPlan;
+  validatePlan: (raw: unknown, recordContext?: { sources: string[]; answers: string[]; checkpoint: AssistantAgentCheckpoint; save: () => Promise<void>; signal: AbortSignal }) => Promise<AssistantPlan> | AssistantPlan;
   validateCommand: (raw: unknown) => LedgerCommand;
   validateEvent: (raw: unknown) => LedgerEventInput;
   query: (query: AssistantQuery, signal: AbortSignal) => Promise<unknown>;
@@ -59,11 +64,11 @@ export type AssistantAgentOptions = {
   checkpoint?: AssistantAgentCheckpoint | null; approvalOutcome?: AssistantActionResult | null;
   onCheckpoint?: (checkpoint: AssistantAgentCheckpoint) => Promise<void> | void;
   execution?: AssistantExecutionReporter; knownIds?: string[];
-  maxSteps?: number; timeoutMs?: number;
+  reviewedCardIds?: string[]; maxSteps?: number; timeoutMs?: number;
   attempt?: number; userMessageId?: string; requireWorkflow?: boolean;
 };
 const MAX_TOTAL_STEPS = 192;
-const MAX_CHECKPOINT_CHARS = 500_000;
+const MAX_CHECKPOINT_CHARS = 8 * 1024 * 1024;
 const MAX_TOOL_RESULT_CHARS = 16_000;
 const MAX_STEP_CHARS = 24_000;
 const safePlan = (reply: string): AssistantPlan => ({ action: "chat", reply, drafts: [], query: null });
@@ -99,62 +104,42 @@ function outputId(goal: string, step: number) {
   const hex = fingerprint({ goal, step }).slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
-function hasWriteCompletionClaim(reply: string) {
-  // Check each clause independently: a capability elsewhere cannot authorize a write.
-  const clauses = reply.replace(/[*_`]/g, "").split(/[。！？!?；;\n，,]/);
-  const claims = /(?:(已(?:经)?|成功|完成)[^。！？!?；;\n，,]{0,8}?(保存|创建|新增|入账|修改|删除|撤销|执行|更新)|(保存|创建|新增|入账|修改|删除|撤销|执行|更新)[^。！？!?；;\n，,]{0,6}?(成功|完成))/g;
-  const recordNoun = "(?:账目|账单|记录|交易|流水|数据|收支|收入|支出|消费|便利贴|便签|备忘|分类|成员|借还|礼簿|台账|事项)";
-  const recordReference = new RegExp(`^(?:的)?${recordNoun}`);
-  const coordinatedReference = new RegExp(`^(?:的)?${recordNoun}(?:和|及|与|、|以及)$`);
-  for (const clause of clauses) {
-    let previousReferenceEnd = -1;
-    for (const match of clause.matchAll(claims)) {
-      const before = clause.slice(0, match.index).trim();
-      const after = clause.slice(match.index + match[0].length).trim();
-      // Match the nearest verb so “已入账记录：对已经保存的账单”
-      // remains two record-state references, not one fabricated write claim.
-      const savedTarget = /^已(?:经)?(?:成功|完成)?(?:保存|创建|新增|入账|修改|删除|撤销|执行|更新)$/.test(match[0])
-        && recordReference.test(after)
-        && (after.startsWith("的") || (previousReferenceEnd >= 0 && coordinatedReference.test(clause.slice(previousReferenceEnd, match.index).trim())) || /(?:查询|查看|读取|核对|检查|统计|分析|汇总|整理|修改|更新|编辑|调整|更正|修正|删除|撤销|管理|筛选|搜索|关联|对|针对|关于)(?:任意|这些|你的|您的|指定|已有|所有|全部|当前)?$/.test(before)
-          // “存在一笔相同的已入账记录” describes a saved candidate.
-          // Keep a following “已删除/已修改” clause subject to the receipt guard.
-          || /(?:存在|找到|匹配到?)[^。！？!?；;\n，,]{0,100}(?:的|条|笔)$/.test(before)
-          || /(?:在|从|与|找到|匹配到)$/.test(before));
-      if (savedTarget) { previousReferenceEnd = match.index + match[0].length; continue; }
-      if (/^(?:已|已经)(?:入账|保存)$/.test(match[0]) && /(?:疑似|可能|或许|似乎)$/.test(before)) continue;
-      if (/(?:尚未|还未|未|没有|没|并未|不曾|不会|不能|无法|不得)(?:帮你|为你)?$/.test(before)
-        || /(?:如果|假如|一旦|若)[^。！？!?；;\n，,]*$/.test(before) || /^(?:后|时|之后|以后)/.test(after)) continue;
-      const explicitPast = match[1]?.startsWith("已") || /已(?:经)?(?:完成|成功)/.test(match[0]);
-      if (!explicitPast && /(?:可以|能够|支持|能帮|可帮|将|会|需要|请|才能|确认后|批准后)[^。！？!?；;\n，,]*$/.test(before)) continue;
-      return true;
+/** Only adapter reads and execution receipts supply operation results. Model prose
+ * is kept for explanations/questions, never inspected to infer execution state. */
+function observedReply(c: AssistantAgentCheckpoint): string | undefined {
+  const results = new Map<string, string>();
+  for (const tool of c.tool_results) {
+    if (["approval_result", "delivery_result"].includes(tool.name)) {
+      const receipt = tool.result as AssistantActionResult;
+      if (receipt?.id && ["succeeded", "failed", "cancelled", "expired"].includes(receipt.status)) results.set(receipt.id, receipt.text);
+    } else if (["query", "records", "draft_matches"].includes(tool.name)) {
+      const operation = c.operations?.find(operation => operation.id === tool.operation_id);
+      if (operation && operation.effect !== "read") continue;
+      const result = tool.result as { reply?: string; limited?: boolean; filters?: AssistantQuery };
+      const key = JSON.stringify([tool.operation_id || tool.name, result.filters || tool.call_id]);
+      results.set(key, result.limited ? "查询结果不完整，请缩小范围后继续核对。"
+        : result.reply || "已完成账本查询，请查看查询结果。");
     }
   }
-  return false;
-}
-function noUnverifiedSuccess(plan: AssistantPlan, checkpoint: AssistantAgentCheckpoint) {
-  if (plan.action === "chat" && hasWriteCompletionClaim(plan.reply)) {
-    // Receipts carry exact execution facts. Free model text cannot add new write claims.
-    const receipts = checkpoint.tool_results.filter(r => r.name === "approval_result").map(r => (r.result as AssistantActionResult)?.text).filter(Boolean);
-    plan.reply = receipts.length ? String(receipts.at(-1)) : "尚未执行账本更改。如需修改，请明确操作内容，我会先准备确认预览。";
-  }
-  return plan;
+  return results.size ? [...results.values()].join("\n\n") : undefined;
 }
 export async function runAssistantAgent(o: AssistantAgentOptions): Promise<AssistantPlan> {
   const c: AssistantAgentCheckpoint = o.checkpoint ? structuredClone(o.checkpoint) : { version: 1, goal_id: o.goalId, goal: o.goal, status: "running", steps: 0,
     ...(o.requireWorkflow ? { workflow_required: true } : {}), messages: structuredClone(o.messages), tool_results: [], pending_approval: null, preview_fingerprints: [] };
   if (c.operations && c.outputs) reconcileRecordWorkflowReceipts(c.operations, c.outputs);
-  recoverAssistantEventResolution(c);
   const save = async () => { o.signal.throwIfAborted(); if (JSON.stringify(c).length > MAX_CHECKPOINT_CHARS) throw new Error("任务上下文达到上限，请缩小范围。"); await o.onCheckpoint?.(structuredClone(c)); o.signal.throwIfAborted(); };
   const finish = async (plan: AssistantPlan, status: AssistantAgentStatus) => { c.status = status;
     if ((c.operations || c.workflow_required) && !c.pending_approval && !c.pending_batch) c.output_id = outputId(c.goal_id, c.steps);
-    const latestRead = [...c.tool_results].reverse().find(r => ["query", "records", "draft_matches"].includes(r.name));
+    const latestRead = [...c.tool_results].reverse().find(r => ["query", "records", "draft_matches"].includes(r.name)
+      && (!c.operations || c.operations.some(operation => operation.id === r.operation_id && operation.effect === "read")));
     const latestQuery = latestRead && ["query", "draft_matches"].includes(latestRead.name) ? latestRead.result as { reply_view?: AssistantPlan["reply_view"] } : undefined;
     const latestRecords = latestRead?.name === "records" ? latestRead.result as { record_context?: AssistantPlan["record_context"] } : undefined;
-    const result = { ...plan, ...(plan.action === "chat" && latestQuery?.reply_view ? { reply_view: latestQuery.reply_view } : {}),
-      ...(plan.action === "chat" && latestRecords?.record_context ? { record_context: latestRecords.record_context } : {}), agent: assistantAgentMetadata(c) };
+    const result = { ...plan, ...(plan.action === "chat" && !c.awaiting_answer && latestQuery?.reply_view ? { reply_view: latestQuery.reply_view } : {}),
+      ...(plan.action === "chat" && !c.awaiting_answer && latestRecords?.record_context ? { record_context: latestRecords.record_context } : {}), agent: assistantAgentMetadata(c) };
     if (status !== "running" && (c.operations || c.workflow_required) && c.output_id) {
       const output = { id: c.output_id, user_message_id: c.turn_message_id || o.userMessageId || c.goal_id,
-        input: c.turn_input || { message: c.goal, display_text: c.goal, display_images: [] as [] }, plan: structuredClone(result), attempt: o.attempt || 1 };
+        input: c.turn_input || { message: c.goal, display_text: c.goal, display_images: [] as [] }, plan: structuredClone(result), attempt: o.attempt || 1,
+        ...(c.pending_operation_ids?.length ? { operation_ids: [...c.pending_operation_ids] } : {}) };
       c.outputs ??= [];
       const existing = c.outputs.findIndex(item => item.id === output.id);
       if (existing < 0) c.outputs.push(output);
@@ -214,14 +199,11 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
   };
   let malformedSteps = 0;
   let lastValidation = "", repeatedValidation = 0;
-  let completionClaimRepairs = 0;
-  let unverifiedCompletion = false;
   const prepareReadPlan = async (step: AssistantAgentStep): Promise<AssistantPlan> => {
     const args = json(step.arguments_json);
     if (step.tool === "query") {
       if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["scope", "start_date", "end_date", "type", "category_id", "member_id", "keyword"].includes(key))) throw new Error("查询参数格式无效，仅可填写账本日期和筛选条件。");
-      const query = { ...args, category_id: "category_id" in args ? args.category_id : null, member_id: "member_id" in args ? args.member_id : null, keyword: "keyword" in args ? args.keyword : null };
-      return o.adapters.validatePlan({ action: "query", reply: "正在查询", drafts: [], query });
+      return o.adapters.validatePlan({ action: "query", reply: "正在查询", drafts: [], query: args });
     }
     const command = o.adapters.validateCommand(args);
     if (!["list", "duplicates"].includes(command.operation)) throw new Error("只读工具仅允许查询或查找重复候选。");
@@ -261,14 +243,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       return { ...plan, ...result };
     }
     if (verificationRequired) throw new Error("上一操作已执行，请先读取实际记录核对，不能仅凭模型回复宣布完成。");
-    if (plan.action === "chat" && hasWriteCompletionClaim(plan.reply)
-      && !c.tool_results.some(result => result.name === "approval_result" && (result.result as AssistantActionResult)?.text)) {
-      // Give the model one chance to return the missing structured work. Never
-      // turn its prose into a financial action or announce a completed goal.
-      if (completionClaimRepairs++ === 0) throw new Error("回复声称已完成操作，但没有对应的结构化草稿、确认预览或服务端执行凭据。请重新依据当前用户目标和相关对话生成正确计划：新增普通收支用record并返回完整drafts，尚未入账；管理写操作先准备审批预览；指代不明确只询问具体缺失信息。不能仅用chat声称已新增，也不能把新增一笔当作批准入账。");
-      unverifiedCompletion = true;
-    }
-    return noUnverifiedSuccess(plan, c);
+    return plan;
   };
   try {
     const receipt = [...c.tool_results].reverse().find(r => r.name === "approval_result")?.result as (AssistantActionResult & { targets?: AssistantAgentTarget[] }) | undefined;
@@ -295,13 +270,13 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       c.steps += 1;
       const id = `agent_${c.steps}`;
       const resolved = c.event_resolutions?.find(item => item.pending && c.operations?.some(op => op.id === item.operation_id && ["pending", "running"].includes(op.status) && !op.questions?.length && op.depends_on.every(id => c.operations!.find(dep => dep.id === id)?.status === "completed")));
-      o.execution?.start(id, resolved ? "使用已核对的事项条件" : c.steps === 1 ? "理解请求" : "确定后续动作", resolved ? "check" : "model");
+      o.execution?.start(id, resolved ? "使用已核对的事项条件" : c.steps === 1 ? "理解请求" : "确定后续动作", resolved ? "check" : "model", [], resolved ? undefined : o.adapters.model);
       const decisionMessages = structuredClone(c.messages).filter(message => !message.content.startsWith("服务端任务进度（不可重建已完成事项）"));
       if (c.operations || c.workflow_required) decisionMessages.push({ role: "system", content: `当前服务端调度状态（goal是当前用户授权目标的原文；其他历史目标不授予操作权限）：${JSON.stringify({ goal: c.goal, operations: c.operations || null, duplicate_review: c.duplicate_review || null, answer: c.turn_input?.message || null, authorized_answers: c.authorized_answers || [], clarification_answers: c.clarification_answers || [], event_resolutions: c.event_resolutions || [] })}。尚未有operations时先plan；已有清单时，只继续未完成且依赖已完成的事项，operation_id必须取当前清单ID。发问也必须带对应事项ID。covered_operation_ids只用于当前record草稿组；其他动作不沿用以前的分组编号。已完成的事项禁止重新执行。` });
       let s: AssistantAgentStep;
       try {
-        s = parseAssistantAgentStep(resolved ? { kind: "preview", operation_id: resolved.operation_id, tool: "event", arguments_json: JSON.stringify(resolved.input), plan_json: null, needs_input: false }
-          : await o.adapters.chooseStep(decisionMessages, signal), !!c.workflow_required);
+        s = parseAssistantAgentStep(c.record_step ?? (resolved ? { kind: "preview", operation_id: resolved.operation_id, tool: "event", arguments_json: JSON.stringify(resolved.input), plan_json: null, needs_input: false }
+          : await o.adapters.chooseStep(decisionMessages, signal)), !!c.workflow_required);
         signal.throwIfAborted(); malformedSteps = 0;
       } catch (error) {
         if (signal.aborted || !(c.operations || c.workflow_required)
@@ -320,10 +295,11 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       let activeToolId: string | undefined;
       let plan: AssistantPlan;
       try {
+        if (s.replaces_output_id != null && !o.reviewedCardIds?.includes(s.replaces_output_id)) throw new Error("替换目标不在当前卡片上下文中，请指定原卡片的真实ID。");
         if (s.kind === "plan") {
           if (c.pending_approval || c.pending_batch) throw new Error("当前有待确认方案，不能改写其执行范围；请先处理原确认方案。");
           const args = json(s.arguments_json);
-          if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["operations", "initial_read", "initial_reads"].includes(key))) throw new Error("任务计划只允许operations和可选的查询参数。");
+          if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["operations", "initial_read", "initial_reads", "revision_answers"].includes(key))) throw new Error("任务计划只允许operations和可选的查询参数。");
           const operations = validateWorkflow(args.operations);
           if (c.workflow_required) assertWorkflowCoverage(operations, c.goal, c.authorized_answers);
           const preparedReads: Array<{ step: AssistantAgentStep; plan: AssistantPlan; mode: "result" | "analysis" }> = [];
@@ -362,9 +338,12 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
               if (["completed", "failed", "cancelled"].includes(previous.status)
                 && canonical({ ...previous, status: "pending", receipt_id: undefined, questions: undefined }) !== canonical({ ...next, receipt_id: undefined, questions: undefined })) throw new Error("已执行事项不可改写；更正已保存数据需另列操作并保留原凭据。");
               next.status = previous.status === "running" || previous.status === "needs_input" ? "pending" : previous.status;
-              if (previous.effect === "write" && next.effect === "read"
-                && !(c.authorized_answers || []).some(answer => /(不用再记|无需再记|不新增这笔|不记这笔|已经记过|同一笔|只查询|只查|不需要新建)/.test(answer))
-                && !/(查询|查看|统计|分析)/.test((previous.sources || []).join(""))) throw new Error("尚未完成的写目标不能改为聊天结束；请先澄清是否确实无需新增，或继续准备原操作。");
+              if (previous.effect === "write" && next.effect === "read") {
+                const quote = args.revision_answers?.[previous.id];
+                if (typeof quote !== "string" || quote !== c.turn_input?.message
+                  || !c.clarification_answers?.some(answer => answer.operation_id === previous.id && answer.text === quote))
+                  throw new Error("写事项改为只读必须引用该事项本轮已接受的澄清回答；不能根据关键词或其他事项的回答取消原目标。");
+              }
               if (previous.receipt_id) next.receipt_id = previous.receipt_id;
             }
           }
@@ -409,7 +388,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
             c.awaiting_answer = false; c.awaiting_delivery = false;
             o.execution?.start(`agent_result_${c.steps}`, "整理查询结果", "check");
             o.execution?.finish(`agent_result_${c.steps}`, ["全部查询结果已整理"]);
-            return finish(safePlan(replies.join("\n\n")), "completed");
+            return finish({ ...safePlan(replies.join("\n\n")), ...(s.replaces_output_id ? { replaces_output_id: s.replaces_output_id } : {}) }, "completed");
           }
           // Successful reads are durable. If this wave ends or a later read
           // fails, the normal continuation only queries unfinished items.
@@ -434,14 +413,6 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
               && remaining.every(item => item.effect === "read" && ["pending", "running"].includes(item.status) && !item.questions?.length
                 && c.tool_results.some(tool => tool.operation_id === item.id && ["query", "records", "draft_matches"].includes(tool.name)
                   && tool.result && !(tool.result as { limited?: boolean }).limited))) summarizedReads = remaining;
-            // A literal record group has a server-verifiable identity even when
-            // the model omitted its primary ID. Completed items never qualify.
-            if (s.operation_id == null && candidate.action === "record" && Array.isArray(candidate.drafts)) {
-              const matched = matchingRecordOperations(c.operations, candidate.drafts);
-              const ids = s.covered_operation_ids?.length ? s.covered_operation_ids : matched;
-              if (ids.length && ids.every(id => matched.includes(id) && c.operations!.some(item => item.id === id && item.status === "pending"
-                && item.depends_on.every(dependency => c.operations!.find(item => item.id === dependency)?.status === "completed")))) s.operation_id = ids[0];
-            }
             // A summary cannot execute an action. Some providers retain the last
             // completed ID; normalize it only after the whole agenda is settled.
             if (allCompleted && candidate.action === "chat" && c.operations.some(item => item.id === s.operation_id && item.status === "completed")) s.operation_id = null;
@@ -466,7 +437,8 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (s.kind === "reuse") {
           const args = json(s.arguments_json), review = c.duplicate_review;
           const source = c.outputs?.find(output => output.id === args.source_output_id);
-          if (c.workflow_required && (typeof args.answer_quote !== "string" || args.answer_quote !== c.turn_input?.message || !/(同一笔|同一条|同一项|不用再记|无需再记)/.test(args.answer_quote) || /(不是同一|并非同一|不算同一|另外|另一笔|不是重复)/.test(args.answer_quote))) throw new Error("请明确询问同一笔还是另发生的一笔；复用必须逐字引用用户明确回答，不能将好的、是的或含糊回答当成已解决。");
+          if (c.workflow_required && (args.decision !== "same_occurrence" || typeof args.answer_quote !== "string" || args.answer_quote !== c.turn_input?.message
+            || !c.clarification_answers?.some(answer => answer.operation_id === operation?.id && answer.text === args.answer_quote))) throw new Error("请明确询问同一笔还是另发生的一笔；复用必须逐字引用用户明确回答，不能将好的、是的或含糊回答当成已解决。");
           if (!operation || !review?.answered || !review.all_matched || review.operation_id !== operation.id || review.source_output_id !== args.source_output_id || source?.receipt?.status !== "succeeded" || source.plan.action !== "record") throw new Error("只有用户回答了本次重复核对问题且服务端已有成功凭据，才能复用；不能跳过未完成事项。");
           if (source.receipt.targets?.length && o.adapters.verifyTargets) {
             const verification = await o.adapters.verifyTargets(source.receipt.targets, signal, source.receipt.id);
@@ -479,7 +451,13 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           return finish(safePlan("已核对为同一笔，本次未重复入账。"), complete ? "completed" : "needs_input");
         }
         if (s.kind === "respond") {
-          plan = await o.adapters.validatePlan(json(s.plan_json!));
+          if (json(s.plan_json!).action === "record") c.record_step = s;
+          plan = await o.adapters.validatePlan(json(s.plan_json!), {
+            sources: [...new Set(covered.flatMap(item => item.sources || []))],
+            answers: c.clarification_answers?.filter(answer => covered.some(item => item.id === answer.operation_id)).map(answer => answer.text) || [],
+            checkpoint: c, save, signal,
+          });
+          delete c.record_step;
           o.execution?.finish(id, [], "done", assistantResponseExecutionLabel(plan, c.tool_results.some(r => ["query", "records", "draft_matches"].includes(r.name))));
         }
         else {
@@ -504,6 +482,9 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
             plan = await o.adapters.validatePlan({ action: "manage", reply: "正在核对", drafts: [], query: null, command });
           }
         }
+        if (s.replaces_output_id != null) {
+          plan.replaces_output_id = s.replaces_output_id;
+        }
         if (s.kind === "preview" && !resolved) o.execution?.finish(id, [], "done", assistantToolExecutionLabel(plan).replace(/^准备|^核对/, "整理"));
         if (!c.operations && plan.action === "record" && c.tool_results.some(r => r.name === "approval_result" && (r.result as AssistantActionResult)?.id === c.goal_id && (r.result as AssistantActionResult)?.status === "succeeded")) {
           const savedReceipt = c.tool_results.find(r => r.name === "approval_result" && (r.result as AssistantActionResult)?.id === c.goal_id)?.result as AssistantActionResult;
@@ -514,12 +495,6 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         // Persist identity before preparing a preview or returning browser work.
         if (c.operations && s.kind !== "read") { c.output_id = outputId(c.goal_id, c.steps); await save(); }
         if (operation && plan.action === "record") {
-          for (const matchedId of matchingRecordOperations(c.operations!, plan.drafts)) {
-            if (covered.some(item => item.id === matchedId)) continue;
-            const matched = c.operations!.find(item => item.id === matchedId)!;
-            if (matched.status !== "pending" || matched.depends_on.some(id => c.operations!.find(item => item.id === id)?.status !== "completed")) continue;
-            covered.push(matched);
-          }
           if (covered.length > plan.drafts.length) throw new Error("覆盖的每个普通收支事项至少需要一笔草稿，不能用不完整草稿完成其他事项。");
           const rowKey = (draft: AssistantPlan["drafts"][number]) => canonical({ type: draft.type, amount_cents: draft.amount_cents, transaction_date: draft.transaction_date, description: draft.description.trim().toLowerCase() });
           const key = fingerprint(plan.drafts.map(rowKey));
@@ -537,15 +512,25 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         const resolution = c.event_resolutions?.find(item => item.operation_id === operation?.id);
         if (operation && plan.action === "event" && plan.event?.operation === "create" && ["gift_given", "gift_received"].includes(plan.event.kind || "") && (plan.event.amount_cents || 0) > 0 && plan.event.cashflow === "none") {
           const scoped = [...(operation.sources || []), ...(c.clarification_answers ? c.clarification_answers.filter(answer => answer.operation_id === operation.id).map(answer => answer.text) : c.authorized_answers || [])];
-          const explicitLedgerOnly = scoped.some(text => /(?:仅|只)(?:登记|记录|补记|补登记).{0,12}(?:台账|礼簿|人情|事项)|不(?:计|记)(?:入)?(?:收支|收入|支出|现金流)|不需要(?:记录)?(?:收支|收入|支出)/.test(text));
-          if (!explicitLedgerOnly && !(resolution?.input.cashflow === "none" && sameEventOccurrence(resolution.input, plan.event))) throw new Error("已有物品只表示礼品估值，不取消原目标中的正数礼金流水。请保留礼金的现金流核对；只有当前事项明确仅补台账或不计收支，才可cashflow=none。");
+          const quote = plan.event.cashflow_basis;
+          if (!(typeof quote === "string" && quote.length > 0 && scoped.some(text => text.includes(quote)))
+            && !(resolution?.input.cashflow === "none" && sameEventOccurrence(resolution.input, plan.event)))
+            throw new Error("不计现金流必须提供cashflow_basis逐字引用当前事项的明确条件，或使用当前事项已选择的不计流水方案；不能自动取消礼金流水。");
         }
         if (resolution && plan.action === "event" && plan.event && sameEventOccurrence(resolution.input, plan.event) && resolution.input.allow_duplicate) plan.event = { ...plan.event, allow_duplicate: true };
-        if (resolution?.input.allow_duplicate && plan.action === "chat" && isDuplicateEventQuestion(plan.reply)) throw new Error("用户已明确确认该事项是新发生的一笔。不要再次询问同一重复问题，不可reuse旧记录；继续event核对，已确认条件见event_resolutions。");
         const usesTool = ["query", "manage", "event"].includes(plan.action);
         if (usesTool && o.adapters.domainInstructions) c.messages.push({ role: "system", content: o.adapters.domainInstructions(plan.command?.resource || (plan.action === "query" ? "query" : "event")) });
         if (usesTool) { activeToolId = toolId; o.execution?.start(toolId, assistantToolExecutionLabel(plan), "tool", o.adapters.toolDetails?.(plan) || []); }
         const result = await runPlan(plan);
+        if (result?.action === "chat" && !s.needs_input) {
+          const reply = observedReply(c);
+          if (reply) {
+            // Read analysis is commentary, kept separate from observed results.
+            if (c.tool_results.some(tool => ["query", "records", "draft_matches"].includes(tool.name))
+              && !c.tool_results.some(tool => ["approval_result", "delivery_result"].includes(tool.name))) result.analysis = result.reply;
+            result.reply = reply;
+          }
+        }
         if (resolution && plan.action === "event") resolution.pending = false;
         lastValidation = ""; repeatedValidation = 0;
         signal.throwIfAborted();
@@ -563,10 +548,10 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (result && (c.pending_approval || c.pending_batch)) c.pending_plan = structuredClone(result);
         if (result && c.operations) {
           c.awaiting_answer = false; c.awaiting_delivery = false;
-          if (result.action === "chat" && !unverifiedCompletion) summarizedReads.forEach(item => { item.status = "completed"; });
+          if (result.action === "chat") summarizedReads.forEach(item => { item.status = "completed"; });
           if (operation) {
             if (c.pending_approval || c.pending_batch) { c.pending_operation_ids = covered.map(item => item.id); covered.forEach(item => { item.status = "waiting_approval"; }); }
-            else if (s.needs_input || operation.effect === "write" && result.action === "chat" || result.event_choices?.length || result.action === "event" || result.action === "manage" && !["list", "duplicates", "export"].includes(result.command?.operation || "") || result.action === "update" && result.update?.member_id === null || unverifiedCompletion) { operation.status = "needs_input"; c.awaiting_answer = true; }
+            else if (s.needs_input || operation.effect === "write" && result.action === "chat" || result.event_choices?.length || result.action === "event" || result.action === "manage" && !["list", "duplicates", "export"].includes(result.command?.operation || "") || result.action === "update" && result.update?.member_id === null) { operation.status = "needs_input"; c.awaiting_answer = true; }
             else if (["edit", "update", "remove", "navigate", "undo"].includes(result.action)) { operation.status = "needs_input"; c.awaiting_delivery = true; c.pending_plan = structuredClone(result); }
             else if (operation.effect === "read") { operation.status = "completed"; }
             else { operation.status = "needs_input"; c.awaiting_answer = true; }
@@ -583,9 +568,11 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           }
           return finish(result, c.pending_approval || c.pending_batch ? "waiting_approval" : complete ? "completed" : "needs_input");
         }
-        if (result) return finish(result, c.pending_approval || c.pending_batch ? "waiting_approval" : result.action === "chat" && !s.needs_input && !unverifiedCompletion ? "completed" : "needs_input");
+        if (result) return finish(result, c.pending_approval || c.pending_batch ? "waiting_approval" : result.action === "chat" && !s.needs_input ? "completed" : "needs_input");
       } catch (error) {
         if (signal.aborted) throw error;
+        if (error instanceof AssistantBatchYield) return yieldWave();
+        delete c.record_step;
         if (activeToolId) o.execution?.finish(activeToolId, ["本步骤未完成，正在修正条件；未执行账本更改"], "failed");
         else o.execution?.finish(id, ["本步参数校验未通过，正在修正；未执行账本操作"], "failed", s.kind === "plan" ? "任务清单校验未通过" : "操作条件校验未通过");
         const message = error instanceof Error ? error.message.slice(0, 500) : "操作条件无效。";

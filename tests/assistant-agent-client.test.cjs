@@ -367,7 +367,7 @@ test('historical recovery restores erased event member questions without reactiv
   const question=uuid(71),answer=uuid(72),current=uuid(73);
   const eventContext={status:'pending',event_id:null,input:{kind:'gift_given',operation:'create',counterparty:'小美',member_id:null}};
   const resumed=task({attempt:3,user_message_id:answer,input:{message:'支出人是「本人」',display_text:'支出人是「本人」',display_images:[]},
-    agent:agent({output_id:current}),result:plan({action:'event',approval,event_context:{...eventContext,input:{...eventContext.input,member_id:uuid(13)}}}),
+    agent:agent({output_id:current}),result:plan({action:'event',approval,replaces_output_id:question,event_context:{...eventContext,input:{...eventContext.input,member_id:uuid(13)}}}),
     output_history:[{id:question,user_message_id:user.id,input:{message:user.text,display_text:user.text,display_images:[]},attempt:2,
       result:plan({action:'event',reply:'这笔资金流水归属哪个成员？',agent:undefined,event_context:eventContext,event_choices:[{label:'本人',input:{...eventContext.input,member_id:uuid(13)}}]})}]});
   const fresh=client.mergeAssistantTasks([], [resumed],uuid(4),[]);
@@ -443,4 +443,20 @@ test('the actual composer sends 已有物品 as an answer to the paused original
   stopTask(){throw new Error('An answer cannot stop its task');},submitTask:async request=>submitted.push(plain(request))
  });
  await exports.send();assert.equal(submitted.length,1);assert.equal(submitted[0].id,paused.id);assert.equal(submitted[0].message,'已有物品');assert.equal(submitted[0].continuation.kind,'answer');assert.equal(submitted[0].continuation.output_id,uuid(50));
+});
+
+test('page delivery records applied state and failure independently of model reply wording', () => {
+  const member = { id: uuid(90), name: '家人' };
+  const draft = { id: uuid(91), type: 'expense', amount_cents: 100, amount: '1.00', member_id: null, category_id: null,
+    transaction_date: '2026-10-12', description: '测试', payment_method: null, note: '' };
+  const batch = { id: uuid(92), role: 'assistant', text: '原草稿', status: 'pending', drafts: [draft] };
+  const pending = task({ result: plan({ action: 'update', reply: '本次未修改，失败', update: { batch_id: batch.id, draft_ids: [draft.id], member_id: member.id } }) });
+  const applied = client.mergeAssistantTasks([batch, user], [pending], uuid(4), [member]);
+  assert.equal(applied.find(message => message.id === batch.id).drafts[0].member_id, member.id);
+  assert.equal(applied.find(message => message.id === pending.id).delivery.status, 'succeeded');
+  const stale = { ...pending, result: { ...pending.result, reply: '已经成功了', update: { ...pending.result.update, batch_id: uuid(99) } } };
+  const failed = client.mergeAssistantTasks([batch, user], [stale], uuid(4), [member]);
+  assert.equal(failed.find(message => message.id === pending.id).delivery.status, 'failed');
+  assert.equal(failed.find(message => message.id === batch.id).drafts[0].member_id, null);
+  assert.equal(client.mergeAssistantTasks(plain(applied), [plain(pending)], uuid(4), [member]).find(message => message.id === pending.id).delivery.status, 'succeeded');
 });

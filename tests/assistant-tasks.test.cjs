@@ -65,20 +65,24 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {}, extraDepen
   class BailianError extends Error {
     constructor(status, code) { super('provider failure'); this.status = status; this.code = code; }
   }
-  const invoke = fn => async (...args) => { paidCalls.push(args); return fn(...args); };
+  const invoke = fn => async (...args) => { paidCalls.push(args); const output = await fn(...args); return args[0].schemaName === 'ledger_image_batch' && output && Array.isArray(output.drafts) ? { ...output, total_rows: output.total_rows ?? output.drafts.length } : output; };
   const pendingPlans = new Map();
+  let latestRecord = record;
   const load = loader({
     '@/lib/assistant-task-dispatch': { runAndContinueAssistantTask: async (...args) => { await load('lib/assistant-tasks.ts').runAssistantTask(...args); } },
     'next/server': { NextResponse, after: callback => background.push(callback) },
     ai: require('ai'), zod: require('zod'),
     'node:crypto': crypto, 'node:async_hooks': require('node:async_hooks'), '@/lib/db': { sql: database }, '@/lib/auth': { getSession: async () => session },
-    '@/lib/assistant-output': { ASSISTANT_OUTPUT_SCHEMA: {} },
     '@/lib/bailian': {
       BAILIAN_ASSISTANT_MODEL: 'fixture-object', BAILIAN_SUMMARY_MODEL: 'fixture-summary', BailianError,
       bailianConfig: () => ({}), bailianFailure: error => ({ status: error.status || 502, message: 'AI 服务暂时无法连接，请稍后重试。' }),
       bailianObject: async (settings, signal) => {
+        if (settings.schemaName === 'ledger_record_page') {
+          if (provider.bailianRecordPage) return provider.bailianRecordPage(settings, signal);
+          return { plan: latestRecord, segments: [{ text: JSON.parse(settings.messages.at(-1).content).remaining, draft_indexes: latestRecord.drafts.map((_, i) => i + 1) }] };
+        }
         const pending = pendingPlans.get(settings.telemetryId);
-        if (settings.schemaName === 'ledger_agent_step' && pending) { pendingPlans.delete(settings.telemetryId); return pending; }
+        if (settings.schemaName === 'ledger_agent_step' && pending) { pendingPlans.delete(settings.telemetryId); if (pending.plan_json) { const p = JSON.parse(pending.plan_json); if (p.action === 'record') latestRecord = p; } return pending; }
         return invoke(async (settings, signal) => {
         if (settings.schemaName !== 'ledger_agent_step') return provider.bailianObject ? provider.bailianObject(settings, signal)
           : settings.schemaName === 'ledger_image_batch' ? imageBatch(settings) : settings.schemaName === 'ledger_image_import' ? imageRecord : record;
@@ -93,7 +97,8 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {}, extraDepen
           output = { action: 'chat', reply, drafts: [], query: null };
         } else output = provider.bailianObject ? await provider.bailianObject(settings, signal)
           : provider.bailianObjectStream ? await provider.bailianObjectStream(settings, () => {}, signal) : record;
-        if (output.kind) return output;
+        if (output.action === 'record') latestRecord = output;
+        if (output.kind) { if (output.plan_json) { const p = JSON.parse(output.plan_json); if (p.action === 'record') latestRecord = p; } return output; }
         const chosen = output.action === 'query' ? { kind: 'read', tool: 'query', arguments_json: JSON.stringify(output.query), plan_json: null, needs_input: false }
           : { kind: 'respond', tool: null, arguments_json: '{}', plan_json: JSON.stringify(output), needs_input: false };
         chosen.operation_id = 'fixture';
@@ -683,7 +688,7 @@ if (PGlite) {
     current.results[0].output.drafts[0].category_id = id(999);
     await f.db.query('UPDATE assistant_tasks SET image_checkpoint=$1::jsonb', [JSON.stringify(current)]);
     await f.tasks.runAssistantTask('owner', taskId, next);
-    assert.equal(f.paidCalls.length, 6, 'corrupt first target and untouched third target run; the valid second remains cached');
+    assert.equal(f.paidCalls.length, 5, 'validated source pages rebuild the corrupt first target; only the untouched third needs a provider request');
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'succeeded');
   });
 
@@ -745,7 +750,7 @@ if (PGlite) {
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'succeeded');
   });
 
-  test('real PostgreSQL: over-cap merged drafts remain a clear retryable failure without truncation or partial cards', async t => {
+  test('real PostgreSQL: twenty-two merged drafts are complete and remain pending until user confirmation', async t => {
     const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
       const output = imageBatch(settings), first = output.drafts[0];
       output.drafts = Array.from({ length: 11 }, (_, index) => ({ ...first,
@@ -756,12 +761,10 @@ if (PGlite) {
     await f.tasks.createAssistantTask('owner', body({ images: Array(2).fill('data:image/png;base64,YWJj') }));
     await f.tasks.runAssistantTask('owner', taskId);
     const failed = await f.tasks.getAssistantTask('owner', taskId);
-    assert.equal(failed.status, 'failed');
-    assert.equal(failed.result, null);
-    assert.match(failed.error, /20/);
+    assert.equal(failed.status, 'succeeded');
+    assert.equal(failed.result.drafts.length, 22);
     assert.equal(failed.image_progress.completed, 2);
-    const checkpoint = (await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint;
-    assert.equal(checkpoint.results.reduce((count, result) => count + result.output.drafts.length, 0), 22);
+    assert.equal((await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint, null);
     assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
   });
 
@@ -1004,7 +1007,10 @@ if (PGlite) {
     await f.tasks.runAssistantTask('owner', taskId, continuation);
     const failed = await f.tasks.getAssistantTask('owner', taskId);
     assert.equal(failed.execution_steps.find(step => step.id === 'image-1').state, 'done');
+    assert.equal(failed.execution_steps.find(step => step.id === 'image-1').kind, 'model');
+    assert.equal(failed.execution_steps.find(step => step.id === 'image-1').model, 'fixture-object');
     assert.equal(failed.execution_steps.find(step => step.id === 'image-2').state, 'failed');
+    assert.equal(failed.execution_steps.find(step => step.id === 'image-2').model, 'fixture-object');
     assert.equal(failed.execution_steps.find(step => step.id === 'merge'), undefined);
     assert.equal(JSON.stringify(failed.execution_steps).includes('private provider diagnostic'), false);
     fail = false;
@@ -1015,6 +1021,10 @@ if (PGlite) {
     const saved = await f.tasks.getAssistantTask('owner', taskId);
     assert.equal(saved.status, 'succeeded');
     assert.match(saved.execution_steps.find(step => step.id === 'image-1').details.join(' '), /复用/);
+    assert.equal(saved.execution_steps.find(step => step.id === 'image-1').kind, 'check');
+    assert.equal(saved.execution_steps.find(step => step.id === 'image-1').model, undefined);
+    assert.equal(saved.execution_steps.find(step => step.id === 'image-2').kind, 'model');
+    assert.equal(saved.execution_steps.find(step => step.id === 'image-2').model, 'fixture-object');
     assert.match(saved.execution_steps.find(step => step.id === 'merge').details.join(' '), /保留 3 笔/);
     assert.ok(saved.execution_steps.every(step => step.state === 'done'));
     await f.tasks.cancelConversationTasks('owner', conversationId);
@@ -1177,4 +1187,40 @@ if(PGlite) {
   const answer=await f.tasks.createAssistantTask('owner',body({id:id(90),user_message_id:id(91),message:'王城丽',display_text:'王城丽'}));assert.equal(answer.id,taskId);assert.equal(answer.attempt,3);
   assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
  });
+}
+
+if (PGlite) {
+  test('real PostgreSQL: 53 text rows continue automatically across worker waves as one pending group', async t => {
+    const source=Array.from({length:53},(_,i)=>`早餐${i+1}花了${i+1}.01元\n`).join(''), starts=[];
+    const f=await databaseFixture(t,{provider:{bailianRecordPage:async settings=>{
+      const remaining=JSON.parse(settings.messages.at(-1).content).remaining,lines=remaining.match(/[^\n]+\n/g).slice(0,20);starts.push(Number(lines[0].match(/早餐(\d+)/)[1]));
+      return {plan:{action:'record',reply:'请核对',query:null,drafts:lines.map(text=>{const n=Number(text.match(/早餐(\d+)/)[1]);return {...draft,amount_cents:n*100+1,description:`早餐${n}`};})},segments:lines.map((text,i)=>({text,draft_indexes:[i+1]}))};
+    }}});
+    await f.tasks.createAssistantTask('owner',body({message:source,display_text:source}));
+    const continuation=await f.tasks.runAssistantTask('owner',taskId);assert.ok(continuation);
+    const queued=await f.tasks.getAssistantTask('owner',taskId);assert.equal(queued.status,'queued');assert.equal(queued.result,null);
+    const privateCheckpoint=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0].agent_checkpoint;
+    assert.equal(privateCheckpoint.record_checkpoint.pages.length,2);assert.ok(privateCheckpoint.record_step);
+    assert.equal(await f.tasks.runAssistantTask('owner',taskId,continuation),null);
+    const finished=await f.tasks.getAssistantTask('owner',taskId);assert.equal(finished.status,'succeeded');assert.equal(finished.agent.status,'waiting_approval');assert.equal(finished.result.drafts.length,53);
+    assert.deepEqual(starts,[1,21,41]);assert.equal(f.paidCalls.length,1,'the saved record decision resumes without another planning request');
+    const restored=(await f.db.query('SELECT agent_checkpoint FROM assistant_tasks')).rows[0].agent_checkpoint;
+    assert.equal(f.load('lib/assistant-agent-state.ts').restoreAssistantAgentCheckpoint(restored).pending_batch.draft_ids.length,53);
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows,[]);
+  });
+
+  test('real PostgreSQL: a 47-row screenshot persists pages and queues its tail before publishing review', async t=>{
+    const starts=[];
+    const f=await databaseFixture(t,{provider:{bailianObjectStream:async settings=>{
+      const start=Number(settings.messages[0].content.match(/本页仅输出图内第(\d+)至/)[1]);starts.push(start);const output=imageBatch(settings),first=output.drafts[0];
+      return {...output,total_rows:47,drafts:Array.from({length:Math.min(20,48-start)},(_,i)=>({...first,amount_cents:start+i,description:`交易${start+i}`,source:{...first.source,row_index:start+i}}))};
+    }}});
+    await f.tasks.createAssistantTask('owner',body({images:['data:image/png;base64,YWJj']}));
+    const continuation=await f.tasks.runAssistantTask('owner',taskId);assert.ok(continuation);
+    const queued=await f.tasks.getAssistantTask('owner',taskId);assert.equal(queued.status,'queued');assert.equal(queued.result,null);assert.equal(queued.image_progress.completed,0);
+    const c=(await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint;assert.equal(c.pages[1].length,2);assert.equal(c.results[0],null);
+    assert.equal(await f.tasks.runAssistantTask('owner',taskId,continuation),null);
+    const result=await f.tasks.getAssistantTask('owner',taskId);assert.equal(result.status,'succeeded');assert.equal(result.result.drafts.length,47);assert.equal(result.image_progress.completed,1);assert.deepEqual(starts,[1,21,41]);
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows,[]);
+  });
 }

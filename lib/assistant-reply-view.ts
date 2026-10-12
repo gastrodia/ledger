@@ -23,22 +23,22 @@ export function draftMatchesReplyView(matches: Pick<AssistantDraftMatches, "rows
       const draft = batch.drafts.find(d => d.id === row.draft_id)!;
       return { draft_id: row.draft_id, snapshot: { description: draft.description, type: row.type, amount_cents: row.amount_cents, transaction_date: row.transaction_date, member_id: draft.member_id ?? null, category_id: draft.category_id ?? null },
         candidates: row.candidates.map(c => ({ id: c.id, description: c.description || "未填写用途", date: c.transaction_date, amount: money(c.amount_cents / 100), member: members.find(m => m.id === c.member_id)?.name || "未选成员", category: categories.find(category => category.id === c.category_id)?.name || "未选分类", reason: draftMatchReasonLabel[c.match_reason] || "匹配依据不足，请重新核对", dateDifference: c.date_difference_days })) };
-    }) } : undefined, title: "重复入账核对", subtitle: `共核对 ${matches.rows.length} 笔草稿 · 同商户检查前后 ${matches.date_window_days} 天`,
+    }) } : undefined, title: "重复入账核对", subtitle: `共核对 ${matches.rows.length} 笔草稿 · 描述一致检查前后 ${matches.date_window_days} 天`,
     metrics: [{ label: "疑似重复", value: `${suspected} 笔`, primary: true }, { label: "需人工核对", value: `${review} 笔` }], sections: [],
     recordsTitle: "草稿与已入账记录对照", records: matches.rows.map(row => ({
       title: row.description || "未填写用途", amount: row.amount_cents === null ? "金额缺失" : money(row.amount_cents / 100),
       subtitle: `${row.transaction_date ?? "日期缺失"} · ${display(row.type)} · 待确认草稿`,
       badge: { label: row.status === "incomplete" ? "信息不足" : row.status === "no_match" ? "未找到候选"
-        : row.candidates.some(candidate => candidate.same_description) ? "疑似重复" : row.candidates.some(candidate => candidate.match_reason === "purpose") ? "用途相关，待核对" : "缺少用途，待核对", tone: row.status === "possible_match" || row.status === "incomplete" ? "warning" : "neutral" },
+        : row.candidates.some(candidate => candidate.same_description) ? "疑似重复" : "缺少用途，待核对", tone: row.status === "possible_match" || row.status === "incomplete" ? "warning" : "neutral" },
       rows: row.status === "incomplete" ? [{ label: "核对结果", value: "缺少金额或日期，尚未完成核对。" }]
-        : row.status === "no_match" ? [{ label: "核对结果", value: `前后 ${matches.date_window_days} 天未找到有商户或用途关联的记录；仅同金额的流水已排除。` }]
+        : row.status === "no_match" ? [{ label: "核对结果", value: `前后 ${matches.date_window_days} 天未找到描述一致的记录；仅同金额的流水已排除。` }]
         : [ ...row.candidates.map((candidate, i) => ({ label: row.candidates.length === 1 ? "账本记录" : `候选 ${i + 1}`, value: [
           candidate.description || "未填写用途",
           [candidate.transaction_date, money(candidate.amount_cents / 100), members.find(member => member.id === candidate.member_id)?.name, categories.find(category => category.id === candidate.category_id)?.name].filter(Boolean).join(" · "),
-          `${draftMatchReasonLabel[candidate.match_reason] || "商户名称一致 · 金额相同"}；${candidate.date_difference_days === 0 ? "日期相同" : `账本日期比草稿${candidate.date_difference_days < 0 ? "早" : "晚"} ${Math.abs(candidate.date_difference_days)} 天`}`,
+          `${draftMatchReasonLabel[candidate.match_reason] || "匹配依据不足，请重新核对"}；${candidate.date_difference_days === 0 ? "日期相同" : `账本日期比草稿${candidate.date_difference_days < 0 ? "早" : "晚"} ${Math.abs(candidate.date_difference_days)} 天`}`,
         ].join("\n") })), ...(row.candidates_limited ? [{ label: "更多候选", value: `共 ${row.candidate_count} 笔，当前列出前三笔。` }] : []) ],
-    })), notices: [{ text: "商户一致才提示疑似重复；用途相关或原账缺少用途仅提示核对。同商户可能多次消费，请核对日期后再移除草稿。", tone: "attention" },
-      { text: `同商户检查前后 ${matches.date_window_days} 天；用途相关或缺少用途仅检查前后 1 天。仅金额相同的记录已排除。`, tone: "info" }] };
+    })), notices: [{ text: "描述一致仅提示疑似重复；原账缺少用途仅提示资料不足。相同描述可能对应多次消费，请核对日期后再移除草稿。", tone: "attention" },
+      { text: `描述一致检查前后 ${matches.date_window_days} 天；原账缺少用途仅检查前后 1 天。仅金额相同的记录已排除。`, tone: "info" }] };
 }
 
 /** Display only user-facing fields. IDs and internal metadata remain in record_context. */

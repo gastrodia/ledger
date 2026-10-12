@@ -45,6 +45,7 @@ export type AssistantTaskRequest = {
   event_context?: import("@/lib/ledger-event").LedgerEventContext;
   event_selection?: import("@/lib/ledger-event").LedgerEventInput;
   record_contexts?: NonNullable<AssistantPlan["record_context"]>[];
+  card_contexts?: Array<{ id: string; summary: string }>;
   continuation?: { attempt: number; output_id: string; kind: "answer" | "delivery"; ok?: boolean; selected_member_id?: string };
 };
 

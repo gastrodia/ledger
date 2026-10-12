@@ -39,7 +39,7 @@ test('a statement containing a zero refunded row preserves five paid transaction
   assert.match(accepted.drafts[1].note, /等待确认收货/);
   assert.equal(accepted.drafts.map(draft => draft.description).join(), descriptions.filter((_, index) => index !== 2).join());
   assert.match(accepted.reply, /5 笔待确认草稿/);
-  assert.match(accepted.reply, /忽略 1 条 0\.00 元/);
+  assert.match(imports.assistantImageImportReply(result.summary), /忽略 1 条零金额/);
   assert.doesNotMatch(accepted.reply, /6 笔/);
   assert.equal(result.summary.extracted_count, 6);
   assert.equal(result.summary.skipped_zero_amounts, 1);
@@ -82,10 +82,10 @@ test('zero omission never repairs invalid financial rows, replies or competing c
   assert.equal(imports.mergeAssistantImageImport(text, 0).output, text);
   assert.throws(() => assistant.validatePlan(text, [], [], crypto.randomUUID));
   assert.throws(() => assistant.confirmationRows([zero]));
-  assert.throws(() => imports.mergeAssistantImageImport(plan(Array(21).fill(zero)), 1), /账目过多/);
+  assert.equal(imports.mergeAssistantImageImport(plan(Array(21).fill(zero)), 1).summary.skipped_zero_amounts, 21);
   const oversized = plan(Array(21).fill(row));
   assert.equal(imports.mergeAssistantImageImport(oversized, 1).output, oversized);
-  assert.throws(() => assistant.validatePlan(oversized, [], [], crypto.randomUUID), /一次最多识别20笔/);
+  assert.equal(assistant.validatePlan(oversized, [], [], crypto.randomUUID).drafts.length, 21);
 });
 
 test('zero boundary rows do not break valid adjacent overlap matching or provenance accounting', () => {
@@ -310,7 +310,7 @@ test('different financial identities never merge even with matching printed time
   }
 });
 
-test('20 unique drafts are permitted after boundary join but 21 unique drafts fail instead of being truncated', () => {
+test('all unique drafts are retained after boundary join without truncation', () => {
   const first = Array.from({ length: 20 }, (_, index) => ({ ...row, description: `交易 ${index}`, source: source(1, index + 1) }));
   const joined = merge([...first, { ...first.at(-1), source: source(2, 1) }]);
   assert.equal(joined.summary.removed_duplicates, 1);
@@ -319,11 +319,11 @@ test('20 unique drafts are permitted after boundary join but 21 unique drafts fa
   assert.equal('source' in accepted.drafts[0], false, 'recognition evidence is not stored as financial data');
   const overLimit = merge([...first, { ...row, description: '新交易', source: source(2, 1) }]);
   assert.equal(overLimit.output.drafts.length, 21);
-  assert.throws(() => assistant.validatePlan(overLimit.output, [], [], crypto.randomUUID), /最多识别20笔/);
-  assert.throws(() => merge(Array(41).fill(row)), /账目过多/);
+  assert.equal(assistant.validatePlan(overLimit.output, [], [], crypto.randomUUID).drafts.length, 21);
+  assert.equal(merge(Array(41).fill(row)).output.drafts.length, 41);
 });
 
-test('all 100 visible rows from five repeated screenshots are read before enforcing the 20 unique draft limit', () => {
+test('all 100 visible rows from five repeated screenshots are read before merging independent review drafts', () => {
   const drafts = Array.from({ length: 5 }, (_, imageIndex) => Array.from({ length: 20 }, (_, index) => ({
     ...row, description: `交易 ${index}`, source: source(imageIndex + 1, index + 1),
   }))).flat();

@@ -146,6 +146,8 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
       AND input->>'counterparty'=$3 AND (input->>'amount_cents')::bigint=$4 AND input->>'date'=$5 LIMIT 1`, [userId, kind, input.counterparty, input.amount_cents, input.date]);
     if (existing.length) return clarify("发现同一天、同对方、同金额的已登记事项。请核对是不是已经记过；确实又发生一笔才继续。", [choose("这是另外新发生的一笔，继续核对", { allow_duplicate: true })]);
   }
+  if (input.operation === "create" && input.cashflow === "none" && !input.cashflow_basis)
+    return clarify("请明确是否仅登记台账，不计资金流水。", [choose("只登记台账，不计资金流水", { cashflow: "none", cashflow_basis: "只登记台账，不计资金流水" })]);
   let transactionId: string | null = eventBefore?.transaction_id as string || null;
   if (input.operation === "create" && input.cashflow !== "none") {
     if (input.cashflow === "auto" || (input.cashflow === "existing" && !input.transaction_id)) {
@@ -154,7 +156,7 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
         ORDER BY CASE WHEN STRPOS(COALESCE(description,''),$5)>0 THEN 0 ELSE 1 END,created_at DESC,id LIMIT 6`, [userId, type, eventCashflowCents(input)! / 100, input.date, input.counterparty]);
       if (candidates.length) return clarify(`找到${candidates.length > 5 ? "多笔" : candidates.length + " 笔"}同日同额的已有流水。请核对是否为这件事；关联原流水不会重复入账。`, [
         ...candidates.slice(0, 5).map(row => choose(`关联：${row.description || "未填写用途"} · ${calendar(row.transaction_date)} · ${money(cents(row.amount))}`, { cashflow: "existing", transaction_id: String(row.id) })),
-        ...(input.cashflow === "auto" ? [choose("都不是，新建一笔流水", { cashflow: "new" }), choose("只登记台账，不计资金流水", { cashflow: "none" })] : []),
+        ...(input.cashflow === "auto" ? [choose("都不是，新建一笔流水", { cashflow: "new" }), choose("只登记台账，不计资金流水", { cashflow: "none", cashflow_basis: "只登记台账，不计资金流水" })] : []),
       ]);
     }
     if (input.cashflow === "existing" && !input.transaction_id) return clarify("没有找到同日、同实际付款金额的未关联支出。请核对原支出的金额、日期或关联状态；本次不会新建支出。");
@@ -167,10 +169,8 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
       input.category_id = transactionBefore.category_id as string | null; input.member_id = transactionBefore.member_id as string | null;
     } else { transactionId = randomUUID(); }
   }
-  let categoryCreate: PreparedLedgerEvent["categoryCreate"];
   if (transactionId && ownsTransaction && input.operation !== "undo") {
     const members = await sql.query("SELECT r.*,md5(to_jsonb(r)::text) AS _revision FROM members r WHERE user_id=$1 ORDER BY created_at,id", [userId]) as Row[];
-    if (!input.member_id && members.length === 1) input.member_id = members[0].id;
     const member = members.find(row => row.id === input.member_id);
     if (!member) return clarify(members.length ? "这笔资金流水归属哪个成员？" : "还没有家庭成员，请先添加一个成员后继续。", members.slice(0, 20).map(row => choose(String(row.name), { member_id: row.id })));
     remember("members", member);
@@ -179,11 +179,9 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
       if (!category || category.type !== type) throw new Error("所选分类不存在或收支方向不匹配。");
       remember("categories", category);
     } else {
-      const name = eventIsLoan(kind) ? "借还往来" : kind === "gift_given" ? "送礼" : "礼金收入";
-      const categories = await sql.query("SELECT r.*,md5(to_jsonb(r)::text) AS _revision FROM categories r WHERE user_id=$1 AND type=$2 AND name=$3 ORDER BY id", [userId, type, name]) as Row[];
-      if (categories.length > 1) return clarify(`有多个“${name}”分类，请指定一个分类后继续。`);
-      if (categories[0]) { input.category_id = categories[0].id; remember("categories", categories[0]); }
-      else { categoryCreate = { id: randomUUID(), name, type }; input.category_id = categoryCreate.id; }
+      const categories = await sql.query("SELECT r.*,md5(to_jsonb(r)::text) AS _revision FROM categories r WHERE user_id=$1 AND type=$2 ORDER BY sort_order,created_at,id", [userId, type]) as Row[];
+      return clarify(categories.length ? "这笔资金流水使用哪个分类？" : "还没有适用分类，请先添加分类后继续。",
+        categories.slice(0, 20).map(row => choose(String(row.name), { category_id: row.id })));
     }
   }
   const original = eventBefore ? validateLedgerEvent(eventBefore.input) : null;
@@ -198,13 +196,21 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
     `- 资金流水：${!transactionId ? "仅登记台账，不产生资金收支" : input.operation === "undo" ? ownsTransaction ? "撤销本次一起新建的流水" : "解除关联，保留原有流水" : ownsTransaction ? `${input.operation === "update" ? "同步修改" : "新建"}${type === "income" ? "流入" : "流出"} ${money(eventCashflowCents(input)!)}并关联` : `关联已有${type === "income" ? "收入" : "支出"} ${money(eventCashflowCents(input)!)}（${transactionBefore?.description || "未填写用途"}），不重复入账、不改原金额`}\n` +
     (transactionId && input.operation !== "undo" ? `- 统计：${eventIsLoan(kind) ? "标记借还往来，仅计资金流入流出，不计日常收入与消费" : "计入日常收支"}\n` : "") +
     (input.member_id ? `- 成员：${snapshots.find(s => s.table === "members" && s.row.id === input.member_id)?.row.name || "沿用原流水成员"}\n` : "") +
-    (categoryCreate ? `- 新增分类：“${categoryCreate.name}”\n` : "") +
     (input.note ? `- 备注：${input.note}\n` : "") +
     "\n尚未执行。回复“确认执行”一次完成全部操作，或回复“取消”。也可以直接说明要修改的内容。";
   const payload: PreparedLedgerEvent = { event: true, input, eventId, sourceId, transactionId, ownsTransaction, snapshots, sourceBefore, eventBefore, transactionBefore,
-    categoryCreate, bookCreate, loanState: state, remaining, summary, previousFlowKind: eventBefore ? eventBefore.original_flow_kind as string | null : transactionBefore ? String(transactionBefore.flow_kind || "daily") : null };
-  const plan = await saveAssistantApproval(userId, conversationId, payload, summary, 1, eventActionPreview(input, summary));
-  return { ...plan, event_context: { ...context(), input: { ...context().input, ...(categoryCreate ? { category_id: null } : {}) } }, event_choices: [] };
+    bookCreate, loanState: state, remaining, summary, previousFlowKind: eventBefore ? eventBefore.original_flow_kind as string | null : transactionBefore ? String(transactionBefore.flow_kind || "daily") : null };
+  const plan = await saveAssistantApproval(userId, conversationId, payload, summary, 1, eventActionPreview(input, summary, { rows: [
+    { label: "台账", value: input.operation === "undo" ? "撤销原事项" : input.operation === "update" ? "同步修改原记录" : "新增一条记录" },
+    { label: "资金流水", value: !transactionId ? "仅登记台账，不产生收支" : input.operation === "undo" ? ownsTransaction ? "撤销本次新建流水" : "解除关联，保留原流水" : ownsTransaction ? `${input.operation === "update" ? "同步修改" : "新建"}${type === "income" ? "收入" : "支出"} ${money(eventCashflowCents(input)!)}并关联` : "关联已有流水，不重复入账" },
+    ...(parentBook ? [{ label: "礼簿", value: String(parentBook.name) }] : []),
+    ...(bookCreate ? [{ label: "新建礼簿", value: bookCreate.name }] : []),
+    ...(remaining !== undefined ? [{ label: "剩余未还", value: `${money(beforeRemaining!)} → ${money(remaining)}` }] : []),
+    ...(input.member_id ? [{ label: "成员", value: String(snapshots.find(s => s.table === "members" && s.row.id === input.member_id)?.row.name || "沿用原流水成员") }] : []),
+    ...(input.category_id ? [{ label: "分类", value: String(snapshots.find(s => s.table === "categories" && s.row.id === input.category_id)?.row.name || "沿用原流水分类") }] : []),
+    ...(input.note ? [{ label: "备注", value: input.note }] : []),
+  ] }));
+  return { ...plan, event_context: { ...context(), input: context().input }, event_choices: [] };
 }
 
 /** The approval receipt and every financial write commit in one serializable transaction. */

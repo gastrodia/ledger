@@ -5,12 +5,16 @@ const { randomUUID } = require('node:crypto');
 const createFixture = require('./helpers/ledger-sql-fixture.cjs');
 const modulePath = process.env.LEDGER_TASKS_PGLITE_MODULE;
 const member = '10000000-0000-4000-8000-000000000001';
+const expenseCategory = '10000000-0000-4000-8000-000000000002', incomeCategory = '10000000-0000-4000-8000-000000000003';
 const base = { operation: 'create', counterparty: '小王', amount_cents: 50000, date: '2026-10-09', cashflow: 'new' };
 async function setup(t) {
   const f = await createFixture(modulePath); t.after(() => f.close());
   await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','本人')", [member]);
+  await f.db.query("INSERT INTO categories(id,user_id,name,type) VALUES($1,'owner','明确支出','expense'),($2,'owner','明确收入','income')", [expenseCategory, incomeCategory]);
   const api = f.load('lib/ledger-event-server.ts'), actions = f.load('lib/assistant-command-server.ts');
-  return { ...f, ...api, ...actions, async prepare(input) { return api.prepareLedgerEvent('owner', randomUUID(), { ...base, ...input }); },
+  return { ...f, ...api, ...actions, async prepare(input) { return api.prepareLedgerEvent('owner', randomUUID(), { ...base,
+      ...(input.operation && input.operation !== 'create' ? {} : { member_id: member, category_id: ['gift_received','loan_borrowed','repayment_received'].includes(input.kind) ? incomeCategory : expenseCategory }),
+      ...(input.cashflow === 'none' ? { cashflow_basis: '只登记台账，不计资金流水' } : {}), ...input }); },
     async approve(plan) { assert.ok(plan.approval, plan.reply); const r = await actions.decideAssistantAction('owner', plan.approval.id, 'approve'); assert.equal(r.status, 'succeeded', r.text); return r; } };
 }
 test('six cash scenarios commit ledger, cashflow and association once; loans stay out of daily statistics', { skip: !modulePath }, async t => {
@@ -65,7 +69,7 @@ test('stale dependencies roll back all writes; cancelled and cross-owner confirm
   await f.db.query("UPDATE members SET name='成员变动' WHERE id=$1", [member]);
   const result = await f.decideAssistantAction('owner', plan.approval.id, 'approve');
   assert.equal(result.status, 'failed'); assert.equal(result.completed, 0);
-  for (const table of ['giftbooks', 'gift_records', 'transactions', 'ledger_events', 'categories']) assert.equal(Number((await f.db.query(`SELECT count(*) FROM ${table}`)).rows[0].count), 0, table);
+  for (const table of ['giftbooks', 'gift_records', 'transactions', 'ledger_events']) assert.equal(Number((await f.db.query(`SELECT count(*) FROM ${table}`)).rows[0].count), 0, table);
   const other = await f.prepare({ kind: 'gift_given' });
   await assert.rejects(() => f.decideAssistantAction('foreign', other.approval.id, 'approve'), /不存在/);
   assert.equal((await f.decideAssistantAction('owner', other.approval.id, 'cancel')).status, 'cancelled');
@@ -91,7 +95,7 @@ test('failure after source and cashflow inserts rolls back everything, including
   const plan = await f.prepare({ kind: 'gift_received', book_name: '回滚验证', create_book: true });
   await f.db.query("ALTER TABLE transaction_links ADD CONSTRAINT fixture_failure CHECK(source_type!='gift_group')");
   assert.equal((await f.decideAssistantAction('owner', plan.approval.id, 'approve')).status, 'failed');
-  for (const table of ['giftbooks','gift_records','transactions','transaction_links','ledger_events','categories']) assert.equal(Number((await f.db.query(`SELECT COUNT(*) FROM ${table}`)).rows[0].count), 0, table);
+  for (const table of ['giftbooks','gift_records','transactions','transaction_links','ledger_events']) assert.equal(Number((await f.db.query(`SELECT COUNT(*) FROM ${table}`)).rows[0].count), 0, table);
 });
 test('parallel approvals and a lost commit response recover the same event without duplicate financial writes', { skip: !modulePath }, async t => {
   const f = await setup(t);
@@ -109,11 +113,11 @@ test('parallel approvals and a lost commit response recover the same event witho
 test('new book selection survives member clarification, and correction context never contains provisional category IDs', { skip: !modulePath }, async t => {
   const f = await setup(t);
   await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','家人')", [randomUUID()]);
-  const pick = await f.prepare({ kind: 'gift_received', book_name: '婚礼', create_book: true });
+  const pick = await f.prepare({ kind: 'gift_received', book_name: '婚礼', create_book: true, member_id: null });
   assert.equal(pick.event_choices.length, 2);
   assert.equal(pick.event_context.input.book_id, null);
   const preview = await f.prepare(pick.event_choices[0].input);
-  assert.equal(preview.event_context.input.category_id, null);
+  assert.equal(preview.event_context.input.category_id, incomeCategory);
   const corrected = await f.prepare({ ...preview.event_context.input, amount_cents: 60000 });
   await f.approve(corrected);
   assert.equal(Number((await f.db.query('SELECT amount FROM transactions')).rows[0].amount), 600);
@@ -249,4 +253,37 @@ test('already-recorded payment without an ID finds candidates or asks for detail
   assert.equal(pick.event_choices[0].input.transaction_id,id);
   await f.approve(await f.prepare(pick.event_choices[0].input));
   assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count),1);
+});
+
+test('missing event member and category remain explicit choices even when each has a single option', { skip: !modulePath }, async t => {
+  const f = await setup(t);
+  const memberQuestion = await f.prepare({ kind: 'gift_given', member_id: null, category_id: null });
+  assert.equal(memberQuestion.approval, undefined);
+  assert.equal(memberQuestion.event_context.input.member_id, null);
+  assert.equal(memberQuestion.event_choices.length, 1);
+  const categoryQuestion = await f.prepare(memberQuestion.event_choices[0].input);
+  assert.equal(categoryQuestion.approval, undefined);
+  assert.equal(categoryQuestion.event_context.input.category_id, null);
+  assert.equal(categoryQuestion.event_choices.length, 1);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM categories')).rows[0].count), 2);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 0);
+  const reviewed = await f.prepare(categoryQuestion.event_choices[0].input);
+  assert.ok(reviewed.approval);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 0);
+  await f.approve(reviewed);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 1);
+});
+
+test('missing event categories are not silently created and ledger-only requires a stated condition', { skip: !modulePath }, async t => {
+  const f = await setup(t);
+  await f.db.query('DELETE FROM categories');
+  const noCategory = await f.prepare({ kind: 'gift_given', category_id: null });
+  assert.equal(noCategory.approval, undefined);
+  assert.equal(noCategory.event_choices.length, 0);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM categories')).rows[0].count), 0);
+  const ledgerOnly = await f.prepare({ kind: 'gift_given', cashflow: 'none', cashflow_basis: null });
+  assert.equal(ledgerOnly.approval, undefined);
+  assert.equal(ledgerOnly.event_choices.length, 1);
+  assert.equal(ledgerOnly.event_choices[0].input.cashflow_basis, ledgerOnly.event_choices[0].label);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM given_gifts')).rows[0].count), 0);
 });

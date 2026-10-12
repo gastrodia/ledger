@@ -133,7 +133,7 @@ test('explicit IDs require actual current-account read results and successful pr
   const first = fixture([choose('preview', 'command', command('create', { resource: 'notes', values_json: '{"title":"A","content":"B"}' }))]); await first.run();
   const again = fixture([choose('read', 'records', command('list', { resource: 'notes' })), choose('preview', 'command', command('create', { resource: 'notes', values_json: '{"content":"B","title":"A"}' }))]);
   const plan = await again.run({ checkpoint: first.checkpoints.at(-1), approvalOutcome: { id: ACTION, status: 'succeeded', text: '创建成功。' } });
-  assert.match(plan.reply, /不会重复/); assert.equal(again.calls.filter(c => c[0] === 'command').length, 1);
+  assert.match(plan.reply, /创建成功/); assert.equal(again.calls.filter(c => c[0] === 'command').length, 1);
 });
 
 test('read tool cannot invoke a write and aborted model cannot reach tool execution', async () => {
@@ -149,7 +149,7 @@ test('bounded steps stop repeated reads without fabricating completion or writin
 
 test('model success claims without an execution receipt are replaced and tool output stays bounded', async () => {
   const f = fixture([choose('read', 'records', command()), respond('已删除全部记录。'), respond('已删除全部记录。')], { adapters: { command: async () => ({ reply: 'X'.repeat(30000), record_context: { resource: 'notes', rows: [{ content: 'x'.repeat(30000) }] } }) } });
-  const result = await f.run(); assert.match(result.reply, /尚未执行/);
+  const result = await f.run(); assert.match(result.reply, /查询结果不完整/);
   assert.equal(f.checkpoints.at(-1).tool_results[0].result.limited, true); assert.ok(JSON.stringify(f.checkpoints.at(-1)).length < 160000);
 });
 
@@ -247,13 +247,12 @@ vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/assistant.ts', 'utf8'
   { exports: core, Error, Date, JSON, require: require('./helpers/assistant-contracts.cjs') });
 const strictPlan = raw => core.validatePlan(raw, [], [], () => ACTION);
 
-test('query loop fills only omitted nullable filters and keeps supplied dates, types and references strict', async () => {
-  const minimal = { scope: 'daily', type: 'expense', start_date: '2026-09-01', end_date: '2026-09-30' };
-  const f = fixture([choose('read', 'query', minimal), respond('汇总完成。')], { adapters: { validatePlan: strictPlan } });
-  await f.run(); const actual = f.calls.find(c => c[0] === 'query')[1];
-  assert.equal(actual.category_id, null); assert.equal(actual.member_id, null); assert.equal(actual.keyword, null);
-  for (const extra of [{ start_date: '2026-02-30' }, { type: 'transfer' }, { type: undefined }, { category_id: ID }, { member_id: 1 }, { keyword: {} }, { scope: 'admin' }, { sql: 'SELECT * FROM users' }]) {
-    const rejected = fixture([choose('read', 'query', { ...minimal, ...extra }), respond('请重新指定条件。')], { adapters: { validatePlan: strictPlan } });
+test('query loop requires explicit nullable filters rather than filling omitted model fields', async () => {
+  const full = query({ scope: 'daily', type: 'expense' });
+  const f = fixture([choose('read', 'query', full), respond('汇总完成。')], { adapters: { validatePlan: strictPlan } });
+  await f.run(); assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(c => c[0] === 'query')[1])), full);
+  for (const extra of [{ keyword: undefined }, { category_id: undefined }, { member_id: undefined }, { start_date: '2026-02-30' }, { type: 'transfer' }, { category_id: ID }, { keyword: {} }, { sql: 'SELECT * FROM users' }]) {
+    const rejected = fixture([choose('read', 'query', { ...full, ...extra }), respond('请重新指定条件。')], { adapters: { validatePlan: strictPlan } });
     await rejected.run(); assert.equal(rejected.calls.filter(c => c[0] === 'query').length, 0);
   }
 });
@@ -300,38 +299,15 @@ test('capabilities, saved-record scope and conditional instructions are preserve
   }
 });
 
-test('capability words elsewhere never exempt concrete unsupported completion claims', async () => {
-  const replies = [
-    '已删除全部账目。',
-    '修改已完成。',
-    '我已经帮你保存了三笔。',
-    '可以帮你查询，但已删除全部账目。',
-    '可以查询账目。已成功修改金额。',
-    '**已删除全部账目**，也可以继续查询。',
-    '可以帮你完成收支记录；账目已经删除。',
-    '我可以查询账目并已经删除全部记录。',
-    '我可以查询账目并删除成功。已经保存三笔。',
-    '创建成功，可以继续查询。',
-    '可以调整已保存记录的分类。已删除昨天的吃饭记录。',
-    '对已入账交易进行更正。已经帮你保存三笔。',
-    '修改已保存记录的金额，已成功更新全部账目。',
-    '已保存账单。',
-    '已新增分类。',
-    '已成功新增分类。',
-    '查询已保存记录，并已删除账单。',
-    '存在一笔相同的已入账记录。已删除重复账单。',
-    '零食很忙疑似已入账。已删除重复账单。',
-
-  ];
-  for (const reply of replies) {
-    const f = fixture([respond(reply), messages => {
-      assert.match(messages.at(-1).content, /没有对应的结构化草稿/);
-      return respond(reply);
-    }]);
-    const result = await f.run({ goal: '你可以做什么？' });
-    assert.match(result.reply, /尚未执行账本更改/, reply);
-    assert.equal(result.agent.status, 'needs_input');
-    assert.equal(f.calls.filter(call => call[0] === 'model').length, 2);
+test('write completion is rejected by unfinished operation state regardless of model wording', async () => {
+  for (const reply of ['办好了', '已删除全部记录', '操作已经搞定']) {
+    const f = fixture([agenda([item('write', 'manage')]), forItem('write', respond(reply)),
+      forItem('write', choose('preview', 'command', command('create', { resource: 'notes', values_json: '{"content":"待批准"}' })))]);
+    const result = await f.run();
+    assert.equal(result.agent.status, 'waiting_approval');
+    assert.equal(result.agent.operations[0].status, 'waiting_approval');
+    assert.match(result.reply, /待确认/);
+    assert.equal(f.checkpoints.at(-1).tool_results.some(tool => tool.name === 'approval_result'), false);
   }
 });
 
@@ -347,24 +323,13 @@ test('a verified receipt bounds success claims even when the reply also describe
   assert.doesNotMatch(result.reply, /删除全部/);
 });
 
-test('an unsupported chat claim after add-another is repaired into a distinct pending draft without writing', async () => {
-  const draft = { id: ACTION, type: 'expense', amount_cents: 2000, description: '吃饭', transaction_date: '2026-10-09',
-    category_id: null, member_id: null, payment_method: null, note: '' };
-  const f = fixture([respond('已为你新增一笔吃饭20元。'), messages => {
-    const feedback = JSON.parse(messages.at(-1).content.slice(messages.at(-1).content.indexOf('：') + 1));
-    assert.equal(feedback.writes_executed, false);
-    assert.match(feedback.message, /新增普通收支用record/);
-    return respond('请核对这笔新的吃饭草稿，尚未入账。', { action: 'record', drafts: [draft] });
-  }]);
-  const result = await f.run({ goal: '新增一笔', messages: [
-    { role: 'user', content: '吃饭20' },
-    { role: 'assistant', content: '已有同额草稿，这是重复发送还是另外一笔？' },
-    { role: 'user', content: '新增一笔' },
-  ] });
+test('add-another keeps its record operation until structured drafts exist without parsing prose', async () => {
+  const f = fixture([agenda([item('another', 'record')]), forItem('another', respond('办好了')),
+    forItem('another', respond('待核对', { action: 'record', drafts: [{ id: ACTION, amount_cents: 2000, description: '吃饭' }] }))]);
+  const result = await f.run({ goal: '新增一笔' });
   assert.equal(result.action, 'record');
-  assert.equal(result.drafts[0].amount_cents, 2000);
   assert.equal(result.agent.status, 'waiting_approval');
-  assert.deepEqual(f.checkpoints.at(-1).pending_batch.draft_ids, [ACTION]);
+  assert.equal(result.drafts[0].amount_cents, 2000);
   assert.equal(f.calls.filter(call => call[0] !== 'model').length, 0);
 });
 
@@ -439,22 +404,25 @@ test('one reviewed record batch explicitly covers distinct agenda IDs without de
   assert.deepEqual(f.checkpoints.at(-1).pending_operation_ids,['breakfast','metro']);
 });
 
-test('literal source coverage binds every grouped row even when the model omitted the second agenda ID', async()=>{
+test('omitted coverage stays pending instead of being inferred from description and amount', async()=>{
   const records=recordStep('breakfast');
   const raw=JSON.parse(records.plan_json);raw.drafts.push({...raw.drafts[0],id:ID,description:'地铁',amount_cents:296});records.plan_json=JSON.stringify(raw);
   const f=fixture([agenda([{...item('breakfast','record'),sources:['早餐3.9']},{...item('metro','record'),sources:['地铁2.96']},item('gift','event')]),records]);
   const result=await f.run();
-  assert.deepEqual(result.agent.operations.map(op=>op.status),['waiting_approval','waiting_approval','pending']);
-  assert.deepEqual(f.checkpoints.at(-1).pending_operation_ids,['breakfast','metro']);
+  assert.deepEqual(result.agent.operations.map(op=>op.status),['waiting_approval','pending','pending']);
+  assert.deepEqual(f.checkpoints.at(-1).pending_operation_ids,['breakfast']);
 });
 
-test('coverage reconciliation never guesses between repeated sources, approximate names, or failed receipts',()=>{
-  const operations=[{...item('one','record'),sources:['地铁2.96'],status:'pending'},{...item('two','record'),sources:['地铁2.96'],status:'pending'}];
-  assert.deepEqual(workflow.matchingRecordOperations(operations,[{description:'地铁',amount_cents:296}]),[]);
-  assert.deepEqual(workflow.matchingRecordOperations([operations[0]],[{description:'公交',amount_cents:296}]),[]);
-  assert.deepEqual(workflow.matchingRecordOperations([operations[0]],[{description:'地铁',amount_cents:300}]),[]);
-  workflow.reconcileRecordWorkflowReceipts([operations[0]],[{id:ACTION,plan:{action:'record',drafts:[{description:'地铁',amount_cents:296}]},receipt:{id:ACTION,status:'failed'}}]);
-  assert.equal(operations[0].status,'pending');
+test('coverage restoration requires explicit operation IDs and a successful matching receipt', () => {
+  for (const patch of [{}, { operation_ids: ['one'], receipt: { id: ACTION, status: 'failed' } }, { operation_ids: ['one'], receipt: { id: ID, status: 'succeeded' } }]) {
+    const operations = [{ ...item('one', 'record'), status: 'pending' }];
+    workflow.reconcileRecordWorkflowReceipts(operations, [{ id: ACTION, plan: { action: 'record', drafts: [{ description: '地铁', amount_cents: 296 }] }, ...patch }]);
+    assert.equal(operations[0].status, 'pending');
+  }
+  const operations = [{ ...item('one', 'record'), status: 'pending' }, { ...item('two', 'record'), status: 'pending' }];
+  workflow.reconcileRecordWorkflowReceipts(operations, [{ id: ACTION, operation_ids: ['one'], plan: { action: 'record' }, receipt: { id: ACTION, status: 'succeeded' } }]);
+  assert.equal(operations[0].status, 'completed');
+  assert.equal(operations[1].status, 'pending');
 });
 
 test('persisted questions stop even a model preview and preserve its unanswered original agenda',async()=>{
@@ -542,7 +510,7 @@ test('two successful loan reads finish with one unified answer without a deliver
 test('a per-item read answer continues the agenda silently until its single final answer',async()=>{
  const f=fixture([agenda([item('first','query'),item('second','query')]),forItem('first',choose('read','query',query())),forItem('first',respond('第一项查询完成')),
   forItem('second',choose('read','query',query({type:'income'}))),forItem('second',respond('第一项和第二项结果如下'))]);
- const result=await f.run();assert.equal(result.agent.status,'completed');assert.equal(result.reply,'第一项和第二项结果如下');
+ const result=await f.run();assert.equal(result.agent.status,'completed');assert.equal(result.analysis,'第一项和第二项结果如下');
  assert.equal(f.calls.filter(call=>call[0]==='query').length,2);assert.equal(f.checkpoints.at(-1).outputs.length,1);
  assert.equal(f.checkpoints.some(c=>c.awaiting_delivery||c.awaiting_answer),false);
 });
@@ -602,11 +570,14 @@ test('repeated invalid steps interrupt without asking an unrelated business ques
 });
 
 
-test('literal grouped records can resolve a missing primary reference without guessing other operations', async () => {
- const operations=[{...item('breakfast','record'),sources:['早餐3.9']},{...item('metro','record'),sources:['地铁2.96']},item('gift','event')];
- const decision={...respond('请核对',{action:'record',drafts:[{id:ID,description:'早餐',amount_cents:390},{id:ACTION,description:'地铁',amount_cents:296}]}),operation_id:null,covered_operation_ids:['breakfast','metro']};
- const f=fixture([agenda(operations),decision]);const result=await f.run();assert.equal(result.agent.status,'waiting_approval');assert.equal(result.agent.operations[2].status,'pending');
- assert.deepEqual(f.checkpoints.at(-1).pending_operation_ids,['breakfast','metro']);
+test('grouped records require a primary operation ID even when row descriptions match', async () => {
+  const operations = [{ ...item('breakfast', 'record'), sources: ['早餐3.9'] }, { ...item('metro', 'record'), sources: ['地铁2.96'] }];
+  const decision = { ...recordStep('breakfast'), operation_id: null, covered_operation_ids: ['breakfast', 'metro'] };
+  const f = fixture([agenda(operations), decision]);
+  const result = await f.run({ maxSteps: 2 });
+  assert.equal(result.agent.status, 'running');
+  assert.equal(f.checkpoints.at(-1).pending_batch, undefined);
+  assert.deepEqual(result.agent.operations.map(op => op.status), ['pending', 'pending']);
 });
 
 test('completed-ID chat summaries are safe only after every item is settled', async () => {
@@ -701,7 +672,6 @@ test('a granted duplicate decision is scoped to the selected occurrence and cann
  const input={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:true,member_id:null,category_id:null,note:null,transaction_amount_cents:null};
  assert.equal(eventClarification.sameEventOccurrence(input,{...input,allow_duplicate:false,member_id:ID}),true);
  for(const patch of [{amount_cents:60000},{counterparty:'另一位'},{date:'2026-10-11'},{transaction_amount_cents:70000}])assert.equal(eventClarification.sameEventOccurrence(input,{...input,...patch}),false);
- assert.equal(eventClarification.isDuplicateEventQuestion('这笔新发生的送礼支出属于哪个成员？'),false);
 });
 
 
@@ -709,7 +679,7 @@ test('已有物品 cannot downgrade the unexecuted cash gift into a completed re
  const operation={...item('gift','event'),sources:['小美送礼500元及200元鞋子'],status:'pending'};
  const c={version:1,goal_id:ID,goal:'小美送礼500元及200元鞋子',status:'running',steps:2,messages:[],tool_results:[],pending_approval:null,preview_fingerprints:[],operations:[operation],authorized_answers:['已有物品']};
  const f=fixture([agenda([{...item('gift','chat'),sources:operation.sources}]),forItem('gift',choose('preview','event',{kind:'gift_given',amount_cents:50000}))]);
- const result=await f.run({checkpoint:c});assert.equal(result.agent.status,'waiting_approval');assert.equal(result.agent.operations[0].action,'event');assert.equal(f.calls.filter(call=>call[0]==='event').length,1);assert.ok(f.checkpoints.at(-1).tool_results.some(tool=>tool.name==='validation_error'&&/写目标/.test(tool.result.message)));
+ const result=await f.run({checkpoint:c});assert.equal(result.agent.status,'waiting_approval');assert.equal(result.agent.operations[0].action,'event');assert.equal(f.calls.filter(call=>call[0]==='event').length,1);assert.ok(f.checkpoints.at(-1).tool_results.some(tool=>tool.name==='validation_error'&&/写事项/.test(tool.result.message)));
 });
 
 
@@ -717,7 +687,7 @@ test('a scoped existing-item answer cannot erase the cash gift while an explicit
  const event={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',items:[{item_name:'鞋子',estimated_value:200}],cashflow:'none'};
  const c={version:1,goal_id:ID,goal:'送礼500及鞋子200',status:'running',steps:2,messages:[],tool_results:[],pending_approval:null,preview_fingerprints:[],operations:[{...item('gift','event'),status:'pending',sources:['送礼500及鞋子200']}],clarification_answers:[{operation_id:'gift',message_id:ID,output_id:ACTION,text:'已有物品'}]};
  const f=fixture([forItem('gift',choose('preview','event',event)),forItem('gift',choose('preview','event',{...event,cashflow:'auto'}))]);const result=await f.run({checkpoint:c});assert.equal(result.agent.status,'waiting_approval');assert.equal(f.calls.filter(call=>call[0]==='event').length,1);assert.equal(f.calls.find(call=>call[0]==='event')[1].cashflow,'auto');
- c.clarification_answers[0].text='仅登记人情台账，不计收支';const allowed=fixture([forItem('gift',choose('preview','event',event))]);await allowed.run({checkpoint:c});assert.equal(allowed.calls.find(call=>call[0]==='event')[1].cashflow,'none');
+ c.clarification_answers[0].text='仅登记人情台账，不计收支';event.cashflow_basis=c.clarification_answers[0].text;const allowed=fixture([forItem('gift',choose('preview','event',event))]);await allowed.run({checkpoint:c});assert.equal(allowed.calls.find(call=>call[0]==='event')[1].cashflow,'none');
  c.clarification_answers[0].operation_id='other';const unrelated=fixture([forItem('gift',choose('preview','event',event)),forItem('gift',choose('preview','event',{...event,cashflow:'auto'}))]);await unrelated.run({checkpoint:c});assert.equal(unrelated.calls.find(call=>call[0]==='event')[1].cashflow,'auto');
 });
 
@@ -731,7 +701,7 @@ test('plain note retrieval saves its complete agenda and returns the actual list
   const noteCommand = command('list', { resource: 'notes', filter: { ...command().filter, status: 'active' } });
   const execution = require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
   let f;
-  f = fixture([singleRead(goal, 'records', noteCommand)], { adapters: { command: async c => {
+  f = fixture([singleRead(goal, 'records', noteCommand)], { adapters: { model: 'fixture-agent', command: async c => {
     assert.equal(f.checkpoints.at(-1).operations[0].status, 'pending', 'agenda is durable before the read');
     assert.equal(c.filter.status, 'active');
     f.calls.push(['command', c]);
@@ -745,6 +715,7 @@ test('plain note retrieval saves its complete agenda and returns the actual list
   assert.equal(result.record_context.rows[0].id, ACTION);
   assert.match(result.reply, /明天送车/);
   assert.deepEqual(Array.from(execution.snapshot(), step => step.label), ['理解查询请求', '查询未归档便利贴', '整理查询结果']);
+  assert.equal(execution.snapshot()[0].model, 'fixture-agent', 'model identity survives action relabeling and completion');
   assert.match(execution.snapshot()[1].details.at(-1), /找到 1 条记录/);
   assert.equal(execution.snapshot().some(step => /选择账本|准备确认方案|个ID|196 字/.test(JSON.stringify(step))), false);
   assert.equal(f.checkpoints.at(-1).outputs.length, 1);
@@ -963,4 +934,38 @@ test('a completed agenda revision cannot publish an empty shortcut reply without
   assert.equal(result.reply, '原查询结果已展示。');
   assert.equal(result.agent.status, 'completed');
   assert.equal(f.calls.filter(call => call[0] === 'model').length, 2);
+});
+
+test('local delivery receipts supply final results instead of the model completion text', async () => {
+  const c = { version: 1, goal_id: ID, goal: '修改草稿', status: 'running', steps: 2, messages: [], pending_approval: null, preview_fingerprints: [],
+    operations: [{ ...item('edit', 'edit'), status: 'completed' }], tool_results: [
+      { call_id: 'delivery', operation_id: 'edit', name: 'delivery_result', result: { id: ACTION, action: 'edit', status: 'succeeded', text: '已修改待确认草稿，尚未入账。' } },
+    ] };
+  const f = fixture([{ ...respond('所有账目都已经入账'), operation_id: null }]);
+  const result = await f.run({ checkpoint: c });
+  assert.equal(result.reply, c.tool_results[0].result.text);
+  assert.equal(result.analysis, undefined);
+  assert.equal(f.calls.filter(call => call[0] !== 'model').length, 0);
+});
+
+test('replacement identity must be explicitly included in current reviewed output IDs', async () => {
+  const preview = { ...choose('preview', 'command', command('create', { resource: 'notes', values_json: '{"content":"待核对"}' })), replaces_output_id: ACTION };
+  const rejected = fixture([preview, respond('请指定原卡片')]);
+  await rejected.run();
+  assert.equal(rejected.calls.filter(call => call[0] === 'command').length, 0);
+  const accepted = fixture([preview]);
+  const result = await accepted.run({ reviewedCardIds: [ACTION] });
+  assert.equal(result.replaces_output_id, ACTION);
+  assert.equal(result.agent.status, 'waiting_approval');
+});
+
+test('an auxiliary read cannot hide a write clarification behind a completed query card', async () => {
+  const f = fixture([agenda([item('gift', 'event')]), forItem('gift', choose('read', 'query', query())),
+    { ...forItem('gift', respond('礼品是估值还是实际付款？')), needs_input: true }]);
+  const result = await f.run();
+  assert.equal(result.reply, '礼品是估值还是实际付款？');
+  assert.equal(result.reply_view, undefined);
+  assert.equal(result.agent.awaiting_answer, true);
+  assert.equal(result.agent.operations[0].status, 'needs_input');
+  assert.equal(f.calls.filter(call => call[0] === 'event').length, 0);
 });

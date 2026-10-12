@@ -41,7 +41,7 @@ export function restoreAssistantProcess(value: unknown): AssistantProcess | unde
     || !Number.isSafeInteger(p.attempt) || p.attempt < 1
     || typeof p.hasReply !== "boolean"
     || ![null, "chat", "record", "query", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event"].includes(p.action)
-    || !Number.isSafeInteger(p.draftCount) || p.draftCount < 0 || p.draftCount > 20) return;
+    || !Number.isSafeInteger(p.draftCount) || p.draftCount < 0) return;
   return { status: p.status, phase: p.phase, attempt: p.attempt, hasReply: p.hasReply,
     images: restoreAssistantImageProgress(p.images), action: p.action, draftCount: p.draftCount,
     ...(restoreAssistantExecution(p.execution).length ? { execution: restoreAssistantExecution(p.execution) } : {}),
@@ -74,6 +74,7 @@ export type AssistantProcessStep = {
   detail?: string;
   details?: string[];
   kind?: AssistantExecutionStep["kind"];
+  model?: string;
   duration?: string;
   tool?: boolean;
   state: "done" | "running" | "waiting" | "failed" | "stopped";
@@ -116,7 +117,7 @@ export function assistantProcessView(p: AssistantProcess) {
       const seconds = end === undefined ? undefined : Math.max(0, Math.floor((end - step.startedAt) / 1000));
       const duration = seconds === undefined ? undefined : seconds === 0 ? "<1 秒"
         : seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
-      return { label: step.label, details: step.details, kind: step.kind, duration,
+      return { label: step.label, details: step.details, kind: step.kind, ...(step.model ? { model: step.model } : {}), duration,
         state: interrupted ? p.status === "cancelled" ? "stopped" as const : "failed" as const : step.state };
     }));
   }

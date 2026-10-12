@@ -50,38 +50,19 @@ export function workflowOperation(operations: WorkflowOperation[], id: unknown):
   return item;
 }
 
-/** A literal description + amount can bind a row to exactly one agenda item.
- * No semantic guessing: ambiguous/repeated sources still require explicit IDs. */
-export function matchingRecordOperations(operations: WorkflowOperation[], drafts: Array<{ description: string; amount_cents: number }>): string[] {
-  const matches = drafts.map(draft => {
-    if (!draft || typeof draft.description !== "string" || !Number.isSafeInteger(draft.amount_cents) || draft.amount_cents <= 0) return [];
-    const description = draft.description.replace(/\s/g, "");
-    if (!description) return [];
-    return operations.filter(operation => {
-      if (operation.action !== "record" || operation.sources?.length !== 1 || operation.questions?.length) return false;
-      const source = operation.sources[0].replace(/\s/g, "");
-      if (!source.startsWith(description)) return false;
-      const amount = source.slice(description.length).match(/^[¥￥]?(\d+)(?:\.(\d{1,2}))?(?:元|块钱?)?$/);
-      return !!amount && Number(amount[1]) * 100 + Number((amount[2] || "").padEnd(2, "0")) === draft.amount_cents;
-    }).map(operation => operation.id);
-  });
-  return matches.filter(ids => ids.length === 1 && matches.filter(other => other.includes(ids[0])).length === 1).map(ids => ids[0]);
-}
-
-/** Restore coverage omitted by older grouped previews using their existing receipt.
- * This only settles already executed work; it never prepares a financial action. */
-export function reconcileRecordWorkflowReceipts(operations: WorkflowOperation[], outputs: Array<{ id: string; plan: { action: string; drafts: Array<{ description: string; amount_cents: number }> }; receipt?: { id: string; status: string } }>): void {
+/** Restore only coverage recorded alongside the server's successful receipt. */
+export function reconcileRecordWorkflowReceipts(operations: WorkflowOperation[], outputs: Array<{ id: string; operation_ids?: string[]; plan: { action: string }; receipt?: { id: string; status: string } }>): void {
   for (const output of outputs) {
-    if (output.plan.action !== "record" || !Array.isArray(output.plan.drafts) || output.receipt?.status !== "succeeded" || output.receipt.id !== output.id) continue;
-    for (const id of matchingRecordOperations(operations, output.plan.drafts)) {
-      const operation = operations.find(item => item.id === id)!;
-      if (operation.status !== "pending" || operation.depends_on.some(dependency => operations.find(item => item.id === dependency)?.status !== "completed")) continue;
+    if (output.plan.action !== "record" || output.receipt?.status !== "succeeded" || output.receipt.id !== output.id) continue;
+    for (const id of output.operation_ids || []) {
+      const operation = operations.find(item => item.id === id);
+      if (!operation || operation.action !== "record" || operation.status !== "pending"
+        || operation.depends_on.some(dependency => operations.find(item => item.id === dependency)?.status !== "completed")) continue;
       operation.status = "completed";
       operation.receipt_id = output.receipt.id;
     }
   }
 }
-
 
 /** Literal current-request coverage prevents old history from creating a new agenda. */
 export function assertWorkflowCoverage(operations: WorkflowOperation[], goal: string, authorizedAnswers: string[] = []): void {

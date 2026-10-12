@@ -22,16 +22,16 @@ test('draft matching finds even one saved match, scopes ownership and filters ty
     draft(24, { transaction_date: undefined }), draft(25, { amount_cents: undefined })]);
   const before = JSON.stringify(input), start = f.statements.length;
   const result = plain(await f.load('lib/assistant-draft-matches.ts').readAssistantDraftMatches('owner', input));
-  assert.deepEqual(result.rows.map(row => row.status), ['possible_match', 'possible_match', 'no_match', 'incomplete', 'incomplete']);
+  assert.deepEqual(result.rows.map(row => row.status), ['possible_match', 'no_match', 'no_match', 'incomplete', 'incomplete']);
   assert.equal(result.rows[0].candidate_count, 1);
   assert.equal(result.rows[0].candidates[0].id, id(1));
   assert.equal(result.rows[0].candidates[0].amount_cents, 980);
   assert.equal(result.rows[0].candidates[0].transaction_date, '2026-10-09');
   assert.equal(result.rows[0].candidates[0].same_description, true);
-  assert.equal(result.rows[1].candidates[0].same_description, false, 'changed descriptions remain candidates');
+  assert.equal(result.rows[1].candidates.length, 0, 'semantic purpose is not inferred from a changed description');
   assert.equal(result.same_description_is_only_suspected, true);
-  assert.match(result.reply, /零食很忙｜2026-10-09｜¥9.80：找到.*商户名称一致/);
-  assert.match(result.reply, /用途相关.*仍需确认/);
+  assert.match(result.reply, /零食很忙｜2026-10-09｜¥9.80：找到.*描述一致/);
+  assert.doesNotMatch(result.reply, /用途相关/);
   assert.match(result.reply, /暂未核对/);
   assert.match(result.reply, /没有更改草稿或账本/);
   assert.equal(JSON.stringify(input), before);
@@ -47,18 +47,18 @@ test('screenshot reproduction finds the previous-day merchant matches and change
     draft(23, { description: saved[1][0], amount_cents: 3126 }), draft(24, { description: '阿里云服务购买', amount_cents: 3900 }), draft(25, { description: '蚂蚁财富-建信纳斯达克100', amount_cents: 1000 })]);
   const start = f.statements.length;
   const result = plain(await f.load('lib/assistant-draft-matches.ts').readAssistantDraftMatches('owner', input));
-  assert.deepEqual(result.rows.map(row => row.status), ['no_match', 'possible_match', 'possible_match', 'possible_match', 'no_match']);
-  for (const row of result.rows.slice(1, 4)) {
+  assert.deepEqual(result.rows.map(row => row.status), ['no_match', 'possible_match', 'possible_match', 'no_match', 'no_match']);
+  for (const row of result.rows.slice(1, 3)) {
     assert.equal(row.candidates[0].transaction_date, '2026-10-08');
     assert.equal(row.candidates[0].date_difference_days, -1);
   }
-  assert.equal(result.rows[3].candidates[0].same_description, false);
+  assert.equal(result.rows[3].candidates.length, 0);
   assert.equal(result.reply_view.title, '重复入账核对');
   assert.equal(result.reply_view.records[1].badge.label, '疑似重复');
-  assert.equal(result.reply_view.records[3].badge.label, '用途相关，待核对');
+  assert.equal(result.reply_view.records[3].badge.label, '未找到候选');
   assert.match(result.reply_view.records[2].rows[0].value, /2026-10-08.*¥31.26/);
   assert.match(result.reply_view.records[2].rows[0].value, /早 1 天/);
-  assert.match(result.reply_view.records[3].rows[0].value, /用途相关/);
+  assert.match(result.reply_view.records[3].rows[0].value, /未找到描述一致/);
   assert.ok(f.statements.slice(start).every(statement => /^\s*SELECT\b/.test(statement.text)));
   assert.equal((await f.db.query('SELECT * FROM transactions')).rows.length, 3);
 });
@@ -74,7 +74,7 @@ test('nearby dates rank matching merchants first, keep recurring payments ambigu
   assert.equal(row.candidates.length, 3);
   assert.equal(row.candidates_limited, true);
   assert.deepEqual(row.candidates.slice(0, 2).map(candidate => candidate.id), [id(2), id(3)]);
-  assert.match(result.reply_view.notices.map(n => n.text).join(' '), /同商户可能多次消费/);
+  assert.match(result.reply_view.notices.map(n => n.text).join(' '), /相同描述可能对应多次消费/);
   assert.match(result.reply_view.subtitle, /前后 7 天/);
 });
 
@@ -130,6 +130,6 @@ test('purpose evidence needs a nearby date, compatible category and member; gene
     [3,'2026-10-08','.top域名续费',82,83], [4,'2026-10-08','.top域名续费',81,84], [5,'2026-10-08','',81,83],
   ]) await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date,description,category_id,member_id) VALUES($1,'owner','expense',39,$2,$3,$4,$5)", [id(n),date,description,id(category),id(member)]);
   const result = plain(await f.load('lib/assistant-draft-matches.ts').readAssistantDraftMatches('owner', batch([draft(21, {description:'阿里云服务购买',amount_cents:3900,category_id:id(81),member_id:id(83)})]), [], [{id:id(81),name:'线上购物',type:'expense'}]));
-  assert.deepEqual(result.rows[0].candidates.map(c => c.id), [id(1)]);
-  assert.equal(result.rows[0].candidates[0].match_reason,'purpose');
+  assert.deepEqual(result.rows[0].candidates.map(c => c.id), [id(5)]);
+  assert.equal(result.rows[0].candidates[0].match_reason,'missing_description');
 });

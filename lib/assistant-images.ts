@@ -54,7 +54,7 @@ export function restoreAssistantImportSummary(value: unknown): AssistantImageImp
   const summary = value as AssistantImageImportSummary;
   const skipped = summary.skipped_zero_amounts === undefined ? 0 : summary.skipped_zero_amounts;
   if (![summary.image_count, summary.extracted_count, summary.removed_duplicates, summary.retained_count, skipped].every(n => Number.isSafeInteger(n) && n >= 0)
-    || summary.image_count < 1 || summary.image_count > MAX_ASSISTANT_IMAGES || summary.extracted_count > MAX_ASSISTANT_IMAGES * 20
+    || summary.image_count < 1 || summary.image_count > MAX_ASSISTANT_IMAGES
     || skipped + summary.removed_duplicates + summary.retained_count !== summary.extracted_count || typeof summary.review_required !== "boolean"
     || !Array.isArray(summary.warnings) || summary.warnings.length > 10 || summary.warnings.some(warning => typeof warning !== "string" || warning.length > 500)) return;
   return summary;

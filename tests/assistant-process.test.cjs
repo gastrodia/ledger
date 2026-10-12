@@ -135,6 +135,20 @@ test('resolved model labels preserve their original timing and survive process r
   assert.equal(view(process).steps[0].label, '理解查询请求');
 });
 
+test('model identity survives completion and refresh while cached checks never claim a model call', () => {
+  const report = execution.createAssistantExecution();
+  report.start('image-1', '识别第 1 张截图', 'model', [], 'fixture-vision');
+  report.finish('image-1', ['提取 8 条候选账目']);
+  report.start('image-2', '复用第 2 张截图的识别结果', 'check', ['复用缓存'], 'fixture-vision');
+  report.finish('image-2');
+  const process = restore(snapshot(timedTask({ status: 'succeeded', execution_steps: report.snapshot() })));
+  assert.equal(view(process).steps[0].model, 'fixture-vision');
+  assert.equal(view(process).steps[0].kind, 'model');
+  assert.equal(view(process).steps[1].kind, 'check');
+  assert.equal(view(process).steps[1].model, undefined);
+  assert.equal(execution.restoreAssistantExecution([detailedStep({ kind: 'model', model: 'private prompt\nSELECT *' })])[0].model, undefined);
+});
+
 test('command trace shows business filters and actual actions without exposing internal scopes or IDs', () => {
   const command = { resource: 'notes', operation: 'list', scope: 'all', ids: [], parent_name: null,
     filter: { status: 'active', keyword: '保养', start_date: '2026-10-01', end_date: null, type: null, category_id: null, member_id: null, amount_min: null, amount_max: null } };
@@ -148,4 +162,19 @@ test('command trace shows business filters and actual actions without exposing i
   assert.ok(details.includes('类型：对方欠我'));
   assert.equal(JSON.stringify(details).includes('all'), false);
   assert.equal(JSON.stringify(details).includes('个ID'), false);
+});
+
+test('processing details renders persistent model identity once even when legacy details already name it', () => {
+  const component = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync('components/assistant/processing-details.tsx', 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, { exports: component, require: name => name === '@/lib/assistant-process' ? load('lib/assistant-process.ts') : require(name) });
+  const React = require('react'), { renderToStaticMarkup } = require('react-dom/server');
+  for (const details of [['提取 8 条候选账目'], ['调用模型：fixture-vision', '提取 8 条候选账目']]) {
+    const process = snapshot(timedTask({ status: 'succeeded', execution_steps: [detailedStep({ kind: 'model', model: 'fixture-vision', details })] }));
+    const html = renderToStaticMarkup(React.createElement(component.AssistantProcessingDetails, { process }));
+    assert.match(html, /fixture-vision/);
+    assert.equal((html.match(/调用模型：/g) || []).length, 1);
+    assert.match(html, /模型/);
+  }
 });

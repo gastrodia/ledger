@@ -9,9 +9,9 @@ test('gift and loan corrections replace old controls, chain all markers to the n
  for(const kind of ['gift_given','gift_received','loan_lent','loan_borrowed','repayment_received','repayment_paid']){
   const a=event(1,kind),b=event(2,kind),c=event(3,kind);
   const original=[a,{id:id(9),role:'user',text:'记错了是300'},b];
-  const updated=reconcileAssistantCardUpdate(original,b.id,'记错了是300');
+  const updated=reconcileAssistantCardUpdate(original,b.id,a.id);
   assert.equal(updated[0].cardUpdatedLink,b.id);assert.equal(updated[0].approval,undefined);assert.equal(updated[0].supersededApproval.id,a.approval.id);
-  const latest=reconcileAssistantCardUpdate([...updated,{id:id(10),role:'user',text:'改成400'},c],c.id,'改成400');
+  const latest=reconcileAssistantCardUpdate([...updated,{id:id(10),role:'user',text:'改成400'},c],c.id,b.id);
   assert.equal(latest[0].cardUpdatedLink,c.id);assert.equal(latest.find(m=>m.id===b.id).cardUpdatedLink,c.id);
   assert.equal(latest.filter(m=>m.approval).length,1);
   assert.deepEqual(plain(reconcileAssistantCardHistory(plain(latest))),plain(latest));
@@ -28,13 +28,13 @@ test('new unrelated requests and ambiguous corrections preserve independent prop
 });
 test('explicit choice updates, management targets and query corrections share the marker contract',()=>{
  const a=event(1,null),b=event(2);
- assert.equal(reconcileAssistantCardUpdate([a,b],b.id,'记录送礼',a.id)[0].cardUpdatedLink,b.id);
+ assert.equal(reconcileAssistantCardUpdate([a,b],b.id,a.id)[0].cardUpdatedLink,b.id);
  const management=n=>({id:id(n),role:'assistant',approval:{id:id(n+100)},proposalScope:{resource:'transactions',operation:'update',ids:[id(99)]}});
- assert.equal(reconcileAssistantCardUpdate([management(1),management(2)],id(2),'修改金额为300')[0].cardUpdatedLink,id(2));
+ assert.equal(reconcileAssistantCardUpdate([management(1),management(2)],id(2),id(1))[0].cardUpdatedLink,id(2));
  const other={...management(2),proposalScope:{resource:'transactions',operation:'update',ids:[id(98)]}};
  assert.equal(reconcileAssistantCardUpdate([management(1),other],id(2),'修改金额为300')[0].cardUpdatedLink,undefined);
  const query=n=>({id:id(n),role:'assistant',replyView:{title:'统计',analysis:true}});
- assert.equal(reconcileAssistantCardUpdate([query(1),query(2)],id(2),'查错了，应该是上月')[0].cardUpdatedLink,id(2));
+ assert.equal(reconcileAssistantCardUpdate([query(1),query(2)],id(2),id(1))[0].cardUpdatedLink,id(2));
 });
 test('saved cards relocate with stable identities and verified event updates replace old receipts',()=>{
  const a={id:id(1),role:'assistant',status:'saved',drafts:[{id:id(11),amount:'300'}]};
@@ -51,12 +51,12 @@ test('member questions remain before the answer when their event card is superse
  for(const text of ['这笔资金流水归属哪个成员？','请选择这笔资金流水的成员']){
   const a={...event(1),text,eventChoices:[{label:'本人'}]},b=event(2),c=event(3);
   const answer={id:id(9),role:'user',text:'支出人是「本人」'};
-  const updated=reconcileAssistantCardUpdate([a,answer,b],b.id,answer.text);
+  const updated=reconcileAssistantCardUpdate([a,answer,b],b.id,a.id);
   assert.equal(updated[0].text,text);
   assert.equal(updated[0].approval,undefined);
   assert.equal(updated[0].eventChoices,undefined);
   assert.deepEqual(plain(updated.map(m=>m.id)),[a.id,answer.id,b.id]);
-  const latest=reconcileAssistantCardUpdate([...updated,{id:id(10),role:'user',text:'改成300'},c],c.id,'改成300');
+  const latest=reconcileAssistantCardUpdate([...updated,{id:id(10),role:'user',text:'改成300'},c],c.id,b.id);
   assert.equal(latest[0].text,text);
   assert.equal(latest[0].cardUpdatedLink,c.id);
   assert.deepEqual(plain(reconcileAssistantCardHistory(plain(latest))),plain(latest));
@@ -64,7 +64,7 @@ test('member questions remain before the answer when their event card is superse
 });
 
 test('moving a question card leaves its question at the original location and only one active card',()=>{
- const a={...event(1),text:'这次实际付款还是估值？'},answer={id:id(9),role:'user',text:'实际付款'};
+ const a={...event(1),agent:{awaiting_answer:true},text:'这次实际付款还是估值？'},answer={id:id(9),role:'user',text:'实际付款'};
  const moved=relocateAssistantCard([a,answer],a.id,answer.id);
  assert.equal(moved[0].text,a.text);
  assert.equal(moved[0].cardUpdatedLink,a.id);

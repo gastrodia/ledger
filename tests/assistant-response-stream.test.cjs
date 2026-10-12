@@ -11,9 +11,9 @@ function load(file, dependencies = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, { exports, Error, SyntaxError, Date, JSON, Number, Response, TextEncoder,
+  }).outputText, { exports, Error, SyntaxError, Date, JSON, Number, Response, TextEncoder, Buffer, structuredClone, setTimeout, clearTimeout,
     ReadableStream, AbortController, AbortSignal, process: { env: {} },
-    require: name => { const contract = require('./helpers/assistant-contracts.cjs')(name); if (contract) return contract; assert.ok(name in dependencies, `Unexpected dependency ${name}`); return dependencies[name]; },
+    require: name => { const contract = require('./helpers/assistant-contracts.cjs')(name); if (contract) return contract; if (name in dependencies) return dependencies[name]; if (name === 'ai' || name === 'zod') return require(name); if (name.startsWith('@/')) return load(name.slice(2) + '.ts', dependencies); assert.fail(`Unexpected dependency ${name}`); },
   });
   return exports;
 }
@@ -73,7 +73,7 @@ function fixture(provider = {}, session = { userId: 'authorized-user' }) {
     'next/server': { NextResponse }, 'node:crypto': crypto,
     '@/lib/auth': { getSession: async () => session }, '@/lib/ledger-event-schema': { ensureCashflowSchema: async () => {} },
       '@/lib/db': { sql }, '@/lib/assistant': assistant,
-    '@/lib/assistant-output': { ASSISTANT_OUTPUT_SCHEMA: {} }, '@/lib/assistant-image-import': imageImport,
+    '@/lib/assistant-output': load('lib/assistant-output.ts', { ai: require('ai'), zod: require('zod') }), '@/lib/assistant-image-import': imageImport,
     '@/lib/assistant-image-recognition': imageRecognition,
     '@/lib/bailian': {
       BAILIAN_ASSISTANT_MODEL: 'fixture-object', BAILIAN_SUMMARY_MODEL: 'fixture-summary', BailianError,
@@ -86,6 +86,15 @@ function fixture(provider = {}, session = { userId: 'authorized-user' }) {
       ...provider,
     },
   };
+  let latestPlan;
+  const object = deps['@/lib/bailian'].bailianObject, stream = deps['@/lib/bailian'].bailianObjectStream;
+  const adapt = (settings, raw) => {
+    if (settings.schemaName === 'ledger_record_page') return { plan: raw, segments: [{ text: JSON.parse(settings.messages.at(-1).content).remaining, draft_indexes: raw.drafts.map((_,i)=>i+1) }] };
+    if (settings.schemaName !== 'ledger_image_batch') return raw;
+    return { ...raw, drafts: raw.drafts.map((d,i)=>({ ...d, source: d.source || { image_index:1,row_index:i+1,time:null,transaction_id:null,kind:'unknown' } })), outcome:raw.action==='record'?'complete':'empty',total_rows:raw.drafts.length,date_context:null,date_dependency:null };
+  };
+  deps['@/lib/bailian'].bailianObject = async (settings, signal) => adapt(settings, settings.schemaName === 'ledger_record_page' && latestPlan ? latestPlan : await object(settings, signal));
+  deps['@/lib/bailian'].bailianObjectStream = async (settings, partial, signal) => { latestPlan=await stream(settings,partial,signal); return adapt(settings,latestPlan); };
   deps['@/lib/assistant-generation'] = load('lib/assistant-generation.ts', deps);
   const route = load('app/api/assistant/route.ts', deps);
   return { route, statements };
@@ -114,7 +123,7 @@ function observe(response) {
   return { events, reader, done };
 }
 
-test('chat status and incremental text reach the reader before complete structured output is available', async () => {
+test('chat generation exposes status only until the complete response is validated', async () => {
   const gate = deferred();
   let upstreamSignal;
   const { route, statements } = fixture({ bailianObjectStream: async (settings, partial, signal) => {
@@ -132,12 +141,11 @@ test('chat status and incremental text reach the reader before complete structur
   assert.match(response.headers.get('cache-control'), /no-transform/);
   const watched = observe(response);
   await tick();
-  assert.deepEqual(watched.events, [{ type: 'status', phase: 'thinking' },
-    { type: 'delta', text: '可以' }, { type: 'delta', text: '把收支' }]);
+  assert.deepEqual(watched.events, [{ type: 'status', phase: 'thinking' }]);
   assert.equal(upstreamSignal.aborted, false);
   gate.resolve();
   const events = await watched.done;
-  assert.equal(events.filter(event => event.type === 'delta').map(event => event.text).join(''), chat.reply);
+  assert.equal(events.some(event => event.type === 'delta'), false);
   assert.equal(events.at(-1).type, 'result');
   assert.equal(events.at(-1).plan.action, 'chat');
   assert.equal(events.at(-1).plan.reply, chat.reply);
@@ -220,12 +228,12 @@ test('invalid compact screenshot references expose neither provisional cards nor
     gate.resolve();
     const events = await watched.done;
     assert.deepEqual(events.map(event => event.type), ['status', 'error']);
-    assert.match(events.at(-1).message, /截图识别格式|引用无效/);
+    assert.match(events.at(-1).message, /截图.*(?:识别|分批)|引用无效/);
     assert.equal(statements.length, 2);
   }
 });
 
-test('query summary starts only after user-scoped SQL facts and streams the second model response', async () => {
+test('query facts determine the result and complete model analysis is returned separately', async () => {
   const gate = deferred();
   let summarySettings;
   const { route, statements } = fixture({
@@ -242,8 +250,7 @@ test('query summary starts only after user-scoped SQL facts and streams the seco
   });
   const watched = observe(await route.POST(request({ message: '本月午餐花了多少？' })));
   await tick();
-  assert.deepEqual(watched.events, [{ type: 'status', phase: 'thinking' }, { type: 'status', phase: 'query' },
-    { type: 'delta', text: '你共支出 ' }]);
+  assert.deepEqual(watched.events, [{ type: 'status', phase: 'thinking' }, { type: 'status', phase: 'query' }]);
   assert.equal(summarySettings.model, 'fixture-summary');
   const context = JSON.parse(summarySettings.messages[1].content);
   assert.deepEqual(context, { question: '本月午餐花了多少？', filters: query, facts });
@@ -254,12 +261,13 @@ test('query summary starts only after user-scoped SQL facts and streams the seco
   }
   gate.resolve();
   const events = await watched.done;
-  assert.equal(events.at(-1).plan.reply, '你共支出 24 元，共 2 笔。');
-  assert.equal(events.filter(event => event.type === 'delta').map(event => event.text).join(''), events.at(-1).plan.reply);
+  assert.equal(events.at(-1).plan.analysis, '你共支出 24 元，共 2 笔。');
+  assert.match(events.at(-1).plan.reply, /24.00/);
+  assert.equal(events.some(event => event.type === 'delta'), false);
   assert.equal(events.some(event => JSON.stringify(event).includes('999')), false);
 });
 
-test('provider failure after a visible chat partial terminates with an error and no complete plan', async () => {
+test('provider failure after an unvalidated chat partial exposes only status and an error', async () => {
   const gate = deferred();
   let signal;
   const { route } = fixture({ bailianObjectStream: async (_settings, partial, upstreamSignal) => {
@@ -270,10 +278,10 @@ test('provider failure after a visible chat partial terminates with an error and
   } });
   const watched = observe(await route.POST(request()));
   await tick();
-  assert.equal(watched.events.at(-1).text, '你可以');
+  assert.deepEqual(watched.events, [{ type: 'status', phase: 'thinking' }]);
   gate.resolve();
   const events = await watched.done;
-  assert.deepEqual(events.map(event => event.type), ['status', 'delta', 'error']);
+  assert.deepEqual(events.map(event => event.type), ['status', 'error']);
   assert.equal(signal.aborted, true);
 });
 
@@ -294,38 +302,21 @@ test('character-by-character false chat success claims remain hidden when the pr
   }
 });
 
-test('false member and undo success statements in chat are exposed only as validated correction text', async () => {
-  const memberCorrection = '尚未修改草稿，请明确指定本组成员，或直接在卡片中选择。';
-  const undoCorrection = '尚未撤销，请使用账单卡片中的撤销入账。';
-  const cases = [
-    ['好的，已将本组成员改为「本人」。', '好的，', memberCorrection],
-    ['成员已修改为本人。', '成员', memberCorrection],
-    ['已撤销。', '', undoCorrection],
-    ['撤销成功。', '', undoCorrection],
-    ['取消成功。', '', undoCorrection],
-    ['删除完成。', '', undoCorrection],
-    ['现已全部取消。', '现', undoCorrection],
-    ['我已为你撤销。', '我', undoCorrection],
-    ['**已撤销**。', '**', undoCorrection],
-  ];
-  for (const [reply, safePrefix, corrected] of cases) {
-    const gate = deferred();
-    const { route, statements } = fixture({ bailianObjectStream: async (_settings, partial) => {
-      for (let end = 1; end <= reply.length; end++) partial({ action: 'chat', reply: reply.slice(0, end) });
-      await gate.promise;
-      return { ...chat, reply };
-    } });
-    const watched = observe(await route.POST(request()));
-    await tick();
-    assert.equal(watched.events.filter(event => event.type === 'delta').map(event => event.text).join(''), safePrefix, reply);
-    assert.equal(watched.events.some(event => event.type === 'result'), false);
-    gate.resolve();
-    const events = await watched.done;
-    assert.equal(events.at(-1).type, 'result', reply);
-    assert.equal(events.at(-1).plan.action, 'chat');
-    assert.equal(events.at(-1).plan.reply, corrected, reply);
-    assert.equal(statements.length, 2, 'a falsely labelled conversation cannot execute the claimed operation');
-  }
+test('structured local operation progress ignores model success wording before actual delivery', async () => {
+  const gate = deferred();
+  const output = { ...chat, action: 'update', reply: '全部办好了', update: { batch_id: batchId, draft_ids: [draftId], member_id: memberId } };
+  const { route, statements } = fixture({ bailianObjectStream: async (_settings, partial) => {
+    partial(output); await gate.promise; return output;
+  } });
+  const watched = observe(await route.POST(request({ draft_batch: { batch_id: batchId, status: 'pending', drafts: [row] } })));
+  await tick();
+  assert.deepEqual(watched.events, [{ type: 'status', phase: 'thinking' }]);
+  gate.resolve();
+  const events = await watched.done;
+  assert.equal(events.at(-1).plan.action, 'update');
+  assert.match(events.at(-1).plan.reply, /准备将.*尚未修改/);
+  assert.doesNotMatch(events.at(-1).plan.reply, /办好了/);
+  assert.equal(statements.length, 2);
 });
 
 test('holding a potentially sensitive chat prefix preserves the full legitimate explanation in the final reply', async () => {
@@ -338,7 +329,7 @@ test('holding a potentially sensitive chat prefix preserves the full legitimate 
   } });
   const watched = observe(await route.POST(request()));
   await tick();
-  assert.equal(watched.events.filter(event => event.type === 'delta').map(event => event.text).join(''), '可以在');
+  assert.equal(watched.events.some(event => event.type === 'delta'), false);
   gate.resolve();
   const events = await watched.done;
   assert.equal(events.at(-1).plan.reply, reply);
@@ -361,7 +352,7 @@ test('truncated and incomplete query streams fail without a result and close the
       },
     });
     const events = await observe(await route.POST(request())).done;
-    assert.deepEqual(events.map(event => event.type), ['status', 'status', 'delta', 'error']);
+    assert.deepEqual(events.map(event => event.type), ['status', 'status', 'error']);
     assert.equal(stopped, true);
     assert.equal(signal.aborted, true);
   }
@@ -383,7 +374,7 @@ test('request abort and response reader cancellation both promptly abort pending
     } });
     const watched = observe(await route.POST(request({}, abort.signal)));
     await tick();
-    assert.equal(watched.events.at(-1).type, 'delta');
+    assert.equal(watched.events.at(-1).type, 'status');
     if (method === 'request') abort.abort();
     else await watched.reader.cancel();
     await watched.done;

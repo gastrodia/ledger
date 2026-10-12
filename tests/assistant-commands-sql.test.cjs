@@ -12,7 +12,8 @@ test('a gift event and an independent note remain separately pending and commit 
   const server=f.load('lib/assistant-command-server.ts');
   const events=f.load('lib/ledger-event-server.ts');
   await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','本人')",[uuid(960)]);
-  const gift=await events.prepareLedgerEvent('owner',uuid(961),{operation:'create',kind:'gift_given',counterparty:'大伯',amount_cents:30000,date:'2026-10-09',member_id:uuid(960),cashflow:'new'});
+  await f.db.query("INSERT INTO categories(id,user_id,name,type) VALUES($1,'owner','送礼','expense')",[uuid(959)]);
+  const gift=await events.prepareLedgerEvent('owner',uuid(961),{operation:'create',kind:'gift_given',counterparty:'大伯',amount_cents:30000,date:'2026-10-09',member_id:uuid(960),category_id:uuid(959),cashflow:'new'});
   const note=await server.prepareLedgerCommand('owner',uuid(961),command('notes','create',{content:'买鸡蛋'}));
   assert.equal((await server.getAssistantAction('owner',gift.approval.id)).status,'pending');
   assert.equal((await server.getAssistantAction('owner',note.approval.id)).status,'pending');

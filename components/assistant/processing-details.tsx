@@ -34,6 +34,7 @@ export function AssistantProcessingDetails({ process, disconnected = false, summ
             <Icon size={12} className="mt-1 shrink-0 opacity-70" aria-hidden="true" />
             <div className="min-w-0 wrap-anywhere">
               <div className="flex flex-wrap items-center gap-x-2"><span>{step.label}</span>{(step.tool || step.kind) && <span className="text-[10px] opacity-70">{step.kind === "model" ? "模型" : step.kind === "check" ? "校验" : "工具"}</span>}<span className="text-[10px] opacity-70">{step.state === "done" ? "已完成" : step.state === "failed" ? "未完成" : step.state === "stopped" ? "已停止" : disconnected ? "等待同步" : step.state === "waiting" ? "等待中" : "进行中"}</span>{step.duration && <span className="text-[10px] tabular-nums opacity-70">· {step.duration}</span>}</div>
+              {step.model && !step.details?.some(detail => detail === `调用模型：${step.model}`) && <p className="text-[11px] opacity-80">调用模型：{step.model}</p>}
               {step.details?.map((detail, detailIndex) => <p key={detailIndex} className="text-[11px] opacity-80">{detail}</p>)}
               {step.detail && <p className="text-[11px] opacity-80">{step.detail}</p>}
             </div>

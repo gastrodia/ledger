@@ -20,6 +20,7 @@ const assistantOutput = z.object({
   confirm: draftConfirmSchema.nullable().optional().default(null),
   navigation: navigationSchema.nullable().optional().default(null),
   reply: z.string(),
+  replaces_output_id: z.string().uuid().nullable().optional(),
   drafts: z.array(z.object({
     type: z.enum(["income", "expense"]), amount_cents: z.number().int(),
     category_id: nullableString, member_id: nullableString,

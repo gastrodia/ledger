@@ -1300,15 +1300,10 @@ test('stale saved correction replaces the approval with a fresh preview and requ
   } finally { h.unmount(); }
 });
 
-test('ordinary acknowledgement after a summary or completed operation stays chat; pending approval still accepts it', async () => {
+test('ordinary acknowledgement after a summary or completed operation stays chat; pending approvals require an explicit decision', async () => {
   const approval = { id: uuid(961), summary: '将新增 1 条便利贴', count: 1, expires_at: null };
   for (const status of ['none', 'succeeded', 'cancelled', 'pending']) {
     const h = await ready({ post: async (url, body) => {
-      if (status === 'pending') {
-        assert.equal(url, `/api/assistant/actions/${approval.id}`);
-        assert.equal(body.decision, 'approve');
-        return response({ id: approval.id, status: 'succeeded', text: '已创建便利贴。' });
-      }
       assert.equal(url, '/api/assistant/tasks');
       assert.equal(body.message, '好的');
       return response(chat('好的，有需要随时告诉我。'));
@@ -1321,8 +1316,8 @@ test('ordinary acknowledgement after a summary or completed operation stays chat
       writeComposer(h, '好的'); h.click('发送'); await h.flush();
       assert.equal(h.calls.filter(call => call.body).length, 1);
       assert.equal(h.text.includes('当前没有待批准的操作'), false);
-      assert.ok(h.text.includes(status === 'pending' ? '已创建便利贴' : '有需要随时告诉我'));
-      assert.equal(h.calls.filter(call => call.url.startsWith('/api/assistant/actions/')).length, status === 'pending' ? 1 : 0);
+      assert.ok(h.text.includes('有需要随时告诉我'));
+      assert.equal(h.calls.filter(call => call.url.startsWith('/api/assistant/actions/')).length, 0);
     } finally { h.unmount(); }
   }
 });
@@ -1530,7 +1525,7 @@ test('multiple pending approvals survive new requests and cancelling one card pr
     writeComposer(h,'帮我记下买鸡蛋');h.click('发送');await h.flush();
     h.restore(h.value);
     assert.equal(h.value.messages.filter(m=>m.approval).length,2);
-    for(const decision of ['好的','确认执行','取消','核对执行状态']) {
+    for(const decision of ['确认执行','取消','核对执行状态']) {
       writeComposer(h,decision);h.click('发送');await h.flush();
       assert.equal(h.calls.filter(c=>c.url.startsWith('/api/assistant/actions/')).length,0);
       assert.equal(h.value.messages.filter(m=>m.approval).length,2);
@@ -1811,7 +1806,7 @@ test('correcting a pending gift replaces the old card, revokes only that approva
   const secondApproval={id:uuid(1202),summary:'准备记录300',count:1,expires_at:null,preview:preview(30000)};
   const cancel=deferred();
   const h=await ready({post:async(url,body)=>{
-    if(url==='/api/assistant/tasks')return response({action:'event',reply:'准备更正',drafts:[],query:null,event_context:{status:'pending',event_id:null,input:gift(30000)},approval:secondApproval});
+    if(url==='/api/assistant/tasks')return response({action:'event',reply:'准备更正',replaces_output_id:uuid(1200),drafts:[],query:null,event_context:{status:'pending',event_id:null,input:gift(30000)},approval:secondApproval});
     assert.equal(url,`/api/assistant/actions/${firstApproval.id}`);assert.equal(body.decision,'cancel');return cancel.promise;
   }});
   try {
@@ -1838,7 +1833,7 @@ test('an already-submitted old proposal blocks and cancels the replacement inste
   const preview={title:'送礼更正',metrics:[],sections:[],notices:[]};
   const old={id:uuid(1301),summary:'old',count:1,expires_at:null,preview},fresh={...old,id:uuid(1302),summary:'new'};
   const h=await ready({post:async(url,body)=>{
-    if(url==='/api/assistant/tasks')return response({action:'event',reply:'更正',drafts:[],query:null,approval:fresh,event_context:{status:'pending',event_id:null,input:input(30000)}});
+    if(url==='/api/assistant/tasks')return response({action:'event',reply:'更正',replaces_output_id:uuid(1300),drafts:[],query:null,approval:fresh,event_context:{status:'pending',event_id:null,input:input(30000)}});
     assert.equal(body.decision,'cancel');
     return response(url.endsWith(old.id)?{id:old.id,status:'succeeded',completed:1,text:'原方案已提交',event_context:{status:'saved',event_id:uuid(1399),input:input(20000)}}:{id:fresh.id,status:'cancelled',text:'新方案已取消'});
   }});
@@ -1851,4 +1846,30 @@ test('an already-submitted old proposal blocks and cancels the replacement inste
     assert.deepEqual(h.calls.filter(c=>c.body?.decision==='cancel').map(c=>c.url.split('/').at(-1)),[old.id,fresh.id]);
     assert.equal(h.calls.filter(c=>c.body?.decision==='approve').length,0);
   } finally {h.unmount();}
+});
+
+test('53 pending rows survive page persistence and confirmation retry without dropping a row', async () => {
+  const storage=memoryStorage(), taskStore=new Map(); let attempts=0;
+  const drafts=Array.from({length:53},(_,i)=>({...row(2000+i,(i+1)*100+1,member.id),amount:((i+1)+0.01).toFixed(2)}));
+  const options={realDraft:true,storage,taskStore,post:async (url,body)=>{
+    assert.equal(url,'/api/assistant/confirm');assert.equal(body.drafts.length,53);
+    if(++attempts===1) throw new Error('lost acknowledgement');
+    return response({count:53,replayed:true});
+  }};
+  const h=await ready(options);
+  try {
+    h.restore({messages:[draftGroup(2100,drafts)],input:''});await settleDraft(h);
+    assert.ok(h.text.includes('确认 53 笔'));assert.equal(visibleDraftNames(h).length,53);
+    assert.equal(savedConversation(storage).messages[0].drafts.length,53);
+  } finally {h.unmount();}
+  const refreshed=await ready(options);
+  try {
+    await settleDraft(refreshed);assert.equal(refreshed.value.messages[0].drafts.length,53);assert.ok(refreshed.text.includes('确认 53 笔'));
+    assert.equal(refreshed.calls.filter(c=>c.url==='/api/assistant/confirm').length,0,'restoring a group never confirms it');
+    clickTextButton(refreshed,'确认 53 笔');await settleDraft(refreshed);
+    const first=refreshed.calls.find(c=>c.url==='/api/assistant/confirm').body;assert.equal(first.drafts.length,53);
+    clickTextButton(refreshed,'重试确认');await settleDraft(refreshed);
+    const calls=refreshed.calls.filter(c=>c.url==='/api/assistant/confirm');assert.equal(calls.length,2);assert.deepEqual(calls[1].body,first);
+    assert.equal(refreshed.value.messages[0].status,'saved');assert.equal(refreshed.value.messages[0].drafts.length,53);
+  } finally {refreshed.unmount();}
 });

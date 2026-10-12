@@ -14,7 +14,7 @@ function runtime(file = 'lib/assistant-agent-runtime.ts') {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText, { exports, structuredClone, AbortSignal, Date, Error, JSON,
-    require: name => { if (name === 'node:crypto') return crypto; if (name === '@/lib/assistant-execution') return contract(name); if (name === '@/lib/assistant-workflow') return runtime('lib/assistant-workflow.ts'); if (name === '@/lib/ledger-event') return contract(name); if (name === '@/lib/assistant-event-clarification') return runtime('lib/assistant-event-clarification.ts'); if (name === '@/lib/assistant-agent-step') return runtime('lib/assistant-agent-step.ts'); throw new Error(`Unexpected runtime dependency: ${name}`); } });
+    require: name => { if (name === 'node:crypto') return crypto; if (name === '@/lib/assistant-execution' || name === '@/lib/assistant-batch-control') return contract(name); if (name === '@/lib/assistant-workflow') return runtime('lib/assistant-workflow.ts'); if (name === '@/lib/ledger-event') return contract(name); if (name === '@/lib/assistant-event-clarification') return runtime('lib/assistant-event-clarification.ts'); if (name === '@/lib/assistant-agent-step') return runtime('lib/assistant-agent-step.ts'); throw new Error(`Unexpected runtime dependency: ${name}`); } });
   return exports;
 }
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -133,7 +133,7 @@ test('scripted evaluation: replaying a completed preview is suppressed despite r
   const next = fixture([step('read', 'records', command({ resource: 'notes' })), step('preview', 'command', { ...base, values_json: '{"content":"买牛奶","title":"采购"}' })]);
   const result = await next.run({ checkpoint: first.checkpoints.at(-1), approvalOutcome: { id: approval.id, status: 'succeeded', text: '已完成：新增 1 条便利贴。' } });
   assert.equal(next.calls.filter(call => call.value.operation === 'create').length, 0);
-  assert.match(result.reply, /不会重复生成/);
+  assert.match(result.reply, /已完成：新增 1 条便利贴/);
 });
 
 test('scripted evaluation: endless reads terminate and cumulative step count survives checkpoint reload', async () => {

@@ -19,13 +19,15 @@ function load(file, deps = {}) {
 }
 const state = load('lib/assistant-agent-state.ts');
 const plain = value => JSON.parse(JSON.stringify(value));
-test('restoring an older confirmed group repairs omitted agenda coverage without replaying rows', () => {
+test('restoration settles explicit server coverage and never infers old coverage from row wording', () => {
   const original=checkpoint();
   original.pending_approval=null;
   original.operations=[{id:'breakfast',label:'早餐',action:'record',effect:'write',depends_on:[],sources:['早餐3.9'],status:'completed',receipt_id:actionId},
     {id:'metro',label:'地铁',action:'record',effect:'write',depends_on:[],sources:['地铁2.96'],status:'pending'}];
   original.outputs=[{id:actionId,user_message_id:id(4),input:{message:'早餐3.9 地铁2.96',display_text:'早餐3.9 地铁2.96',display_images:[]},attempt:1,
     plan:{action:'record',reply:'请核对',drafts:[{description:'早餐',amount_cents:390},{description:'地铁',amount_cents:296}]},receipt:{id:actionId,status:'succeeded'}}];
+  assert.equal(state.restoreAssistantAgentCheckpoint(original).operations[1].status,'pending');
+  original.outputs[0].operation_ids=['breakfast','metro'];
   const restored=state.restoreAssistantAgentCheckpoint(original);
   assert.equal(restored.operations[1].status,'completed');
   assert.equal(restored.operations[1].receipt_id,actionId);
@@ -261,27 +263,30 @@ if(PGlite)test('SQL confirmed draft edits are restored from the submitted server
 });
 
 
-test('legacy technical limits recover as interruptions without converting business questions', () => {
- const c=checkpoint();c.status='needs_input';c.pending_approval=null;c.pending_approvals=[];c.awaiting_answer=true;c.output_id=id(8);
- c.operations=[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'running'}];
- c.outputs=[{id:id(8),user_message_id:id(4),input:{message:'送礼',display_text:'送礼',display_images:[]},attempt:1,plan:{action:'chat',drafts:[],reply:'本次已达到步骤上限，账本更改尚需确认。请缩小范围或补充具体目标。'}}];
- const restored=state.restoreAssistantAgentCheckpoint(c);assert.equal(restored.status,'interrupted');assert.equal(restored.awaiting_answer,false);assert.equal(restored.operations[0].status,'pending');
- assert.equal(c.status,'needs_input');assert.equal(c.awaiting_answer,true);
- c.operations[0].status='needs_input';c.outputs[0].plan.reply='鞋子是实际购买还是估值？';
- const question=state.restoreAssistantAgentCheckpoint(c);assert.equal(question.status,'needs_input');assert.equal(question.awaiting_answer,true);
+test('checkpoint restoration preserves stored state independently of reply wording', () => {
+  const c = checkpoint(); c.status = 'needs_input'; c.pending_approval = null; c.pending_approvals = []; c.awaiting_answer = true;
+  c.operations = [{ id: 'gift', label: '送礼', action: 'event', effect: 'write', depends_on: [], status: 'needs_input' }];
+  for (const reply of ['本次已达到步骤上限，', '操作完成', '需要选成员']) {
+    c.pending_plan = { action: 'chat', reply, drafts: [] };
+    const restored = state.restoreAssistantAgentCheckpoint(c);
+    assert.equal(restored.status, 'needs_input');
+    assert.equal(restored.awaiting_answer, true);
+    assert.equal(restored.operations[0].status, 'needs_input');
+  }
 });
 
 
-test('old event choice answers recover as scoped conditions and repeated duplicate questions become resumable', () => {
- const c=checkpoint();c.status='needs_input';c.pending_approval=null;c.pending_approvals=[];c.current_operation_id='gift';c.output_id=id(5);c.awaiting_answer=true;
- const input={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:false};
- c.operations=[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'needs_input'}];
- c.tool_results=[{call_id:'tool',name:'event_preview',operation_id:'gift',result:{event_context:{input}}}];
- const source={id:id(3),user_message_id:id(4),input:{message:'送礼',display_text:'送礼',display_images:[]},attempt:1,plan:{action:'event',reply:'请核对是不是已经记过',drafts:[],event_context:{input},event_choices:[{label:'这是另外新发生的一笔，继续核对',input:{...input,allow_duplicate:true}}]}};
- const answer={id:id(5),user_message_id:id(6),input:{message:'新发生的一笔',display_text:'新发生的一笔',display_images:[]},attempt:2,plan:{action:'chat',reply:'这笔是新发生的还是同一笔？',drafts:[]}};
- c.outputs=[source,answer];c.continuations=[{message_id:id(6),output_id:source.id,kind:'answer',hash:'abc'}];
- const restored=state.restoreAssistantAgentCheckpoint(c);assert.equal(restored.status,'interrupted');assert.equal(restored.awaiting_answer,false);assert.equal(restored.event_resolutions[0].input.allow_duplicate,true);assert.equal(restored.event_resolutions[0].operation_id,'gift');assert.equal(restored.operations[0].status,'pending');assert.equal(c.status,'needs_input');
- for(const text of ['好的','是的','不是新发生的一笔','可能新发生的一笔','这是同一笔']) {c.outputs[1].input.message=text;const ambiguous=state.restoreAssistantAgentCheckpoint(c);assert.equal(ambiguous.status,'needs_input');assert.equal(ambiguous.event_resolutions,undefined);}
- c.outputs[1].input.message='新发生的一笔';c.outputs[1].plan.reply='这笔新发生的送礼支出属于哪个成员？';const memberQuestion=state.restoreAssistantAgentCheckpoint(c);assert.equal(memberQuestion.status,'needs_input');assert.equal(memberQuestion.event_resolutions[0].pending,false);
- c.tool_results[0].operation_id='other';assert.equal(state.restoreAssistantAgentCheckpoint(c).event_resolutions,undefined);
+test('event choice selection requires an offered structured choice instead of interpreting similar text', () => {
+  const clarification = load('lib/assistant-event-clarification.ts');
+  const c = checkpoint(); c.pending_approval = null;
+  const input = { operation: 'create', kind: 'gift_given', counterparty: '小美', amount_cents: 50000, date: '2026-10-10', allow_duplicate: false };
+  c.operations = [{ id: 'gift', label: '送礼', action: 'event', effect: 'write', depends_on: [], status: 'needs_input' }];
+  c.tool_results = [{ call_id: 'tool', name: 'event_preview', operation_id: 'gift', result: { event_context: { input } } }];
+  const choice = { label: '这是另外新发生的一笔，继续核对', input: { ...input, allow_duplicate: true } };
+  c.outputs = [{ id: id(3), user_message_id: id(4), input: { message: '送礼', display_text: '送礼', display_images: [] }, attempt: 1,
+    plan: { action: 'event', reply: '任意问题措辞', drafts: [], event_context: { input }, event_choices: [choice] } }];
+  for (const answer of ['好的', '新发生的一笔', '不是同一笔']) assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', answer), undefined);
+  assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', choice.label).input.allow_duplicate, true);
+  assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', '', choice.input).source_output_id, id(3));
+  assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', '', { ...choice.input, amount_cents: 60000 }), undefined);
 });

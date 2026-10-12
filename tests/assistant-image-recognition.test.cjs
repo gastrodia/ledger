@@ -111,15 +111,14 @@ test('reference snapshots do not change when caller option arrays change during 
   assert.equal(expanded.drafts[0].member_id, members[0].id);
 });
 
-test('unassigned members stay unassigned and type-incompatible categories still need review', () => {
+test('unassigned members stay absent while incompatible category references fail explicitly', () => {
   const request = build();
-  const result = finalPlan(request, plan([{ ...row, category: 2 }]));
+  assert.throws(() => finalPlan(request, plan([{ ...row, category: 2 }])), /分类不存在或收支类型不匹配/);
+  const result = finalPlan(request, plan([{ ...row, category: null }]));
   assert.equal(result.plan.drafts[0].member_id, null);
   assert.equal(result.plan.drafts[0].category_id, null);
   assert.match(result.plan.drafts[0].note, /请选择家庭成员/);
   assert.match(result.plan.drafts[0].note, /请选择分类/);
-  assert.equal(result.plan.action, 'record');
-  assert.match(result.plan.reply, /确认/);
 });
 
 test('missing commentary and malformed provenance preserve complete rows without enabling a false merge', async () => {
@@ -174,7 +173,7 @@ test('expansion keeps one-cent payments and delegates zero omission and adjacent
   assert.equal(zeros.plan.drafts.length, 0);
 });
 
-test('all visible rows reach overlap processing before the unique draft limit and are never silently truncated', async () => {
+test('all visible rows reach overlap processing without a unique draft limit and are never silently truncated', async () => {
   const request = build({ images: Array(5).fill(image) });
   const drafts = Array.from({ length: 5 }, (_, imageIndex) => Array.from({ length: 20 }, (_, rowIndex) => ({
     ...row, description: `交易${rowIndex}`, source: source(imageIndex + 1, rowIndex + 1),
@@ -187,8 +186,8 @@ test('all visible rows reach overlap processing before the unique draft limit an
   const tooMany = plan([...drafts.slice(0, 20), { ...row, description: '新的独立交易', source: source(2, 1) }]);
   const expanded = request.expandOutput(tooMany);
   assert.equal(expanded.drafts.length, 21);
-  assert.throws(() => finalPlan(request, tooMany, 5), /最多识别20笔/);
-  assert.equal((await request.schema.validate(plan([...drafts, row]))).success, false);
+  assert.equal(finalPlan(request, tooMany, 5).plan.drafts.length, 21);
+  assert.equal((await request.schema.validate(plan([...drafts, row]))).success, true);
 });
 
 test('the image workflow only accepts record or empty chat and cannot smuggle other commands', async () => {

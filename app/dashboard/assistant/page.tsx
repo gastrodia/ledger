@@ -511,10 +511,10 @@ export default function AssistantPage() {
     }
   }
 
-  async function deliverAgentCheckpoint(task: AssistantTask) {
+  async function deliverAgentCheckpoint(task: AssistantTask, delivered?: Message) {
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
-    const output = messagesRef.current.find(message => message.id === agent?.output_id);
-    if (!agent?.awaiting_delivery || !agent.output_id || !output?.taskApplied || output.error || output.undoChoice || output.clearChoice || output.confirmChoice || output.memberChoice) return;
+    const output = delivered || messagesRef.current.find(message => message.id === agent?.output_id);
+    if (!agent?.awaiting_delivery || !agent.output_id || !output?.taskApplied || !output.delivery || output.delivery.status === "waiting" || output.undoChoice || output.clearChoice || output.confirmChoice || output.memberChoice) return;
     const key = `delivery:${task.id}:${task.attempt}:${agent.output_id}`;
     if (resumingAgents.current.has(key)) return;
     resumingAgents.current.add(key);
@@ -523,7 +523,7 @@ export default function AssistantPage() {
     const latest = [...messagesRef.current].reverse().find(message => message.drafts?.length);
     const batchRows = latest?.drafts?.filter(row => !row.ignored && !row.softRemoved).map(({ amount, ...row }) => ({ ...row, amount_cents: Math.round(Number(amount) * 100) })) || [];
     try {
-      const ok = !output.error && !/状态已变化|本次未|未修改|未删除|无法|失败/.test(output.text);
+      const ok = output.delivery.status === "succeeded";
       const request: AssistantTaskRequest = { id: task.id, conversation_id: task.conversation_id, user_message_id: task.user_message_id,
         message: "继续原任务", display_text: "继续原任务", today: localCalendarDate(),
         continuation: { attempt: task.attempt, output_id: agent.output_id, kind: "delivery", ok },
@@ -600,7 +600,7 @@ export default function AssistantPage() {
     if (message.undoChoice) {
       const target = messages.find(m => m.id === message.undoChoice!.batch_id);
       const saved = await undoSaved(target, message.undoChoice.draft_ids);
-      patchMessage(message.id, { undoChoice: undefined, replyKind: "result", text: saved ? "已撤销入账，并恢复为待确认草稿。" : "请查看原账单卡片核对撤销结果。" }); return;
+      patchMessage(message.id, { undoChoice: undefined, delivery: { action: "undo", status: saved ? "succeeded" : "failed" }, replyKind: "result", text: saved ? "已撤销入账，并恢复为待确认草稿。" : "请查看原账单卡片核对撤销结果。" }); return;
     }
     if (message.confirmChoice) {
       const choice = message.confirmChoice;
@@ -711,9 +711,12 @@ export default function AssistantPage() {
         ...(eventSelection ? { event_selection: eventSelection } : {}),
         ...([...messages].reverse().find(m => m.eventContext)?.eventContext ? { event_context: [...messages].reverse().find(m => m.eventContext)!.eventContext } : {}),
         record_contexts: messages.flatMap(m => [...(m.taskHistory || []).flatMap(output => output.ledgerContext ? [output.ledgerContext] : []), ...(m.ledgerContext ? [m.ledgerContext] : [])]).slice(-3),
+        card_contexts: messages.filter(message => message.role === "assistant" && !assistantCardTarget(message)
+          && (message.approval || message.eventChoices?.length || message.replyView || message.ledgerContext)).slice(-10)
+          .map(message => ({ id: message.id, summary: (message.approval?.summary || message.text).slice(0, 4000) })),
         history: messages.filter(m => !m.incomplete && !assistantCardTarget(m)).slice(-8).map(m => ({ role: m.role, content: m.drafts
           ? `${m.text.slice(0, 500)}\n卡片当前状态：${m.status === "saved" ? "已保存" : m.status === "deleted" ? "已删除，未入账" : m.status === "conflict" ? "保存冲突待核对" : "待确认"}。以下是用户核对编辑后的账单，以此为准，不要重复生成：\n${JSON.stringify(sortedAssistantDrafts(m.drafts, m.draftSort).map(d => ({ type: d.type, amount_cents: Math.round(Number(d.amount) * 100), date: d.transaction_date, description: d.description.slice(0, 40), excluded_from_posting: !!d.softRemoved })))}`.slice(0, 4000)
-          : m.text.slice(0, 4000) })) };
+          : [m.text, m.analysis ? `分析说明（仅供参考，不是执行凭据）：${m.analysis}` : ""].filter(Boolean).join("\n").slice(0, 4000) })) };
       const nextMessages = [...messages.map(message => ({ ...message, memberChoice: undefined, eventChoices: undefined })), userMessage];
       // Persist stable identifiers and the original upload before dispatch. The
       // outbox is dropped only after the server has acknowledged this exact ID.
@@ -1243,7 +1246,7 @@ export default function AssistantPage() {
               records: (output.savedDrafts || output.drafts).map(draft => ({ title: draft.description || "未填写用途", amount: `¥${(draft.amount_cents / 100).toFixed(2)}`, subtitle: `${draft.transaction_date} · ${draft.type === "income" ? "收入" : "支出"}` })) }
               : output.ledgerContext ? recordReplyView(output.ledgerContext.resource, output.ledgerContext.rows, undefined, members, categories) : undefined);
             return <div key={`${output.attempt}:${output.actionResult?.id || output.approval?.id || "reply"}`}>{preview ? <AssistantActionCard preview={preview} status={output.actionResult?.status || "executing"} resultText={output.actionResult?.text.split("\n")[0]} />
-              : view ? <AssistantReplyCard preview={view} /> : <p className="text-[13px] leading-6 text-muted-foreground whitespace-pre-wrap wrap-anywhere">{withoutApprovalExpiry(output.text)}</p>}
+              : view ? <AssistantReplyCard preview={view}>{output.analysis && <details><summary className="cursor-pointer text-xs text-primary">查看分析说明</summary><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{output.analysis}</ReactMarkdown></details>}</AssistantReplyCard> : <p className="text-[13px] leading-6 text-muted-foreground whitespace-pre-wrap wrap-anywhere">{withoutApprovalExpiry(output.text)}</p>}
               {output.exportFile && <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => downloadExport({ ...message, exportFile: output.exportFile })}>下载 {output.exportFile.name}</Button>}
             </div>;
           })}</div>}
@@ -1256,6 +1259,10 @@ export default function AssistantPage() {
             <AssistantReplyNotice tone={message.incomplete === "stopped" ? "info" : "error"}>{message.error || (message.incomplete === "stopped" ? "已停止生成" : "上次处理未完成")}</AssistantReplyNotice>
             {message.image_progress && (message.taskStatus === "failed" || message.taskStatus === "cancelled") && <span>{assistantImageProgressText(message.image_progress, message.taskStatus)}</span>}
             <Button type="button" variant="ghost" className={cn(buttonClass, "text-xs text-primary underline")} disabled={requestBusy || savingId !== null || draft.hasDraft || draftChecking} onClick={() => void retryTask(message)}>{assistantTaskRetryLabel(message)}</Button>
+          </div>}
+          {message.analysis && !replyView?.analysis && <div className="mt-3 text-[13px] leading-6 text-muted-foreground" aria-label="分析说明">
+            <p className="mb-1 text-xs">分析说明</p>
+            <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.analysis}</ReactMarkdown>
           </div>}
           {eventMembers && memberEvent && <AssistantMemberPicker heading={<p className="mb-3 flex items-baseline gap-2 text-[13px]"><span className="min-w-0 wrap-anywhere">{memberEvent.kind ? eventKinds[memberEvent.kind] : "这笔账"}{memberEvent.counterparty ? ` · ${memberEvent.counterparty}` : ""}</span><strong className="ml-auto whitespace-nowrap text-[16px]">¥{eventCashflowCents(memberEvent) === null ? "—" : money(eventCashflowCents(memberEvent)!)}</strong><span className="shrink-0 text-[11px] text-muted-foreground">{memberEvent.kind && eventType(memberEvent.kind) === "income" ? "收入" : "支出"}</span></p>}
             members={members} disabled={composerDisabled} loading={isInitializing} loadError={!!loadError} onReload={reloadSetup}
@@ -1282,10 +1289,15 @@ export default function AssistantPage() {
               if (busy || saveLock.current || sendLock.current) return;
               setMessages(current => resolveAssistantDraftMatch(current, message.id, draftId, decision));
             }} /> : replyView && <AssistantReplyCard preview={replyView} footer={(message.navigateTo || message.exportFile) ? <>
-            {message.navigateTo && <Link href={message.navigateTo} className="inline-flex min-h-9 items-center rounded-xl border border-border px-3 text-sm text-primary hover:bg-muted">打开对应页面</Link>}
+            {message.navigateTo && <Link href={message.navigateTo} onClick={() => {
+              const delivery = { action: "navigate" as const, status: "succeeded" as const };
+              patchMessage(message.id, { delivery });
+              const task = knownTasks.current.find(task => task.id === message.taskId);
+              if (task) void deliverAgentCheckpoint(task, { ...message, delivery });
+            }} className="inline-flex min-h-9 items-center rounded-xl border border-border px-3 text-sm text-primary hover:bg-muted">打开对应页面</Link>}
             {message.exportFile && <Button type="button" variant="outline" size="sm" className="max-w-full whitespace-normal wrap-anywhere" onClick={() => downloadExport(message)}>下载 {message.exportFile.name}</Button>}
           </> : undefined}>
-            {replyView.analysis && <details className="border-t border-border pt-3"><summary className="cursor-pointer text-xs text-primary">查看分析说明</summary><div className={`${bubbleClass} mt-3 text-foreground`}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div></details>}
+            {replyView.analysis && <details className="border-t border-border pt-3"><summary className="cursor-pointer text-xs text-primary">查看分析说明</summary><div className={`${bubbleClass} mt-3 text-foreground`}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.analysis || message.text}</ReactMarkdown></div></details>}
           </AssistantReplyCard>}
           {message.importSummary && <div className="w-[520px] max-w-full" aria-label="截图合并结果"><AssistantReplyCard preview={{ title: "截图识别结果", metrics: [
             { label: "已识别截图", value: `${message.importSummary.image_count} 张` }, { label: "待核对账目", value: `${message.importSummary.retained_count} 笔`, primary: true },

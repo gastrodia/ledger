@@ -90,8 +90,9 @@ test('SQL: a linked gift receipt verifies both independent cash amounts and refu
   const server = f.load('lib/assistant-command-server.ts');
   const events = f.load('lib/ledger-event-server.ts');
   await f.db.query('INSERT INTO members(id,user_id,name) VALUES($1,$2,$3)', [id(7), 'owner', '我']);
+  await f.db.query("INSERT INTO categories(id,user_id,name,type) VALUES($1,'owner','送礼','expense')", [id(9)]);
   const input = { operation: 'create', kind: 'gift_given', counterparty: '大伯', amount_cents: 50000, date: '2026-10-09', cashflow: 'new',
-    member_id: id(7), transaction_amount_cents: 60000, payment_recipient: '妈', items: [{ item_name: '泡子', quantity: 1, unit: '封', estimated_value: 50 }] };
+    member_id: id(7), category_id: id(9), transaction_amount_cents: 60000, payment_recipient: '妈', items: [{ item_name: '泡子', quantity: 1, unit: '封', estimated_value: 50 }] };
   const preview = await server.prepareAssistantAgentPreview('owner', id(2), id(1), fingerprint, new AbortController().signal,
     () => events.prepareLedgerEvent('owner', id(2), input));
   await attachTask(f, preview.approval.id);

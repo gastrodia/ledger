@@ -27,7 +27,7 @@ export function syncSavedTransactionCards(messages: AssistantConversationMessage
   });
 }
 export type AssistantConversationMessage = {
-  id: string; role: "user" | "assistant"; text: string; drafts?: EditableAssistantDraft[];
+  id: string; role: "user" | "assistant"; text: string; analysis?: string; drafts?: EditableAssistantDraft[];
   status?: "pending" | "saved" | "ignored" | "deleted" | "conflict" | "undone"; commit?: AssistantDraft[]; error?: string;
   savedDrafts?: AssistantDraft[];
   memberFlow?: boolean;
@@ -68,6 +68,8 @@ export type AssistantConversationMessage = {
   process?: AssistantProcess;
   /** Remains set after editing/deleting/moving drafts so recovery cannot replay them. */
   taskApplied?: boolean;
+  /** Recorded by the page operation itself; never derived from reply text. */
+  delivery?: { action: "edit" | "update" | "remove" | "navigate" | "undo"; status: "succeeded" | "failed" | "waiting" };
   agent?: NonNullable<AssistantPlan["agent"]>;
   /** Earlier checkpoint outputs remain visible when this stable reply advances. */
   taskHistory?: AssistantTaskOutput[];
@@ -105,7 +107,7 @@ export function completeAssistantMemberSelection(messages: AssistantConversation
     : message.memberChoice?.batch_id === messageId ? { ...message, memberChoice: undefined } : message), review];
 }
 
-export type AssistantTaskOutput = Pick<AssistantConversationMessage, "text" | "replyView" | "ledgerContext" | "exportFile" | "actionPreview" | "actionResult" | "approval" | "eventContext" | "drafts" | "savedDrafts" | "status"> & { attempt: number };
+export type AssistantTaskOutput = Pick<AssistantConversationMessage, "text" | "analysis" | "replyView" | "ledgerContext" | "exportFile" | "actionPreview" | "actionResult" | "approval" | "eventContext" | "drafts" | "savedDrafts" | "status"> & { attempt: number };
 
 export function restoreAssistantAgent(value: unknown): NonNullable<AssistantPlan["agent"]> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
@@ -180,8 +182,8 @@ function checkpointHistory(message: AssistantConversationMessage): AssistantTask
   const previous = message.taskHistory || [];
   const actionId = message.actionResult?.id || message.approval?.id;
   if (previous.some(output => output.attempt === message.taskAttempt && (output.actionResult?.id || output.approval?.id) === actionId)) return previous;
-  const { text, replyView, ledgerContext, exportFile, actionPreview, actionResult, approval, eventContext, drafts, savedDrafts, status } = message;
-  return [...previous, { attempt: message.taskAttempt || 1, text, replyView, ledgerContext, exportFile, actionPreview, actionResult, drafts, savedDrafts, status,
+  const { text, analysis, replyView, ledgerContext, exportFile, actionPreview, actionResult, approval, eventContext, drafts, savedDrafts, status } = message;
+  return [...previous, { attempt: message.taskAttempt || 1, text, analysis, replyView, ledgerContext, exportFile, actionPreview, actionResult, drafts, savedDrafts, status,
     // Pending approvals stay on the current checkpoint only. History is read-only.
     ...(actionResult ? {} : approval ? { approval } : {}), eventContext }].slice(-20);
 }
@@ -209,7 +211,7 @@ export function assistantTaskRetryLabel(message: Pick<AssistantConversationMessa
 
 export function assistantMemberChoiceTarget(choice: AssistantDraftMemberChoice | undefined, messages: AssistantConversationMessage[]) {
   if (!choice || choice.member_id !== null || !UUID_PATTERN.test(choice.batch_id)
-    || !Array.isArray(choice.draft_ids) || !choice.draft_ids.length || choice.draft_ids.length > 20
+    || !Array.isArray(choice.draft_ids) || !choice.draft_ids.length
     || new Set(choice.draft_ids).size !== choice.draft_ids.length || choice.draft_ids.some(id => typeof id !== "string" || !UUID_PATTERN.test(id))) return;
   const message = messages.find(m => m.id === choice.batch_id);
   if (!message || message.role !== "assistant" || message.status !== "pending" || message.commit || !message.drafts?.length) return;
@@ -382,7 +384,7 @@ export function mergeAssistantTasks(
       // A retry can emit its first real card under a new output ID. Retire the
       // earlier empty/error placeholder so it cannot keep showing a live spinner.
       const settled = next.filter(message => !(message.role === "assistant" && message.taskId === task.id
-        && message.id !== output && !historyIds.has(message.id) && !message.taskApplied
+        && message.id !== output && !historyIds.has(message.id) && !message.taskApplied && !!message.taskStatus
         && !message.drafts?.length && !message.approval && !message.actionResult && !message.eventContext
         && !message.memberChoice && !message.eventChoices?.length && !message.actionPreview && !message.replyView && !assistantHistoryQuestion(message)));
       if (settled.length !== next.length) next = settled;
@@ -507,7 +509,9 @@ function mergeAssistantTaskOutputs(
         && sameTaskValue(previousReply.image_progress || null, reply.image_progress || null)) continue;
     } else {
       const result = task.result;
-      reply = { ...reply, text: result.reply, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
+      reply = { ...reply, text: result.reply, updatesCardId: result.replaces_output_id, analysis: result.analysis, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
+      if (["edit", "update", "remove", "navigate", "undo"].includes(result.action))
+        reply.delivery = { action: result.action as NonNullable<AssistantConversationMessage["delivery"]>["action"], status: "failed" };
       if (result.action === "manage" || result.action === "event") {
         reply = { ...reply, ...(result.command ? { proposalScope: {resource:result.command.resource,operation:result.command.operation,ids:result.command.ids} } : {}), eventContext: result.event_context, eventChoices: result.event_choices, approval: result.approval, actionPreview: result.approval?.preview, exportFile: result.export_file, ledgerContext: result.record_context, replyView: result.record_context ? recordReplyView(result.record_context.resource, result.record_context.rows, result.command, members, categories) : result.reply_view };
       } else if (result.action === "edit") {
@@ -521,6 +525,7 @@ function mergeAssistantTaskOutputs(
             : message.memberChoice?.batch_id === target.id ? { ...message, memberChoice: undefined } : message);
           reply.text = `已修改 ${edit.edits.length} 笔待确认草稿，请核对卡片；尚未入账。`;
           updatedBatchId = target.id;
+          reply.delivery = { action: "edit", status: "succeeded" };
         } catch (error) { reply.text = error instanceof Error ? error.message : changed; }
       } else if (result.action === "confirm") {
         const target = next.find(message => message.id === result.confirm?.batch_id);
@@ -534,18 +539,18 @@ function mergeAssistantTaskOutputs(
       } else if (result.action === "navigate" && result.navigation) {
         const nav = result.navigation;
         if (nav.operation === "clear_chat") reply.clearChoice = true;
-        else if (nav.operation === "open") { reply.navigateTo = assistantPagePaths[nav.page]; reply.text = "已找到对应页面，可直接打开。"; }
+        else if (nav.operation === "open") { reply.delivery = { action: "navigate", status: "waiting" }; reply.navigateTo = assistantPagePaths[nav.page]; reply.text = "已找到对应页面，可直接打开。"; }
         else {
           const target = next.find(message => message.id === nav.batch_id && message.status === "pending" && !message.commit);
           if (!target || !nav.order) reply.text = changed;
-          else { reply.replyKind = "result"; next = next.map(message => message.id === target.id ? { ...message, draftSort: nav.order! } : message); reply.text = "已调整本组草稿的显示顺序。"; updatedBatchId = target.id; }
+          else { reply.replyKind = "result"; next = next.map(message => message.id === target.id ? { ...message, draftSort: nav.order! } : message); reply.text = "已调整本组草稿的显示顺序。"; reply.delivery = { action: "navigate", status: "succeeded" }; updatedBatchId = target.id; }
         }
       } else if (result.action === "undo") {
         const target = next.find(message => message.id === result.undo?.batch_id);
         try {
           const undo = validateAssistantUndo(result.undo, target?.status === "saved" && target.drafts?.length
             ? { batch_id: target.id, status: "saved", drafts: target.drafts } : null);
-          reply = { ...reply, text: `已找到要撤销的 ${undo.draft_ids.length} 笔入账，请核对后确认撤销。`, undoChoice: undo };
+          reply = { ...reply, text: `已找到要撤销的 ${undo.draft_ids.length} 笔入账，请核对后确认撤销。`, undoChoice: undo, delivery: { action: "undo", status: "waiting" } };
         } catch { reply.text = "原账单状态已变化，请在交易记录中核对撤销结果。"; }
       } else if (result.action === "remove") {
         const target = next.find(message => message.id === result.remove?.batch_id);
@@ -556,6 +561,7 @@ function mergeAssistantTaskOutputs(
           reply.replyKind = "result";
           reply.text = `已将 ${removal.draft_ids.length} 笔草稿标记为移除，暂不入账。可在账目卡片点击“恢复”；未改动已保存账本。`;
           updatedBatchId = target!.id;
+          reply.delivery = { action: "remove", status: "succeeded" };
         } catch { reply.text = "草稿状态已变化，本次未删除。请核对当前卡片后重试。"; }
       } else if (result.action === "update") {
         reply.replyKind = "result";
@@ -563,13 +569,15 @@ function mergeAssistantTaskOutputs(
         const target = next.find(message => message.id === update?.batch_id);
         if (!update || !target || target.status !== "pending" || target.commit || !target.drafts?.length) reply.text = changed;
         else if (update.member_id === null) {
-          if (assistantMemberChoiceTarget(update, next)) { reply.memberChoice = update; reply.replyKind = undefined; }
+          if (assistantMemberChoiceTarget(update, next)) { reply.memberChoice = update; reply.replyKind = undefined; reply.delivery = { action: "update", status: "waiting" }; }
           else reply.text = changed;
         } else {
           try {
             const drafts = applyDraftMemberUpdate(target.drafts, update, members);
             next = next.map(message => message.id === target.id ? { ...message, drafts, error: undefined } : message);
             updatedBatchId = target.id;
+            reply.delivery = { action: "update", status: "succeeded" };
+            reply.text = `已将 ${update.draft_ids.length} 笔草稿的成员改为「${members.find(member => member.id === update.member_id)!.name}」，尚未入账。`;
           } catch { reply.text = changed; }
         }
       } else if (result.drafts.length) {
@@ -600,7 +608,7 @@ function mergeAssistantTaskOutputs(
     }
     if (updatedBatchId) next = relocateAssistantDraftCard(next, updatedBatchId, task.id);
     if (advanced && previousReply) next = relocateAssistantCard(next,task.id,next.at(-1)!.id);
-    next = reconcileAssistantCardUpdate(next, task.id, currentUser.text, currentUser.updatesCardId);
+    next = reconcileAssistantCardUpdate(next, task.id, reply.updatesCardId || currentUser.updatesCardId);
   }
   return reconcileAssistantCardHistory(next);
 }

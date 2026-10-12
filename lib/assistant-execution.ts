@@ -5,6 +5,7 @@ export type AssistantExecutionStep = {
   id: string;
   label: string;
   kind: "tool" | "model" | "check";
+  model?: string;
   state: "running" | "done" | "failed";
   startedAt: number;
   finishedAt?: number;
@@ -13,6 +14,7 @@ export type AssistantExecutionStep = {
 
 const MAX_STEPS = 24;
 const validTime = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const modelName = (value: unknown): string | undefined => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,119}$/.test(value) ? value : undefined;
 
 /** Only bounded, explicit display fields are allowed into saved conversation history. */
 export function restoreAssistantExecution(value: unknown): AssistantExecutionStep[] {
@@ -26,6 +28,7 @@ export function restoreAssistantExecution(value: unknown): AssistantExecutionSte
       || step.details.some((detail: unknown) => typeof detail !== "string" || detail.length > 240)
       || (step.state !== "running" && (!validTime(step.finishedAt) || step.finishedAt < step.startedAt))) continue;
     result.push({ id: step.id, label: step.label, kind: step.kind, state: step.state, startedAt: step.startedAt,
+      ...(step.kind === "model" && modelName(step.model) ? { model: modelName(step.model) } : {}),
       ...(step.state !== "running" ? { finishedAt: step.finishedAt } : {}), details: [...step.details] });
   }
   return result;
@@ -37,8 +40,9 @@ export function createAssistantExecution(initial: unknown = []) {
   const details = (items: string[]) => items.slice(0, 8).map(item => item.slice(0, 240));
   return {
     snapshot: () => steps,
-    start(id: string, label: string, kind: AssistantExecutionStep["kind"], items: string[] = []) {
+    start(id: string, label: string, kind: AssistantExecutionStep["kind"], items: string[] = [], model?: string) {
       const step: AssistantExecutionStep = { id, label, kind, state: "running", startedAt: Date.now(), details: details(items) };
+      if (kind === "model" && modelName(model)) step.model = modelName(model);
       steps = steps.some(item => item.id === id) ? steps.map(item => item.id === id ? step : item) : [...steps, step].slice(-MAX_STEPS);
     },
     finish(id: string, items?: string[], state: "done" | "failed" = "done", label?: string) {

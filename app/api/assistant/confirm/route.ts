@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     const draftIds = body.drafts.map((draft: { id?: unknown }) => draft.id === undefined ? randomUUID() : draft.id);
     if (draftIds.some((id: unknown) => typeof id !== "string" || !UUID_PATTERN.test(id)) || new Set(draftIds).size !== draftIds.length) return NextResponse.json({ error: "草稿编号无效。" }, { status: 400 });
     const excluded = body.excluded_draft_ids ?? [];
-    if (!Array.isArray(excluded) || excluded.length > 20 || excluded.some((id: unknown) => typeof id !== "string" || !UUID_PATTERN.test(id) || draftIds.includes(id)) || new Set(excluded).size !== excluded.length) return NextResponse.json({ error: "排除的草稿编号无效。" }, { status: 400 });
+    if (!Array.isArray(excluded) || excluded.some((id: unknown) => typeof id !== "string" || !UUID_PATTERN.test(id) || draftIds.includes(id)) || new Set(excluded).size !== excluded.length) return NextResponse.json({ error: "排除的草稿编号无效。" }, { status: 400 });
     if (excluded.length || body.task_id !== undefined) {
       if (typeof body.task_id !== "string" || !UUID_PATTERN.test(body.task_id)) return NextResponse.json({ error: "草稿任务编号无效。" }, { status: 400 });
       const tasks = await sql.query("SELECT agent_checkpoint FROM assistant_tasks WHERE user_id=$1 AND id=$2", [session.userId, body.task_id]);

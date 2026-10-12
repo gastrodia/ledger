@@ -32,6 +32,7 @@ export const recordContextsSchema = z.array(z.object({
   resource: z.enum(Object.keys(resourceNames) as [LedgerResource, ...LedgerResource[]]),
   rows: z.array(z.record(z.string().max(64), z.unknown())).max(50),
 }).strict()).max(3).refine(value => JSON.stringify(value).length <= 50000, "查询上下文过长，请缩小查询范围");
+export const assistantCardContextsSchema = z.array(z.object({ id, summary: z.string().max(4000) }).strict()).max(10);
 export type AssistantApproval = { id: string; summary: string; expires_at: string | null; count: number; preview?: AssistantActionPreview };
 export type SavedTransactionUpdate = { batch_id: string; draft_id: string; transaction_id: string; type: "income" | "expense"; amount_cents: number; category_id: string | null; member_id: string | null; transaction_date: string; description: string };
 export type AssistantActionResult = { targets?: Array<{ resource: LedgerResource; operation: "create" | "update" | "delete" | "reorder" | "link" | "unlink"; ids: string[] }>; transaction_updates?: SavedTransactionUpdate[]; replacement_approval?: AssistantApproval; id: string; status: "pending" | "executing" | "succeeded" | "failed" | "cancelled" | "expired"; text: string; completed?: number; preview?: AssistantActionPreview; event_context?: LedgerEventContext };
@@ -93,16 +94,18 @@ export function validateCommandRow(resource: LedgerResource, row: Record<string,
   if (resource === "gifts_given" && !(Number(row.cash_amount) > 0) && !(Array.isArray(row.items) && row.items.length)) throw new Error("请补充礼金或礼品明细。");
 }
 export const fieldNames: Record<string, string> = { transaction_id: "关联的收支", type: "收支类型", amount: "金额", category_id: "分类", member_id: "成员", transaction_date: "日期", description: "用途", name: "名称", icon: "图标", avatar: "头像", direction: "借还方向", subject_type: "钱款或物品", counterparty_name: "对方", occurred_at: "发生日期", notes: "备注", repaid_at: "归还日期", repaid_amount: "归还金额", repaid_quantity: "归还数量", item_name: "物品名称", item_quantity: "物品数量", item_unit: "单位", gift_type: "礼金或礼品", gift_date: "礼金日期", quantity: "数量", unit: "单位", estimated_value: "估值", recipient_name: "收礼人", cash_amount: "礼金", items: "礼品明细", occasion: "事由", event_type: "活动类型", event_date: "活动日期", location: "地点", title: "标题", content: "内容", color: "颜色", pinned: "置顶", archived: "归档", attachment_key: "附件" };
+const approvalCommands = new Set(["确认执行", "执行吧", "可以执行", "确认入账", "确认删除", "确认修改", "确认撤销"]);
+const contextualApprovalCommands = new Set(["确认", "同意", "批准"]);
+const cancelCommands = new Set(["取消", "取消操作", "不执行", "不执行了", "不要执行", "算了", "不删了", "先不执行", "不确认"]);
+const statusCommands = new Set(["查询操作状态", "核对执行状态", "执行结果怎么样", "执行成功了吗", "刚才执行成功了吗", "执行到哪了", "刚才操作的结果"]);
 export function approvalDecision(input: string, hasPendingApproval = false): "approve" | "cancel" | null {
   const value = input.trim().replace(/[。！!\s]+$/g, "");
-  if (/^(确认执行|执行吧|可以执行|确认入账|确认删除|确认修改|确认撤销)$/.test(value)) return "approve";
-  // Short acknowledgements only grant approval when there is a reviewed operation.
-  if (hasPendingApproval && /^(确认|同意|批准|好的|是的)$/.test(value)) return "approve";
-  if (/^(取消|取消操作|不执行|不执行了|不要执行|算了|不删了|先不执行|不确认)$/.test(value)) return "cancel";
+  if (approvalCommands.has(value) || hasPendingApproval && contextualApprovalCommands.has(value)) return "approve";
+  if (cancelCommands.has(value)) return "cancel";
   return null;
 }
 export function isActionStatusRequest(input: string) {
-  return /^(查询操作状态|核对执行状态|执行结果怎么样|执行成功了吗|刚才执行成功了吗|执行到哪了|刚才操作的结果)$/.test(input.trim().replace(/[。？！?!\s]+$/g, ""));
+  return statusCommands.has(input.trim().replace(/[。？！?!\s]+$/g, ""));
 }
 export const ASSISTANT_COMMAND_PROMPT = `
 已入账卡片的更正：saved_batch.status=saved，绝不能再走edit草稿修改或重新record。用户紧接着说“记错了，花了22/改成昨天/应该是收入”等，若saved_batch只有一笔，可直接定位该笔；多笔时按描述或当前显示顺序定位，有歧义才询问。使用manage、transactions/update，command.ids填写saved_batch中所选draft的id，服务端会通过原入账映射定位真实记录；金额values_json用元。不要按相同描述搜索替代该映射，不用先撤销再重记。例：刚入账吃饭20元后说“记错了，花了22”，输出transactions/update、ids=[该笔id]、values_json={"amount":22}，其他未修改字段省略。只准备差异预览，明确确认后才修改。

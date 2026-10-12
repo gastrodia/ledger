@@ -35,7 +35,7 @@ test('draft approval shows the reviewed snapshot even when the live draft has ch
 test('draft comparison preserves date mismatches, distinguishes merchant evidence from related purposes, and hides identifiers',()=>{
   const base={draft_id:'draft-secret',description:'零食很忙',type:'expense',transaction_date:'2026-10-09',amount_cents:980,status:'possible_match',candidate_count:1,candidates_limited:false,
     candidates:[{id:'transaction-secret',member_id:'member-secret',category_id:'category-secret',description:'零食很忙',transaction_date:'2026-10-08',amount_cents:980,same_description:true,match_reason:"merchant",date_difference_days:-1}]};
-  const view=draftMatchesReplyView({date_window_days:7,rows:[base,{...base,description:'阿里云服务购买',amount_cents:3900,candidates:[{...base.candidates[0],description:'.top域名续费',amount_cents:3900,same_description:false,match_reason:"purpose"}]},{...base,status:'no_match',candidate_count:0,candidates:[]}]},[{id:'member-secret',name:'本人'}],[{id:'category-secret',name:'餐饮'}]);
+  const view=draftMatchesReplyView({date_window_days:7,rows:[base,{...base,description:'阿里云服务购买',amount_cents:3900,candidates:[{...base.candidates[0],description:'.top域名续费',amount_cents:3900,same_description:false,match_reason:"missing_description"}]},{...base,status:'no_match',candidate_count:0,candidates:[]}]},[{id:'member-secret',name:'本人'}],[{id:'category-secret',name:'餐饮'}]);
   assert.equal(view.metrics[0].label,'疑似重复');
   assert.equal(view.metrics[0].value,'1 笔');
   assert.equal(view.metrics[1].value,'1 笔');
@@ -43,8 +43,8 @@ test('draft comparison preserves date mismatches, distinguishes merchant evidenc
   assert.match(view.records[0].rows[0].value,/2026-10-08.*¥9.80.*本人.*餐饮/);
   assert.match(view.records[0].rows[0].value,/早 1 天/);
   assert.equal(view.records[0].badge.label,'疑似重复');
-  assert.equal(view.records[1].badge.label,'用途相关，待核对');
-  assert.match(view.records[1].rows[0].value,/用途相关/);
+  assert.equal(view.records[1].badge.label,'缺少用途，待核对');
+  assert.match(view.records[1].rows[0].value,/原账缺少用途/);
   assert.match(view.records[2].rows[0].value,/前后 7 天/);
   assert.doesNotMatch(JSON.stringify(view),/draft-secret|transaction-secret|member-secret|category-secret/);
 });

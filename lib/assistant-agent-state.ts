@@ -1,4 +1,3 @@
-import { recoverAssistantEventResolution, isDuplicateEventQuestion } from "@/lib/assistant-event-clarification";
 import { validateLedgerEvent } from "@/lib/ledger-event";
 import { validateWorkflow, reconcileRecordWorkflowReceipts } from "@/lib/assistant-workflow";
 import type { AssistantAgentCheckpoint, AssistantAgentMetadata } from "@/lib/assistant-agent-runtime";
@@ -21,9 +20,9 @@ export function restoreAssistantAgentCheckpoint(value: unknown): AssistantAgentC
     || !Array.isArray(value.preview_fingerprints) || value.preview_fingerprints.length > 100
     || value.preview_fingerprints.some(fingerprint => !text(fingerprint, 1024))
     || (value.pending_plan !== undefined && (!object(value.pending_plan) || !text(value.pending_plan.action, 30)
-      || !text(value.pending_plan.reply, 64_000) || !Array.isArray(value.pending_plan.drafts) || value.pending_plan.drafts.length > 20))
+      || !text(value.pending_plan.reply, 64_000) || !Array.isArray(value.pending_plan.drafts)))
     || (value.pending_batch !== undefined && (!object(value.pending_batch) || !text(value.pending_batch.batch_id, 36) || !UUID.test(value.pending_batch.batch_id)
-      || !Array.isArray(value.pending_batch.draft_ids) || !value.pending_batch.draft_ids.length || value.pending_batch.draft_ids.length > 20
+      || !Array.isArray(value.pending_batch.draft_ids) || !value.pending_batch.draft_ids.length
       || value.pending_batch.draft_ids.some(id => !text(id, 36) || !UUID.test(id)) || new Set(value.pending_batch.draft_ids).size !== value.pending_batch.draft_ids.length))
     || (value.pending_approval !== null && !approval(value.pending_approval))
     || (value.pending_approvals !== undefined && (!Array.isArray(value.pending_approvals)
@@ -43,32 +42,14 @@ export function restoreAssistantAgentCheckpoint(value: unknown): AssistantAgentC
     if (value.output_id !== undefined && (!text(value.output_id, 36) || !UUID.test(value.output_id))) return null;
     if (value.turn_message_id !== undefined && (!text(value.turn_message_id, 36) || !UUID.test(value.turn_message_id))) return null;
     if (value.awaiting_answer !== undefined && typeof value.awaiting_answer !== "boolean" || value.awaiting_delivery !== undefined && typeof value.awaiting_delivery !== "boolean") return null;
-    if (value.outputs !== undefined && (!Array.isArray(value.outputs) || value.outputs.length > 192 || value.outputs.some(item => !object(item) || !text(item.id, 36) || !UUID.test(item.id) || !text(item.user_message_id, 36) || !UUID.test(item.user_message_id) || !object(item.plan) || !object(item.input) || !text(item.input.message, 4000) || !text(item.input.display_text, 4000) || !Number.isSafeInteger(item.attempt)))) return null;
+    if (value.outputs !== undefined && (!Array.isArray(value.outputs) || value.outputs.length > 192 || value.outputs.some(item => !object(item) || !text(item.id, 36) || !UUID.test(item.id) || !text(item.user_message_id, 36) || !UUID.test(item.user_message_id) || !object(item.plan) || !object(item.input) || !text(item.input.message, 4000) || !text(item.input.display_text, 4000) || !Number.isSafeInteger(item.attempt)
+      || (item.operation_ids !== undefined && (!Array.isArray(item.operation_ids) || item.operation_ids.some(id => !Array.isArray(value.operations) || !value.operations.some(op => object(op) && op.id === id))))))) return null;
   } catch { return null; }
   // JSON round-trip breaks references to a caller's mutable runtime state.
   try {
-    const serialized = JSON.stringify(value); if (serialized.length > 500_000) return null;
+    const serialized = JSON.stringify(value); if (serialized.length > 8 * 1024 * 1024) return null;
     const checkpoint = JSON.parse(serialized) as AssistantAgentCheckpoint;
     if (checkpoint.operations && checkpoint.outputs) reconcileRecordWorkflowReceipts(checkpoint.operations, checkpoint.outputs);
-    // Older workers mislabeled a technical wave limit as a user question.
-    // Recover only the exact server fallback with no business question or preview.
-    const latest = checkpoint.outputs?.find(output => output.id === checkpoint.output_id);
-    if (checkpoint.status === "needs_input" && checkpoint.operations && !checkpoint.pending_approval && !checkpoint.pending_batch
-      && latest && /^(?:本次已达到步骤上限，|本次处理达到时间上限，)/.test(latest.plan.reply)
-      && !checkpoint.operations.some(item => item.status === "needs_input")) {
-      checkpoint.status = "interrupted"; checkpoint.awaiting_answer = false; checkpoint.awaiting_delivery = false;
-      delete checkpoint.pending_plan;
-      checkpoint.operations.forEach(item => { if (item.status === "running") item.status = "pending"; });
-      latest.plan.reply = "剩余事项的处理暂时中断。已完成事项和未完成清单已保留，可继续处理原任务。";
-    }
-    const recovered = recoverAssistantEventResolution(checkpoint);
-    if (recovered && checkpoint.status === "needs_input" && !checkpoint.pending_approval && !checkpoint.pending_batch
-      && latest?.plan.action === "chat" && isDuplicateEventQuestion(latest.plan.reply)) {
-      checkpoint.status = "interrupted"; checkpoint.awaiting_answer = false;
-      const operation = checkpoint.operations?.find(item => item.id === checkpoint.current_operation_id);
-      if (operation?.status === "needs_input") operation.status = "pending";
-      latest.plan.reply = "已收到你对新发生事项的确认，原任务可以继续核对。";
-    }
     return checkpoint;
   } catch { return null; }
 }
