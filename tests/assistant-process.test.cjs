@@ -122,3 +122,30 @@ test('execution reporter replaces states without modifying earlier snapshots and
   assert.equal(report.snapshot()[0].state, 'done');
   assert.equal(report.snapshot()[1].state, 'failed');
 });
+
+test('resolved model labels preserve their original timing and survive process restoration', () => {
+  const report = execution.createAssistantExecution();
+  report.start('agent_1', '理解请求', 'model');
+  report.finish('agent_1');
+  const before = report.snapshot()[0];
+  report.finish('agent_1', [], 'done', '理解查询请求');
+  assert.equal(before.label, '理解请求');
+  assert.equal(report.snapshot()[0].finishedAt, before.finishedAt);
+  const process = restore(snapshot(timedTask({ status: 'succeeded', execution_steps: report.snapshot() })));
+  assert.equal(view(process).steps[0].label, '理解查询请求');
+});
+
+test('command trace shows business filters and actual actions without exposing internal scopes or IDs', () => {
+  const command = { resource: 'notes', operation: 'list', scope: 'all', ids: [], parent_name: null,
+    filter: { status: 'active', keyword: '保养', start_date: '2026-10-01', end_date: null, type: null, category_id: null, member_id: null, amount_min: null, amount_max: null } };
+  assert.equal(execution.assistantCommandExecutionLabel(command), '查询未归档便利贴');
+  assert.deepEqual(Array.from(execution.assistantCommandExecutionDetails(command, [], [])), ['状态：未归档', '关键词：保养', '日期：2026-10-01 至 不限结束日期']);
+  assert.equal(execution.assistantCommandExecutionLabel({ ...command, operation: 'delete' }), '准备删除便利贴方案');
+  const query = { ...command, resource: 'loans', filter: { ...command.filter, status: 'outstanding', type: 'lent' } };
+  assert.equal(execution.assistantCommandExecutionLabel(query), '查询借还记录');
+  const details = execution.assistantCommandExecutionDetails(query, [], []);
+  assert.ok(details.includes('状态：未结清'));
+  assert.ok(details.includes('类型：对方欠我'));
+  assert.equal(JSON.stringify(details).includes('all'), false);
+  assert.equal(JSON.stringify(details).includes('个ID'), false);
+});

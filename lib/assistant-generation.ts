@@ -3,7 +3,7 @@ import type { AssistantActionResult } from "@/lib/assistant-commands";
 import { validateLedgerCommand } from "@/lib/assistant-commands";
 import { validateLedgerEvent } from "@/lib/ledger-event";
 import { queryReplyView } from "@/lib/assistant-reply-view";
-import { assistantPlanExecutionDetails, assistantQueryExecutionDetails, type AssistantExecutionReporter } from "@/lib/assistant-execution";
+import { assistantPlanExecutionDetails, assistantQueryExecutionDetails, assistantCommandExecutionDetails, type AssistantExecutionReporter } from "@/lib/assistant-execution";
 import { LEDGER_EVENT_PROMPT, eventContextSchema, ledgerEventSchema } from "@/lib/ledger-event";
 import { ensureCashflowSchema } from "@/lib/ledger-event-schema";
 import { ASSISTANT_COMMAND_PROMPT, recordContextsSchema } from "@/lib/assistant-commands";
@@ -107,7 +107,7 @@ export async function prepareAssistantGeneration(userId: string, raw: unknown, o
               temperature: 0.2, maxOutputTokens: 6000, timeoutMs: 60_000, telemetryId,
               schema: ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA, schemaName: "ledger_agent_step", messages: agentMessages }, stepSignal)),
             trustedIds: () => [...trustedRecordIds], domainInstructions: assistantAgentDomainInstructions,
-            toolDetails: plan => plan.query ? assistantQueryExecutionDetails(plan.query, categories, members) : plan.command ? [`资源：${plan.command.resource}；操作：${plan.command.operation}`, `目标：${plan.command.ids.length} 个ID；范围：${plan.command.scope}`] : ["核对整件事项及关联流水"],
+            toolDetails: plan => plan.query ? assistantQueryExecutionDetails(plan.query, categories, members) : plan.command ? assistantCommandExecutionDetails(plan.command, categories, members) : ["核对整件事项及关联流水"],
             verifyTargets: async (targets, stepSignal, actionId) => { stepSignal.throwIfAborted(); const { readAssistantAgentTargets } = await import("@/lib/assistant-command-server"); const result = await readAssistantAgentTargets(userId, targets, actionId); stepSignal.throwIfAborted(); return result; },
             validatePlan: async rawPlan => {
               const normalized = savedBatch && ["edit", "manage"].includes((rawPlan as { action?: string })?.action || "")
@@ -120,7 +120,15 @@ export async function prepareAssistantGeneration(userId: string, raw: unknown, o
               return validatePlan(normalized, categories, members, randomUUID, draftBatch, savedBatch);
             },
             validateCommand: validateLedgerCommand, validateEvent: validateLedgerEvent,
-            query: async (query, stepSignal) => { stepSignal.throwIfAborted(); emit?.({ type: "status", phase: "query" }); const facts = await queryLedger(userId, query); stepSignal.throwIfAborted(); return { filters: query, facts, reply_view: queryReplyView(query, facts, members, categories) }; },
+            query: async (query, stepSignal) => {
+              stepSignal.throwIfAborted(); emit?.({ type: "status", phase: "query" });
+              const facts = await queryLedger(userId, query); stepSignal.throwIfAborted();
+              const view = queryReplyView(query, facts, members, categories);
+              // These values come from full SQL aggregates, never the bounded
+              // detail rows or model arithmetic. The same view remains attached.
+              const reply = `${view.subtitle}\n${view.metrics.map(metric => `${metric.label}：${metric.value}`).join("；")}。\n${view.notices?.map(notice => notice.text).join("\n") || ""}`;
+              return { filters: query, facts, reply, reply_view: view };
+            },
             draftMatches: async stepSignal => { stepSignal.throwIfAborted(); const { readAssistantDraftMatches } = await import("@/lib/assistant-draft-matches"); const matches = await readAssistantDraftMatches(userId, draftBatch, members, categories); stepSignal.throwIfAborted(); return matches; },
             command: async (command, stepSignal, fingerprint) => { stepSignal.throwIfAborted(); const { prepareLedgerCommand, prepareAssistantAgentPreview } = await import("@/lib/assistant-command-server"); const result = fingerprint ? await prepareAssistantAgentPreview(userId, conversationId, options.runtimeId || telemetryId, fingerprint, stepSignal, () => prepareLedgerCommand(userId, conversationId, command)) : await prepareLedgerCommand(userId, conversationId, command); stepSignal.throwIfAborted(); return result; },
             event: async (event, stepSignal, fingerprint) => { stepSignal.throwIfAborted(); const { prepareLedgerEvent } = await import("@/lib/ledger-event-server"); const { prepareAssistantAgentPreview } = await import("@/lib/assistant-command-server"); const result = fingerprint ? await prepareAssistantAgentPreview(userId, conversationId, options.runtimeId || telemetryId, fingerprint, stepSignal, () => prepareLedgerEvent(userId, conversationId, event)) : await prepareLedgerEvent(userId, conversationId, event); stepSignal.throwIfAborted(); return result; },

@@ -1639,6 +1639,31 @@ test('ordinary agent replies and clarification questions follow a quiet process 
   } finally { h.unmount(); }
 });
 
+test('duplicate historical query answers become one visible final reply and stay single after page restore', async () => {
+  const rootId=uuid(970),old=uuid(971),current=uuid(972),userId=uuid(973),conversationId=uuid(974);
+  const message='查询未结清的借还',reply='我欠别人：无；别人欠我：3笔。';
+  const input={message,display_text:message,display_images:[]};
+  const agent={goal_id:rootId,goal:message,status:'completed',steps:5,tool_calls:2,output_id:current,
+    operations:[{id:'owed',label:'我欠别人',action:'manage',effect:'read',depends_on:[],status:'completed'},
+      {id:'lent',label:'别人欠我',action:'manage',effect:'read',depends_on:[],status:'completed'}]};
+  const result={action:'chat',reply,drafts:[],query:null};
+  const done={id:rootId,conversation_id:conversationId,user_message_id:userId,status:'succeeded',phase:'query',attempt:2,
+    created_at:'2026-10-12T03:50:00Z',updated_at:'2026-10-12T03:50:23Z',input,agent,result:{...result,agent},text:reply,error:null,
+    output_history:[{id:old,user_message_id:userId,input,attempt:1,result}]};
+  const taskStore=new Map([[rootId,done]]),h=await ready({taskStore});let reopened;
+  try{
+    h.restore({conversationId,messages:[{id:userId,role:'user',text:message},
+      {id:old,role:'assistant',text:reply,taskId:rootId,taskApplied:true,taskAttempt:1,taskStatus:'succeeded'},
+      {id:current,role:'assistant',text:reply,taskId:rootId,taskApplied:true,taskAttempt:2,taskStatus:'succeeded',agent}],input:''});
+    await h.flush();await h.poll();
+    assert.equal(h.text.split(reply).length-1,1);assert.equal(h.value.messages.filter(m=>m.role==='assistant').length,1);
+    assert.equal(h.value.messages.at(-1).id,current);
+    reopened=await ready({taskStore});reopened.restore(h.value);await reopened.flush();await reopened.poll();
+    assert.equal(reopened.text.split(reply).length-1,1);assert.equal(reopened.value.messages.at(-1).id,current);
+    assert.equal([...h.calls,...reopened.calls].some(call=>call.method==='PATCH'||call.method==='POST'),false);
+  }finally{h.unmount();reopened?.unmount();}
+});
+
 test('completed ledger work retains a folded process before its answer without a second completion label', async () => {
   const h = await ready();
   try {

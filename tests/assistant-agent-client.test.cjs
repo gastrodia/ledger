@@ -26,6 +26,42 @@ const task = (extra = {}) => ({ id: uuid(3), conversation_id: uuid(4), user_mess
 const user = { id: uuid(5), role: 'user', text: '核对午餐记录并补充备注' };
 const result = (extra = {}) => ({ id: uuid(2), status: 'succeeded', text: '已保存并核对备注', ...extra });
 
+test('same-turn identical read summaries recover as one final answer through polling and refresh',()=>{
+ const old=uuid(81),current=uuid(82);
+ const summary=plan({agent:undefined,reply:'我欠别人：无；别人欠我：3笔。',record_context:{resource:'loans',rows:[]}});
+ const doneAgent=agent({status:'completed',pending_action_id:undefined,output_id:current});
+ const history={id:old,user_message_id:user.id,input:{message:user.text,display_text:user.text,display_images:[]},attempt:1,result:summary};
+ const done=task({attempt:2,agent:doneAgent,result:{...summary,agent:doneAgent},output_history:[history],input:history.input});
+ const interim=client.mergeAssistantTasks([user],[task({agent:{...doneAgent,status:'needs_input',output_id:old,awaiting_delivery:true},result:summary})],uuid(4),[]);
+ assert.equal(interim.filter(m=>m.role==='assistant').length,1);
+ const merged=client.mergeAssistantTasks(interim,[done],uuid(4),[]);
+ assert.deepEqual(plain(merged.map(m=>m.id)),[user.id,current]);assert.equal(merged.at(-1).agent.status,'completed');
+ assert.equal(client.mergeAssistantTasks(merged,[plain(done)],uuid(4),[]),merged);
+ const restored=client.mergeAssistantTasks(plain(merged),[plain(done)],uuid(4),[]);
+ assert.deepEqual(plain(restored),plain(merged));
+ const fresh=client.mergeAssistantTasks([],[done],uuid(4),[]);assert.deepEqual(plain(fresh.map(m=>m.id)),[user.id,current]);
+});
+
+test('summary recovery preserves distinct turns, evidence, receipts and action cards even with identical prose',()=>{
+ const old=uuid(81),current=uuid(82),summary=plan({agent:undefined,reply:'相同文字'});
+ const doneAgent=agent({status:'completed',pending_action_id:undefined,output_id:current});
+ const base={id:old,user_message_id:user.id,input:{message:user.text,display_text:user.text,display_images:[]},attempt:1,result:summary};
+ for(const patch of [
+  {user_message_id:uuid(83)}, {receipt:result()}, {result:{...summary,reply:'不同内容'}},
+  {result:{...summary,record_context:{resource:'loans',rows:[{id:uuid(84)}]}}},
+  {result:{...summary,reply_view:{title:'不同查询口径'}}},
+  {result:{...summary,approval}}, {result:{...summary,event_choices:[{label:'仍需选择'}]}},
+  {result:{...summary,action:'record',drafts:[{id:uuid(84),type:'expense',amount_cents:100,description:'早餐',transaction_date:'2026-10-12'}]}},
+ ]){
+  const done=task({agent:doneAgent,result:{...summary,agent:doneAgent},output_history:[{...base,...patch}],input:base.input});
+  const merged=client.mergeAssistantTasks([],[done],uuid(4),[]);
+  assert.ok(merged.some(m=>m.id===old),JSON.stringify(patch));assert.ok(merged.some(m=>m.id===current));
+ }
+ const independent=task({id:uuid(85),user_message_id:uuid(86),agent:agent({goal_id:uuid(85),status:'completed',pending_action_id:undefined}),result:summary,input:{message:'再查一次',display_text:'再查一次',display_images:[]}});
+ const merged=client.mergeAssistantTasks([],[task({agent:doneAgent,result:summary,input:base.input}),independent],uuid(4),[]);
+ assert.equal(merged.filter(m=>m.role==='assistant').length,2);
+});
+
 function checkpoint() {
   const recovered = client.mergeAssistantTasks([user], [task({ result: plan({ action: 'manage', approval,
     record_context: { resource: 'transactions', rows: [{ id: uuid(6), description: '午餐' }] } }) })], uuid(4), []);

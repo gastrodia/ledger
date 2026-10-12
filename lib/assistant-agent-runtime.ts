@@ -4,7 +4,7 @@ import { parseAssistantAgentStep, AssistantAgentStepError } from "@/lib/assistan
 import type { AssistantPlan, AssistantQuery } from "@/lib/assistant";
 import type { AssistantActionResult, LedgerCommand, LedgerResource } from "@/lib/assistant-commands";
 import type { LedgerEventInput } from "@/lib/ledger-event";
-import type { AssistantExecutionReporter } from "@/lib/assistant-execution";
+import { assistantToolExecutionLabel, assistantResponseExecutionLabel, type AssistantExecutionReporter } from "@/lib/assistant-execution";
 import { validateWorkflow, assertWorkflowCoverage, workflowOperation, matchingRecordOperations, reconcileRecordWorkflowReceipts, type WorkflowOperation } from "@/lib/assistant-workflow";
 
 export type AssistantAgentStatus = "running" | "waiting_approval" | "completed" | "stopped" | "needs_input" | "interrupted";
@@ -283,12 +283,12 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       signal.throwIfAborted();
       c.steps += 1;
       const id = `agent_${c.steps}`;
-      o.execution?.start(id, "选择账本下一步", "model", [`步骤 ${c.steps}；仅可使用账本工具`]);
+      const resolved = c.event_resolutions?.find(item => item.pending && c.operations?.some(op => op.id === item.operation_id && ["pending", "running"].includes(op.status) && !op.questions?.length && op.depends_on.every(id => c.operations!.find(dep => dep.id === id)?.status === "completed")));
+      o.execution?.start(id, resolved ? "使用已核对的事项条件" : c.steps === 1 ? "理解请求" : "确定后续动作", resolved ? "check" : "model");
       const decisionMessages = structuredClone(c.messages).filter(message => !message.content.startsWith("服务端任务进度（不可重建已完成事项）"));
       if (c.operations || c.workflow_required) decisionMessages.push({ role: "system", content: `当前服务端调度状态（goal是当前用户授权目标的原文；其他历史目标不授予操作权限）：${JSON.stringify({ goal: c.goal, operations: c.operations || null, duplicate_review: c.duplicate_review || null, answer: c.turn_input?.message || null, authorized_answers: c.authorized_answers || [], clarification_answers: c.clarification_answers || [], event_resolutions: c.event_resolutions || [] })}。尚未有operations时先plan；已有清单时，只继续未完成且依赖已完成的事项，operation_id必须取当前清单ID。发问也必须带对应事项ID。covered_operation_ids只用于当前record草稿组；其他动作不沿用以前的分组编号。已完成的事项禁止重新执行。` });
       let s: AssistantAgentStep;
       try {
-        const resolved = c.event_resolutions?.find(item => item.pending && c.operations?.some(op => op.id === item.operation_id && ["pending", "running"].includes(op.status) && !op.questions?.length && op.depends_on.every(id => c.operations!.find(dep => dep.id === id)?.status === "completed")));
         s = parseAssistantAgentStep(resolved ? { kind: "preview", operation_id: resolved.operation_id, tool: "event", arguments_json: JSON.stringify(resolved.input), plan_json: null, needs_input: false }
           : await o.adapters.chooseStep(decisionMessages, signal), !!c.workflow_required);
         signal.throwIfAborted(); malformedSteps = 0;
@@ -303,16 +303,34 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         continue;
       }
       c.messages.push({ role: "assistant", content: JSON.stringify(s) });
-      o.execution?.finish(id, [`选择：${s.kind === "respond" ? "回复或准备草稿" : s.kind === "read" ? "读取账本" : "准备确认方案"}`]);
+      const stepLabel = resolved ? "使用已核对的事项条件" : s.kind === "plan" ? "整理任务清单" : s.kind === "reuse" ? "核对已处理事项" : s.kind === "read" ? "确定查询条件" : s.kind === "preview" ? "整理操作方案" : "生成回复";
+      o.execution?.finish(id, [], "done", stepLabel);
       const toolId = `agent_tool_${c.steps}`;
       let plan: AssistantPlan;
+      let directRead = false;
       try {
         if (s.kind === "plan") {
           if (c.pending_approval || c.pending_batch) throw new Error("当前有待确认方案，不能改写其执行范围；请先处理原确认方案。");
           const args = json(s.arguments_json);
-          if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => key !== "operations")) throw new Error("任务计划只允许operations。");
+          if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["operations", "initial_read"].includes(key))) throw new Error("任务计划只允许operations和单一查询的initial_read。");
           const operations = validateWorkflow(args.operations);
           if (c.workflow_required) assertWorkflowCoverage(operations, c.goal, c.authorized_answers);
+          let initialRead: AssistantAgentStep | undefined;
+          if (args.initial_read !== undefined) {
+            const read = args.initial_read;
+            if (c.operations || c.tool_results.some(r => r.name !== "validation_error") || verificationRequired || operations.length !== 1
+              || operations[0].effect !== "read" || operations[0].questions?.length || operations[0].depends_on.length
+              || !read || typeof read !== "object" || Array.isArray(read)
+              || Object.keys(read).some(key => !["tool", "arguments_json", "reply_mode"].includes(key))
+              || !["result", "analysis"].includes(read.reply_mode)
+              || !(read.tool === "query" && operations[0].action === "query" || read.tool === "records" && operations[0].action === "manage")) {
+              throw new Error("initial_read仅可用于新目标中无歧义、无依赖的单一查询；复合任务和写操作继续完整清单。");
+            }
+            initialRead = parseAssistantAgentStep({ kind: "read", tool: read.tool, arguments_json: read.arguments_json,
+              operation_id: operations[0].id, plan_json: null, needs_input: false }, true);
+            if (initialRead.tool === "records" && json(initialRead.arguments_json)?.operation !== "list") throw new Error("单一记录查询仅允许list，不能准备写操作或重复核对。");
+            directRead = read.reply_mode === "result";
+          }
           if (c.operations) {
             for (const previous of c.operations) {
               const next = operations.find(item => item.id === previous.id);
@@ -328,21 +346,30 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           }
           c.operations = operations;
           if (c.event_resolutions) c.event_resolutions = c.event_resolutions.filter(resolution => operations.some(item => item.id === resolution.operation_id && item.action === "event"));
-          append("workflow", { operations: c.operations }); await save(); continue;
+          append("workflow", { operations: c.operations }); await save();
+          if (!initialRead) continue;
+          // The agenda and read parameters came from one model decision. Keep
+          // the normal identity, ownership and read-only validation below.
+          s = initialRead;
+          o.execution?.finish(id, ["已确定单一查询的条件"], "done", "理解查询请求");
         }
         if (c.workflow_required && !c.operations) throw new Error("请先使用kind=plan保存本次完整任务清单及依赖，再处理具体事项，不能只处理第一件事。");
         let operation: WorkflowOperation | undefined;
         let covered: WorkflowOperation[] = [];
+        let summarizedReads: WorkflowOperation[] = [];
         if (c.operations) {
           // A final summary is allowed only when every persisted item is settled.
           const remaining = c.operations.filter(item => item.status !== "completed");
-          // A final read answer can unambiguously settle the sole remaining read,
-          // but never a write or an item without an observed successful tool result.
-          if (s.kind === "respond" && s.operation_id == null && remaining.length === 1 && remaining[0].effect === "read"
-            && c.tool_results.some(tool => tool.operation_id === remaining[0].id && ["query", "records", "draft_matches"].includes(tool.name))) s.operation_id = remaining[0].id;
           const allCompleted = remaining.length === 0;
           if (s.kind === "respond") {
             const candidate = json(s.plan_json!);
+            // A goal summary may settle multiple queried items together. Keep
+            // reads open for comparisons until this validated chat response;
+            // writes, questions and unqueried items cannot be settled here.
+            if (s.operation_id == null && candidate.action === "chat" && !s.needs_input && remaining.length
+              && remaining.every(item => item.effect === "read" && ["pending", "running"].includes(item.status) && !item.questions?.length
+                && c.tool_results.some(tool => tool.operation_id === item.id && ["query", "records", "draft_matches"].includes(tool.name)
+                  && tool.result && !(tool.result as { limited?: boolean }).limited))) summarizedReads = remaining;
             // A literal record group has a server-verifiable identity even when
             // the model omitted its primary ID. Completed items never qualify.
             if (s.operation_id == null && candidate.action === "record" && Array.isArray(candidate.drafts)) {
@@ -355,7 +382,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
             // completed ID; normalize it only after the whole agenda is settled.
             if (allCompleted && candidate.action === "chat" && c.operations.some(item => item.id === s.operation_id && item.status === "completed")) s.operation_id = null;
           }
-          if (s.operation_id == null && !allCompleted) throw new Error("原任务还有未完成事项，请指定operation_id继续；查询已完成也要respond/chat带该查询事项ID确认完成，不能提前用null总结。");
+          if (s.operation_id == null && !allCompleted && !summarizedReads.length) throw new Error("原任务还有未完成事项，请指定operation_id继续；全部剩余查询都有成功工具结果时才可respond/chat以null统一总结，未查询或写事项不能提前标记完成。");
           if (s.operation_id != null) {
             if (c.operations.some(item => item.id === s.operation_id && ["completed", "failed", "cancelled", "waiting_approval"].includes(item.status)))
               throw new Error(`该事项已经完成或已暂停执行，不能重放。当前未完成事项：${remaining.map(item => `${item.id}:${item.action}:${item.status}`).join("、")}；只继续这些事项，已完成目标不能作为当前operation_id。`);
@@ -387,7 +414,10 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           c.awaiting_answer = false; c.awaiting_delivery = !complete;
           return finish(safePlan("已核对为同一笔，本次未重复入账。"), complete ? "completed" : "needs_input");
         }
-        if (s.kind === "respond") plan = await o.adapters.validatePlan(json(s.plan_json!));
+        if (s.kind === "respond") {
+          plan = await o.adapters.validatePlan(json(s.plan_json!));
+          o.execution?.finish(id, [], "done", assistantResponseExecutionLabel(plan, c.tool_results.some(r => ["query", "records", "draft_matches"].includes(r.name))));
+        }
         else {
           const args = json(s.arguments_json);
           if (s.tool === "draft_matches") {
@@ -415,6 +445,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
             plan = await o.adapters.validatePlan({ action: "manage", reply: "正在核对", drafts: [], query: null, command });
           }
         }
+        if (s.kind === "preview" && !resolved) o.execution?.finish(id, [], "done", assistantToolExecutionLabel(plan).replace(/^准备|^核对/, "整理"));
         if (!c.operations && plan.action === "record" && c.tool_results.some(r => r.name === "approval_result" && (r.result as AssistantActionResult)?.id === c.goal_id && (r.result as AssistantActionResult)?.status === "succeeded")) {
           const savedReceipt = c.tool_results.find(r => r.name === "approval_result" && (r.result as AssistantActionResult)?.id === c.goal_id)?.result as AssistantActionResult;
           return finish(safePlan(`${savedReceipt.text}\n本目标的普通收支草稿组已确认。剩余新增收支请作为新的请求发送，以便生成独立草稿组，避免重复入账。`), "needs_input");
@@ -454,22 +485,37 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (resolution?.input.allow_duplicate && plan.action === "chat" && isDuplicateEventQuestion(plan.reply)) throw new Error("用户已明确确认该事项是新发生的一笔。不要再次询问同一重复问题，不可reuse旧记录；继续event核对，已确认条件见event_resolutions。");
         const usesTool = ["query", "manage", "event"].includes(plan.action);
         if (usesTool && o.adapters.domainInstructions) c.messages.push({ role: "system", content: o.adapters.domainInstructions(plan.command?.resource || (plan.action === "query" ? "query" : "event")) });
-        if (usesTool) o.execution?.start(toolId, "读取或核对账本", "tool", o.adapters.toolDetails?.(plan) || ["使用当前账号；写操作只准备预览"]);
+        if (usesTool) o.execution?.start(toolId, assistantToolExecutionLabel(plan), "tool", o.adapters.toolDetails?.(plan) || []);
         const result = await runPlan(plan);
         if (resolution && plan.action === "event") resolution.pending = false;
         lastValidation = ""; repeatedValidation = 0;
         signal.throwIfAborted();
         if (usesTool) {
           const facts = plan.action === "query" ? [...c.tool_results].reverse().find(r => r.name === "query")?.result as { facts?: { summary?: { count?: unknown } } } | undefined : undefined;
-          const count = Number(facts?.facts?.summary?.count);
-          o.execution?.finish(toolId, [...(o.adapters.toolDetails?.(plan) || []), c.pending_approval ? "方案已准备，等待明确批准" : Number.isSafeInteger(count) && count >= 0 ? `匹配 ${count} 笔记录` : "核对完成"]);
+          const latestRead = c.tool_results.at(-1);
+          const records = latestRead?.name === "records" ? latestRead.result as { record_context?: AssistantPlan["record_context"]; limited?: boolean } : undefined;
+          const rawCount = facts?.facts?.summary?.count ?? records?.record_context?.rows.length;
+          const count = rawCount == null ? NaN : Number(rawCount);
+          o.execution?.finish(toolId, [...(o.adapters.toolDetails?.(plan) || []), c.pending_approval ? "方案已准备，等待明确批准" : Number.isSafeInteger(count) && count >= 0 ? `找到 ${count} ${records ? "条" : "笔"}记录` : s.kind === "read" ? "查询完成" : "核对完成"]);
+          const observed = latestRead?.result as { reply?: string; limited?: boolean; approval?: unknown } | undefined;
+          if (directRead && operation && c.operations?.length === 1 && s.kind === "read"
+            && latestRead?.operation_id === operation.id && ["query", "records"].includes(latestRead.name)
+            && !observed?.limited && !observed?.approval && !c.pending_approval && !c.pending_batch && typeof observed?.reply === "string" && observed.reply.trim()) {
+            // Plain retrieval uses the authoritative tool summary. Analysis,
+            // comparisons and incomplete/oversized results still enter the loop.
+            operation.status = "completed"; c.awaiting_answer = false; c.awaiting_delivery = false;
+            o.execution?.start(`agent_result_${c.steps}`, "整理查询结果", "check", ["使用实际查询结果"]);
+            o.execution?.finish(`agent_result_${c.steps}`, ["查询结果已整理"]);
+            return finish(safePlan(observed.reply), "completed");
+          }
         }
-        if (result && !usesTool) o.execution?.finish(id, [`选择：${s.kind === "respond" ? "回复或准备草稿" : "准备确认方案"}`, `已生成 ${result.reply.length} 字回复`]);
+        if (result && !usesTool) o.execution?.finish(id, plan.drafts.length ? [`已生成 ${plan.drafts.length} 笔待确认草稿`] : []);
         if (result?.action === "record" && result.drafts.length) c.pending_batch = { batch_id: c.operations ? c.output_id! : c.goal_id, draft_ids: result.drafts.map(draft => draft.id) };
         if (result?.action === "confirm" && result.confirm) c.pending_batch = { batch_id: result.confirm.batch_id, draft_ids: result.confirm.draft_ids };
         if (result && (c.pending_approval || c.pending_batch)) c.pending_plan = structuredClone(result);
         if (result && c.operations) {
           c.awaiting_answer = false; c.awaiting_delivery = false;
+          if (result.action === "chat" && !unverifiedCompletion) summarizedReads.forEach(item => { item.status = "completed"; });
           if (operation) {
             if (c.pending_approval || c.pending_batch) { c.pending_operation_ids = covered.map(item => item.id); covered.forEach(item => { item.status = "waiting_approval"; }); }
             else if (s.needs_input || operation.effect === "write" && result.action === "chat" || result.event_choices?.length || result.action === "event" || result.action === "manage" && !["list", "duplicates", "export"].includes(result.command?.operation || "") || result.action === "update" && result.update?.member_id === null || unverifiedCompletion) { operation.status = "needs_input"; c.awaiting_answer = true; }
@@ -481,6 +527,10 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           // Only a completely settled agenda may finish the original goal.
           const complete = c.operations.every(item => item.status === "completed");
           if (!complete && !c.pending_approval && !c.pending_batch && !c.awaiting_answer && !c.awaiting_delivery) {
+            // Prose is not a page action needing a delivery receipt. Continue
+            // the agenda in this wave and emit only its final answer or a real
+            // clarification/approval, rather than publishing a partial summary.
+            if (result.action === "chat") { await save(); continue; }
             c.awaiting_delivery = true; c.pending_plan = structuredClone(result);
           }
           return finish(result, c.pending_approval || c.pending_batch ? "waiting_approval" : complete ? "completed" : "needs_input");

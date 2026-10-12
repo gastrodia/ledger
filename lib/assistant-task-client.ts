@@ -339,17 +339,38 @@ export function resolveAssistantDraftMatch(messages: AssistantConversationMessag
   return decision === "removed" ? relocateAssistantDraftCard(next, match.target.id, replyId) : next;
 }
 
+function isReadSummary(plan: AssistantPlan): boolean {
+  return plan.action === "chat" && Array.isArray(plan.drafts) && !plan.drafts.length && !plan.query && !plan.command && !plan.approval
+    && !plan.event && !plan.event_context && !plan.event_choices?.length && !plan.update && !plan.undo && !plan.remove
+    && !plan.edit && !plan.confirm && !plan.navigation && !plan.export_file;
+}
+
 /** Pure, replay-safe recovery. Financial writes always remain explicit UI actions. */
 export function mergeAssistantTasks(
   messages: AssistantConversationMessage[], tasks: AssistantTask[], conversationId: string, members: AssistantMember[], categories: AssistantCategory[] = [],
 ): AssistantConversationMessage[] {
   let next = messages;
   for (const task of tasks) {
+    if (task.conversation_id !== conversationId || !UUID_PATTERN.test(task.id) || !UUID_PATTERN.test(task.user_message_id)) continue;
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
+    // Older agents published a read summary before marking the last item done,
+    // then published the identical final result. Coalesce only the same turn's
+    // exact chat result; distinct requests, cards and receipts remain history.
+    const duplicateHistory = new Set((task.output_history || []).filter(history => task.status === "succeeded" && agent?.status === "completed"
+      && task.result && isReadSummary(task.result) && history.result && isReadSummary(history.result) && !history.receipt
+      && UUID_PATTERN.test(history.id) && history.user_message_id === task.user_message_id && history.id !== (agent.output_id || task.id)
+      && sameTaskValue({ ...history.result, agent: undefined }, { ...task.result, agent: undefined })).map(history => history.id));
+    if (duplicateHistory.size) {
+      const settled = next.filter(message => !(message.role === "assistant" && message.taskId === task.id && duplicateHistory.has(message.id)
+        && !message.drafts?.length && !message.approval && !message.actionResult && !message.memberChoice
+        && !message.eventChoices?.length && !message.eventContext && !message.actionPreview && !message.confirmChoice
+        && !message.removeChoice && !message.undoChoice && !message.clearChoice && !message.navigateTo && !message.exportFile));
+      if (settled.length !== next.length) next = settled;
+    }
     const roots = new Map<string, string>();
     const outputs: AssistantTask[] = [];
     for (const history of task.output_history || []) {
-      if (!UUID_PATTERN.test(history.id) || !UUID_PATTERN.test(history.user_message_id) || !history.result || history.id === agent?.output_id) continue;
+      if (!UUID_PATTERN.test(history.id) || !UUID_PATTERN.test(history.user_message_id) || !history.result || history.id === agent?.output_id || duplicateHistory.has(history.id)) continue;
       roots.set(history.id, task.id);
       outputs.push({ ...task, id: history.id, user_message_id: history.user_message_id, input: history.input, result: history.result,
         text: history.result.reply, attempt: history.attempt, status: "succeeded", agent: undefined, output_history: undefined });

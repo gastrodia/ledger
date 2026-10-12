@@ -981,13 +981,13 @@ if (PGlite) {
     const live = await f.tasks.getAssistantTask('owner', taskId);
     const queryStep = live.execution_steps.find(step => step.id === 'agent_tool_2');
     assert.equal(queryStep.state, 'done');
-    assert.match(queryStep.details.join(' '), /2026-10-01 至 2026-10-09.*分类：餐饮；成员：本人.*匹配 1 笔/);
+    assert.match(queryStep.details.join(' '), /2026-10-01 至 2026-10-09.*分类：餐饮；成员：本人.*(?:匹配|找到) 1 笔/);
     assert.equal(live.execution_steps.find(step => step.id === 'agent_3').state, 'running');
     finish.resolve(); await running;
     const saved = (await f.tasks.listAssistantTasks('owner', conversationId))[0];
     assert.equal(saved.execution_steps.length, 5);
     assert.ok(saved.execution_steps.every(step => step.state === 'done' && step.finishedAt >= step.startedAt));
-    assert.equal(saved.execution_steps.find(step => step.id === 'agent_3').details.some(detail => detail.includes('已生成')), true);
+    assert.equal(saved.execution_steps.find(step => step.id === 'agent_3').label, '整理查询结果');
     assert.equal((await f.db.query('SELECT COUNT(*)::int AS count FROM transactions')).rows[0].count, 1);
   });
 

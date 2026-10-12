@@ -1,4 +1,5 @@
 import type { AssistantPlan, AssistantQuery, AssistantCategory, AssistantMember } from "@/lib/assistant";
+import type { LedgerCommand, LedgerResource } from "@/lib/assistant-commands";
 
 export type AssistantExecutionStep = {
   id: string;
@@ -40,8 +41,9 @@ export function createAssistantExecution(initial: unknown = []) {
       const step: AssistantExecutionStep = { id, label, kind, state: "running", startedAt: Date.now(), details: details(items) };
       steps = steps.some(item => item.id === id) ? steps.map(item => item.id === id ? step : item) : [...steps, step].slice(-MAX_STEPS);
     },
-    finish(id: string, items?: string[], state: "done" | "failed" = "done") {
-      steps = steps.map(step => step.id === id ? { ...step, state, finishedAt: Math.max(step.startedAt, Date.now()),
+    finish(id: string, items?: string[], state: "done" | "failed" = "done", label?: string) {
+      steps = steps.map(step => step.id === id ? { ...step, state, finishedAt: step.finishedAt ?? Math.max(step.startedAt, Date.now()),
+        ...(label ? { label: label.slice(0, 80) } : {}),
         details: items ? details(items) : step.details } : step);
     },
     failRunning() {
@@ -50,6 +52,58 @@ export function createAssistantExecution(initial: unknown = []) {
   };
 }
 export type AssistantExecutionReporter = ReturnType<typeof createAssistantExecution>;
+
+const resources: Record<LedgerResource, string> = {
+  transactions: "收支记录", categories: "分类", members: "成员", loans: "借还记录", repayments: "归还记录",
+  giftbooks: "礼簿", gift_records: "收礼记录", gifts_given: "送礼记录", notes: "便利贴",
+};
+const statuses: Record<string, string> = { active: "未归档", archived: "已归档", pinned: "已置顶", unpaid: "未还", partial: "部分归还", outstanding: "未结清", settled: "已结清" };
+
+export function assistantCommandExecutionLabel(command: LedgerCommand): string {
+  const resource = resources[command.resource];
+  if (command.operation === "list") return `查询${command.resource === "notes" && command.filter.status ? statuses[command.filter.status] || "" : ""}${resource}`;
+  if (command.operation === "duplicates") return "查找疑似重复收支";
+  if (command.operation === "export") return `导出${resource}`;
+  const actions = { create: "新增", update: "修改", delete: "删除", reorder: "排序", link: "关联", unlink: "解除关联" };
+  return `准备${actions[command.operation]}${resource}方案`;
+}
+
+export function assistantCommandExecutionDetails(command: LedgerCommand, categories: AssistantCategory[], members: AssistantMember[]): string[] {
+  const filter = command.filter;
+  const types: Record<string, string> = { income: "收入", expense: "支出", owed: "我欠对方", lent: "对方欠我", cash: "礼金", item: "实物", money: "钱款" };
+  return [
+    ...(filter.status ? [`状态：${statuses[filter.status] || filter.status}`] : []),
+    ...(filter.keyword ? [`关键词：${filter.keyword}`] : []),
+    ...(filter.start_date || filter.end_date ? [`日期：${filter.start_date || "不限起始日期"} 至 ${filter.end_date || "不限结束日期"}`] : []),
+    ...(filter.type ? [`类型：${types[filter.type] || filter.type}`] : []),
+    ...(filter.category_id ? [`分类：${categories.find(item => item.id === filter.category_id)?.name || "指定分类"}`] : []),
+    ...(filter.member_id ? [`成员：${members.find(item => item.id === filter.member_id)?.name || "指定成员"}`] : []),
+    ...(filter.amount_min != null || filter.amount_max != null ? [`金额：${filter.amount_min ?? "不限下限"} 至 ${filter.amount_max ?? "不限上限"} 元`] : []),
+    ...(command.parent_name ? [`所属记录：${command.parent_name}`] : []),
+    ...(command.ids.length ? [`已指定 ${command.ids.length} 条目标记录`] : []),
+  ];
+}
+
+export function assistantToolExecutionLabel(plan: AssistantPlan): string {
+  if (plan.command) return assistantCommandExecutionLabel(plan.command);
+  if (plan.query) return `查询${plan.query.scope === "cashflow"
+    ? plan.query.type === "expense" ? "资金流出" : plan.query.type === "income" ? "资金流入" : "资金流水"
+    : plan.query.type === "expense" ? "日常支出" : plan.query.type === "income" ? "日常收入" : "日常收支"}`;
+  if (plan.event) {
+    const events: Record<string, string> = { loan_lent: "借出", loan_borrowed: "借入", repayment_received: "收到归还", repayment_paid: "归还", gift_given: "送礼", gift_received: "收礼" };
+    return `核对${events[plan.event.kind || ""] || "生活"}事项并准备${plan.event.operation === "undo" ? "撤销" : "确认"}方案`;
+  }
+  return "查询账本记录";
+}
+
+export function assistantResponseExecutionLabel(plan: AssistantPlan, hasRead: boolean): string {
+  const labels: Record<AssistantPlan["action"], string> = {
+    record: "生成记账草稿", query: "整理查询条件", chat: hasRead ? "整理查询结果" : "生成回复", update: "整理草稿成员修改",
+    undo: "准备撤销入账方案", remove: "准备删除草稿方案", manage: "整理账本操作条件", edit: "整理草稿修改",
+    confirm: "准备确认草稿", navigate: "确定要打开的页面", event: "整理事项条件",
+  };
+  return labels[plan.action];
+}
 
 export function assistantPlanExecutionDetails(plan: AssistantPlan): string[] {
   const labels: Record<AssistantPlan["action"], string> = {

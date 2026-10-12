@@ -7,7 +7,7 @@ const stepShape = z.object({
   covered_operation_ids: z.array(z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).max(64)).max(32).optional().describe("本次record草稿覆盖的全部普通收支事项ID，包含operation_id；其他动作留空数组"),
   operation_id: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/).max(64).nullable().optional().describe("任务清单中的事项ID；plan和全部完成后的总结为null，其余步骤必须填写"),
   tool: z.enum(["query", "records", "draft_matches", "command", "event"]).nullable().describe("read只用query/records/draft_matches；读取借还等记录用records，arguments_json为完整command；command/event只用于preview；plan/reuse/respond为null"),
-  arguments_json: z.string().max(24000).describe("read/query时JSON必须含scope,start_date,end_date,type,category_id,member_id,keyword，未筛选的后三项显式null；read/draft_matches为{}，系统核对当前草稿；read/records和preview为对应完整账本参数JSON；respond时{}"),
+  arguments_json: z.string().max(24000).describe("plan为operations清单，单一查询可同时包含initial_read:{tool:query或records,arguments_json:完整读取参数JSON字符串,reply_mode:result或analysis}；read/query含scope,start_date,end_date,type,category_id,member_id,keyword；read/draft_matches为{}；read/records和preview为完整账本参数JSON；respond时{}"),
   plan_json: z.string().max(24000).nullable().describe("仅respond时为一个Ledger AssistantPlan JSON字符串。read和preview必须是JSON null，不能写goal/steps/计划/说明文字"),
   needs_input: z.boolean().default(false).describe("回复需要用户补充信息或核对草稿时为true；目标已完成时为false；省略时默认false"),
 }).strict();
@@ -33,19 +33,27 @@ const readExample = JSON.stringify({ kind: "read", operation_id: "op1", tool: "q
 const loansExample = JSON.stringify({ kind: "read", operation_id: "op1", tool: "records", arguments_json: JSON.stringify({ resource: "loans", operation: "list", scope: "all", ids: [], parent_id: null, parent_name: null, filter: { keyword: null, start_date: null, end_date: null, type: "owed", category_id: null, member_id: null, status: "outstanding", amount_min: null, amount_max: null }, values_json: "{}" }), plan_json: null, needs_input: false });
 const chatExample = JSON.stringify({ kind: "respond", operation_id: "op1", tool: null, arguments_json: "{}", plan_json: JSON.stringify({ action: "chat", reply: "填写基于已读取事实的中文答复", drafts: [], query: null }), needs_input: false });
 const recordExample = JSON.stringify({ kind: "respond", operation_id: "op1", tool: null, arguments_json: "{}", plan_json: JSON.stringify({ action: "record", reply: "请核对草稿后确认入账。", drafts: [{ type: "expense", amount_cents: 1800, category_id: null, member_id: null, transaction_date: "2026-10-09", description: "午餐", payment_method: null, note: "" }], query: null }), needs_input: true });
+const simpleReadExample = JSON.stringify({ kind: "plan", operation_id: null, tool: null, arguments_json: JSON.stringify({
+  operations: [{ id: "op1", label: "查看当前未归档便利贴", action: "manage", effect: "read", depends_on: [], questions: [], sources: ["查看我当前未归档的便利贴。"] }],
+  initial_read: { tool: "records", arguments_json: JSON.stringify({ resource: "notes", operation: "list", scope: "all", ids: [], parent_id: null, parent_name: null,
+    filter: { keyword: null, start_date: null, end_date: null, type: null, category_id: null, member_id: null, status: "active", amount_min: null, amount_max: null }, values_json: "{}" }), reply_mode: "result" },
+}), plan_json: null, needs_input: false });
 export const ASSISTANT_AGENT_RUNTIME_PROMPT = `
 你正在运行一个仅限Ledger账本的任务循环。下一条输出必须服从步骤schema，覆盖前文的顶层计划格式要求。
 步骤形状：{kind:"plan"|"reuse"|"read"|"preview"|"respond",operation_id:"事项ID或null",tool:"query"|"records"|"draft_matches"|"command"|"event"|null,arguments_json:"JSON对象字符串",plan_json:"计划JSON字符串或null",needs_input:boolean}。
 先用kind=plan保存本次全部事项与依赖，随后一次只输出一个当前步骤。不得把多个动作塞进一个单动作计划。read/preview的plan_json必须是JSON null（不是字符串"null"），只使用arguments_json；respond的plan_json才填写计划，arguments_json="{}"。
 通用组合任务：新目标第一步必须kind=plan、tool=null、plan_json=null、operation_id=null，arguments_json为{operations:[{id:"op1",label:"原文事项及明确约束",action:"record|query|chat|update|undo|remove|manage|edit|confirm|navigate|event",effect:"read|write|local",depends_on:[],questions:["需先澄清的问题，没有则空数组"],sources:["当前请求中逐字引用的原文片段"]}]}的JSON字符串。effect：query/chat及manage的list/duplicates/export为read；record/event/confirm/undo及manage的新增修改删除关联为write；edit/update/remove/navigate为local。sources必须逐字引用当前用户目标或本任务已经接收的authorized_answers，修订时仍保留原始目标的完整覆盖，不从其他任务历史引用，所有事项的sources合起来覆盖当前请求全部文字和数字（空白与标点可以不分配），不从历史引用；同一句授权了多个同类操作时，可引用同一原文，但必须是不同目标或不同次发生的事项，不得重复执行同一目标。分组事项可以包含多个原文片段；“都由本人支出”等公共条件可分配到一个相关事项，其他事项仍遵守该公共条件。例如当前只说“这两笔支出人都选本人”，清单只能包含这项成员更新，不能重新计划历史中的早餐、送礼或统计。先确保完整覆盖当前请求，之后才生成预览或草稿。即使单事项也使用清单，最多32项，覆盖全部已有能力，不按场景编写组合。先保存完整清单，不因当前缺信息漏掉后续事项。questions只包含不能从现有信息确定的业务问题，不能把批准入账、成员分类选择卡片当业务歧义。“礼品只是估值”只排除礼品估值形成现金流，不能把已明确支付的礼金改为cashflow=none。现金加礼品但未明确物品是本次实际购入还是估值时，questions必须询问这一区别，不能默认为已有物品或本次购买。用户明确“估值/已有/价值”或明确实际购买付款则不重复询问。金额、对象、范围、操作顺序有歧义同样列入questions。服务端会先展示questions，用户回答后继续原操作；不能绕过未解决问题准备审批。依赖引用已列出的ID；例如先新增成员再记该成员早餐，早餐依赖新增成员；执行后统计依赖所有相关写操作。互不相关不添加依赖。相同金额相同用途但用户明确两次发生的操作使用不同ID。
 后续每步operation_id必须是清单中的未完成事项ID。读取可用于辅助当前事项；完成查询用respond/chat给出结果。清单由服务器保存。澄清或读取事实后发现未执行事项的业务类型、条件或依赖需要更正时，可以再用plan提交全量清单，保留已有ID和全部事项；不能提交status/receipt_id或更改已完成事项。比如转账性质未明先询问，回答为普通消费后将同一未执行事项从event修订为record，不能要求用户重发原目标。不得遗漏未完成事项或提前结束。所有事项完成后可operation_id=null、respond/chat总结。服务端进度是唯一完成依据。
+单一查询优化：新目标的完整清单只有一个无歧义、无依赖的read事项，action为query或manage时，应在首轮plan的arguments_json中同时给出initial_read:{tool:"query"|"records",arguments_json:"完整读取参数JSON字符串",reply_mode:"result"|"analysis"}。服务器先保存和校验清单，再执行读取，无需另用一轮模型选择相同查询。仅列出记录、查某个范围金额/条数或直接查看结果时reply_mode="result"，服务器直接展示真实查询结果并完成目标，无需再输出respond；要求解释、总结内容、建议、推断、比较多个范围或继续查找时reply_mode="analysis"，读取后仍根据事实决定后续动作。records只允许list，query必须是完整收支筛选参数。复合目标、写操作、业务歧义、依赖未完成、草稿重复核对和已有清单修订不能使用initial_read；保留完整清单逐步处理，不能只查询第一件事就结束。不要把用户要求的分析降为直接列出，也不要把写操作包装为read。
 存在歧义先读可核对的信息，再respond/chat、needs_input=true，只问具体缺失信息；用户回答后继续原事项和原清单。原目标中的今天/昨天/本月使用初次请求的today，不能因回答或批准跨天而改变原目标日期；仅回答中明确修订的相对日期采用answer_today。回答对象、金额、付款性质不是批准写操作。可处理无依赖的明确事项，但不能猜测被阻塞事项。发问前不要准备含歧义的可执行审批。送礼礼品估值不能直接当成实际购买支出；明确实际购入才准备对应付款方案。不确定200是估值还是买鞋付款时先问。不能为了按顺序执行而省略早餐、送礼、借还等其他事项。
 如服务端提出同任务内重复核对，用户回答同一笔后使用kind=reuse、operation_id=当前事项ID、tool=null、plan_json=null、arguments_json={source_output_id:重复核对工具提供的原输出ID,answer_quote:当前answer字段的完整原文}；只在用户明确同一笔或不用再记时复用真实成功凭据，不再record。单独“好的/是的/确认”等没有明确是哪种情况时继续澄清，不能猜。用户明确另外一笔则生成新的待确认草稿，不把回答当批准。
 草稿修改、成员选择、移除、排序、导航、撤销等仍走已有respond操作，服务器等待页面处理结果后继续。撤销和清空仍需要对应确认；导航如果用户离开页面，未完成任务保持可恢复。用户纠正pending方案时只改未执行事项；已批准方案须先取消旧审批再重新核对，不把补充回答当批准，不重放已完成事项。
 实际顶层JSON示例（arguments_json和plan_json内部是正确转义的字符串）：
+单一查询当前未归档便利贴（sources按当前请求原文替换）：${simpleReadExample}
 查询某段支出：${readExample}
 查询我欠别人的未结清借还：${loansExample}
 查询完成后答复：${chatExample}
+多项查询统一答复：当全部剩余事项都是查询、各项已有成功工具结果且无需澄清时，respond/chat使用operation_id=null，一次总结完整目标并完成全部查询。查询中的辅助读取不能完成未执行写事项。单项查询答复后仍有其他事项时，服务器会直接继续清单；不要要求页面确认文字已显示，也不要重复输出前一份汇总。最终答复应涵盖本次目标的全部结果。
 直接生成一笔待确认草稿：${recordExample}
 示例里的日期、金额、用途必须按当前请求替换；用户指定分类和成员时，草稿category_id/member_id填可用数据中的真实对应ID，不能照抄null或猜ID。无筛选的查询category_id/member_id/keyword则保持null。
 read/query的arguments_json必须含全部键：scope,start_date,end_date,type,category_id,member_id,keyword；日期为真实YYYY-MM-DD，type为income/expense/null，后三项为可用ID/原文关键词/null；不省略这些键，不添加goal/steps等键。
