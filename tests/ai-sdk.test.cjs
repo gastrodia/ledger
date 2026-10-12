@@ -22,6 +22,7 @@ const assistantImages = loadModule('lib/assistant-images.ts');
 const assistantImageImport = loadModule('lib/assistant-image-import.ts', {
   '@/lib/assistant': assistant, '@/lib/assistant-images': assistantImages,
 });
+const stepContract = loadModule('lib/assistant-agent-step.ts');
 
 function loadAdapter(fetchImpl, env = {}, logs = [], globals = {}) {
   const exports = {};
@@ -37,6 +38,7 @@ function loadAdapter(fetchImpl, env = {}, logs = [], globals = {}) {
       if (id === 'ai') return ai;
       if (id === '@ai-sdk/openai-compatible') return compatible;
       if (id === '@/lib/structured-output') return loadModule('lib/structured-output.ts');
+      if (id === '@/lib/assistant-agent-step') return stepContract;
       assert.fail(`Unexpected adapter dependency ${id}`);
     },
   });
@@ -828,11 +830,31 @@ test('real SDK carries draft removal targets separately from saved-transaction u
 
 
 test('real SDK returns the same normalized step that the runtime accepts, including duplicate coverage', async () => {
- const stepContract=loadModule('lib/assistant-agent-step.ts');
  const stepSchema=loadModule('lib/assistant-agent-schema.ts',{ai,zod:require('zod'),'@/lib/assistant-agent-step':stepContract});
  const raw={kind:'respond',operation_id:'record',covered_operation_ids:['record','record'],tool:null,arguments_json:'{}',plan_json:JSON.stringify({action:'record',reply:'请核对',drafts:[],query:null})};
  const f=fixture(completion(JSON.stringify(raw)));const value=await f.adapter.bailianObject({model:'fixture-model',messages:prompt,schema:stepSchema.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA});
  assert.deepEqual(JSON.parse(JSON.stringify(value)),JSON.parse(JSON.stringify(stepContract.parseAssistantAgentStep(raw,true))));assert.deepEqual(JSON.parse(JSON.stringify(value.covered_operation_ids)),['record']);
  const invalid=fixture(completion(JSON.stringify({...raw,operation_id:'非法编号'})));
  await assert.rejects(invalid.adapter.bailianObject({model:'fixture-model',messages:prompt,schema:stepSchema.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA}),error=>error.code==='invalid_output');
+});
+
+test('SDK preserves safe step field corrections without retaining provider data or arbitrary schema errors', async () => {
+ const stepSchema=loadModule('lib/assistant-agent-schema.ts',{ai,zod:require('zod'),'@/lib/assistant-agent-step':stepContract});
+ for (const patch of [{tool:'command'}, {operation_id:'private-response-secret!'}, {arguments_json:{private:'private-response-secret'}}, {plan_json:{private:'private-response-secret'}}]) {
+  const raw={kind:'read',operation_id:'op1',tool:'records',arguments_json:'{}',plan_json:null,...patch};
+  const f=fixture(completion(JSON.stringify(raw)));
+  await assert.rejects(f.adapter.bailianObject({model:'fixture-model',messages:prompt,schema:stepSchema.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA}),error=>{
+   assert.equal(error.code,'invalid_output');assert.ok(error.stepValidationError instanceof stepContract.AssistantAgentStepError);
+   const field=Object.keys(patch)[0];assert.ok(error.stepValidationError.message.includes(field));
+   if(field==='tool')assert.match(error.stepValidationError.message,/read.*records.*command/);
+   assert.equal(JSON.stringify(error).includes('private-response-secret'),false);assert.equal(JSON.stringify(f.logs).includes('private-response-secret'),false);
+   return safeValidationFailure(f.adapter,error);
+  });
+ }
+ for (const schema of [require('zod').z.object({value:require('zod').z.number()}),ai.jsonSchema({type:'object'},{validate:()=>({success:false,error:new Error('private-response-secret')})})]) {
+  const f=fixture(completion('{"value":"private-response-secret"}'));
+  await assert.rejects(f.adapter.bailianObject({model:'fixture-model',messages:prompt,schema}),error=>{
+   assert.equal(error.code,'invalid_output');assert.equal(error.stepValidationError,undefined);return safeValidationFailure(f.adapter,error);
+  });
+ }
 });

@@ -40,8 +40,15 @@ export function parseAssistantAgentStep(raw: unknown, requireReference = false):
     }
     s.plan_json = null;
   }
-  if (["plan", "reuse"].includes(s.kind) ? s.tool !== null || s.plan_json !== null
-    : s.kind === "respond" ? s.tool !== null || s.plan_json === null
-    : s.plan_json !== null || !(s.kind === "read" ? ["query", "records", "draft_matches"] : ["command", "event"]).includes(s.tool || "")) fail("kind/tool/plan_json", "不符合账本允许的步骤组合，助手工具不在账本允许范围内");
+  if (["plan", "reuse"].includes(s.kind)) {
+    if (s.tool !== null) fail("tool", "在plan/reuse时必须为null");
+  } else if (s.kind === "respond") {
+    if (s.tool !== null) fail("tool", "在respond时必须为null");
+    if (s.plan_json === null) fail("plan_json", "在respond时必须填写AssistantPlan的JSON字符串");
+  } else {
+    if (s.kind === "read" && !["query", "records", "draft_matches"].includes(s.tool || "")) fail("tool", "在read时只允许query、records或draft_matches；读取借还等记录使用records并将完整command放入arguments_json，command仅用于preview确认预览，不能用于read");
+    if (s.kind === "preview" && !["command", "event"].includes(s.tool || "")) fail("tool", "在preview时只允许command或event，助手工具不在账本允许范围内");
+    if (s.plan_json !== null) fail("plan_json", "在read/preview时必须为JSON null");
+  }
   return s;
 }

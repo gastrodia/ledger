@@ -7,11 +7,12 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const crypto = require('node:crypto');
 
-function fixture(provider = async () => { throw new Error('Unexpected provider request'); }, { realSdk = false, env = {} } = {}) {
+function fixture(provider = async () => { throw new Error('Unexpected provider request'); }, { realSdk = false, env = {}, now = () => Date.now() } = {}) {
   const cache = new Map();
   const calls = [];
   const bailian = {
     BAILIAN_ASSISTANT_MODEL: 'test-vision-model',
+    BailianError: class extends Error {},
     bailianObjectStream: async (...args) => { calls.push(args); return provider(...args); },
   };
   function load(file) {
@@ -21,7 +22,7 @@ function fixture(provider = async () => { throw new Error('Unexpected provider r
     vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
     }).outputText, {
-      exports, Date, JSON, Number, Error, TypeError, AbortSignal, AbortController, Buffer,
+      exports, Date: class extends Date { static now() { return now(); } }, JSON, Number, Error, TypeError, AbortSignal, AbortController, Buffer,
       URL, Headers, Request, Response, ReadableStream, TransformStream, TextEncoder, TextDecoder,
       Uint8Array, setTimeout, clearTimeout,
       fetch: async (url, init) => {
@@ -62,11 +63,11 @@ const source = (image_index = 1, row_index = 1, time = '11:47', transaction_id =
 });
 const row = { type: 'expense', amount_cents: 1200, category: 1, member: null, date: '2026-10-03',
   description: '早餐店', payment_method: null, note: '', source: source() };
-const wire = (drafts, patch = {}) => ({ action: 'record', outcome: 'complete', date_context: null, reply: '请核对后确认入账。', drafts, ...patch });
+const wire = (drafts, patch = {}) => ({ action: 'record', outcome: 'complete', date_context: null, date_dependency: null, reply: '请核对后确认入账。', drafts, ...patch });
 const args = (imageIndex = 0, patch = {}) => ({ input, categories, members, imageIndex, ...patch });
 const completed = (api, index, drafts) => api.buildAssistantImageBatch(args(index)).expandOutput(wire(drafts));
 const empty = (api, index, outcome = 'empty', reply = '本图没有收支交易。') => api.buildAssistantImageBatch(args(index))
-  .expandOutput({ action: 'chat', outcome, date_context: null, reply, drafts: [] });
+  .expandOutput({ action: 'chat', outcome, date_context: null, date_dependency: null, reply, drafts: [] });
 const finalize = (api, results, imageCount) => api.finalizeAssistantImageBatches(results, imageCount, categories, members);
 
 test('a batch includes only its target and previous image, with no historical account context', () => {
@@ -151,14 +152,14 @@ test('outcome agrees with record/chat shape and never accepts foreign references
     assert.equal((await request.schema.validate(raw)).success, false);
     assert.throws(() => request.expandOutput(raw));
   }
-  assert.equal((await request.schema.validate({ action: 'chat', outcome: 'empty', date_context: null, reply: '只有零金额记录。', drafts: [] })).success, true);
+  assert.equal((await request.schema.validate({ action: 'chat', outcome: 'empty', date_context: null, date_dependency: null, reply: '只有零金额记录。', drafts: [] })).success, true);
 });
 
 test('an explicit earlier header can continue unchanged into later batches without adding older image payloads', () => {
   const api = fixture();
   const dateContext = { year: 2026, month: 10, source_image_index: 1, evidence: '2026年10月' };
   const request = api.buildAssistantImageBatch(args(2, { dateContext }));
-  const result = request.expandOutput(wire([{ ...row, source: source(2, 1) }], { date_context: dateContext }));
+  const result = request.expandOutput(wire([{ ...row, source: source(2, 1) }], { date_context: dateContext, date_dependency: dateContext }));
   assert.deepEqual(plain(result.date_context), dateContext);
   assert.ok(JSON.stringify(request.messages).includes('2026年10月'));
   const files = request.messages.flatMap(message => Array.isArray(message.content)
@@ -185,10 +186,10 @@ test('date context cannot invent unseen headers, alter earlier quotations, or su
     assert.equal((await request.schema.validate(raw)).success, false, `invalid date context: ${JSON.stringify(context)}`);
     assert.throws(() => request.expandOutput(raw));
   }
-  assert.throws(() => api.buildAssistantImageBatch(args(2)).expandOutput(wire(target, { date_context: dateContext })));
+  assert.throws(() => api.buildAssistantImageBatch(args(2)).expandOutput(wire(target, { date_context: dateContext, date_dependency: dateContext })));
   assert.throws(() => api.buildAssistantImageBatch(args(0, { dateContext })));
   assert.throws(() => request.expandOutput(wire([], {
-    action: 'chat', outcome: 'needs_clarification', date_context: dateContext,
+    action: 'chat', outcome: 'needs_clarification', date_context: dateContext, date_dependency: null,
   })));
 });
 
@@ -381,10 +382,12 @@ test('batch generation uses a bounded single-image output budget and returns onl
   assert.equal(result.output.drafts[0].amount_cents, 1200);
   assert.equal(api.calls.length, 1);
   const [request, , signal] = api.calls[0];
-  assert.equal(request.timeoutMs, 90000);
+  assert.ok(request.timeoutMs > 0 && request.timeoutMs <= 90000);
   assert.equal(request.maxOutputTokens, 5000);
   assert.equal(request.thinking, false);
-  assert.equal(signal, controller.signal);
+  assert.equal(signal.aborted, false);
+  controller.abort();
+  assert.equal(signal.aborted, true);
 });
 
 test('cancellation discards even a provider result which arrives after the abort', async () => {
@@ -415,7 +418,10 @@ test('an already cancelled batch never starts a provider request', async () => {
 });
 
 function streamedObject(raw) {
-  const json = JSON.stringify(raw);
+  return streamedContent(JSON.stringify(raw));
+}
+
+function streamedContent(json) {
   const events = [];
   // Real SDK parsing sees fragmented JSON and split UTF-8 bytes, including
   // incomplete provenance/date context; only its validated final object wins.
@@ -435,7 +441,7 @@ function streamedObject(raw) {
 test('real Bailian SDK streams the batch schema and expands verified target rows with their date context', async () => {
   const dateContext = { year: 2026, month: 10, source_image_index: 2, evidence: '2026年10月' };
   const api = fixture(async () => streamedObject(wire([{ ...row, member: 1, source: source(2, 1) }],
-    { date_context: dateContext })), { realSdk: true });
+    { date_context: dateContext, date_dependency: dateContext })), { realSdk: true });
   const result = await api.generateAssistantImageBatch(args(2), new AbortController().signal);
   assert.equal(result.image_index, 3);
   assert.equal(result.outcome, 'complete');
@@ -484,7 +490,7 @@ test('real Bailian SDK rejects wrong-image or missing-date-context batch output 
       return true;
     });
     assert.equal(checkpointAccepted, false);
-    assert.equal(api.calls.length, 1);
+    assert.equal(api.calls.length, api.ASSISTANT_IMAGE_BATCH_MAX_ATTEMPTS);
   }
 });
 
@@ -509,15 +515,139 @@ test('image batches on an arbitrary model retain strict financial and source che
     wire([{ ...row, source: source(2, 1) }], { command: {} })]) {
     const rejected = fixture(async () => streamedObject(invalid), { realSdk: true, env });
     await assert.rejects(rejected.generateAssistantImageBatch(args(2), new AbortController().signal));
-    assert.equal(rejected.calls.length, 1);
+    assert.equal(rejected.calls.length, rejected.ASSISTANT_IMAGE_BATCH_MAX_ATTEMPTS);
   }
+});
+
+test('invalid JSON and empty-array responses retry within the same model contract and yield one validated draft', async () => {
+  const responses = [streamedObject([]), streamedContent('{"action":'), streamedObject(wire([row]))];
+  const api = fixture(async () => responses.shift(), { realSdk: true, env: { BAILIAN_ASSISTANT_MODEL: 'arbitrary-vision' } });
+  const result = await api.generateAssistantImageBatch(args(), new AbortController().signal);
+  assert.equal(api.calls.length, 3);
+  assert.equal(result.output.drafts.length, 1);
+  assert.equal(result.output.drafts[0].amount_cents, 1200);
+  const bodies = api.calls.map(call => call.body);
+  assert.ok(bodies.every(body => body.model === 'arbitrary-vision'));
+  assert.ok(bodies.every(body => JSON.stringify(body.messages) === JSON.stringify(bodies[0].messages)));
+  assert.ok(bodies.every(body => JSON.stringify(body.response_format) === '{"type":"json_object"}'));
+  const plan = api.finalizeAssistantImageBatches([result], 1, categories, members);
+  assert.equal(plan.drafts.length, 1, 'discarded attempts cannot add duplicate or partial rows to the final review');
+});
+
+test('financial validation failures are retried but never carried into the accepted result', async () => {
+  const api = fixture(async () => api.calls.length === 1
+    ? wire([{ ...row, date: '2026-02-30', amount_cents: 999999 }]) : wire([row]));
+  const result = await api.generateAssistantImageBatch(args(), new AbortController().signal);
+  assert.equal(api.calls.length, 2);
+  assert.equal(result.output.drafts.length, 1);
+  assert.equal(result.output.drafts[0].transaction_date, row.date);
+  assert.equal(result.output.drafts[0].amount_cents, row.amount_cents);
+});
+
+test('three invalid outputs exhaust the retry limit without publishing any checkpoint', async () => {
+  const api = fixture(async () => streamedObject([]), { realSdk: true });
+  await assert.rejects(api.generateAssistantImageBatch(args(), new AbortController().signal), error => error.code === 'invalid_output');
+  assert.equal(api.calls.length, 3);
+});
+
+test('transport, quota, credentials, truncation and empty text do not trigger output retries', async () => {
+  for (const response of [
+    () => new Response(JSON.stringify({ error: { code: 'rate_limit', message: 'private' } }), { status: 429 }),
+    () => new Response(JSON.stringify({ error: { code: 'invalid_output', message: 'private' } }), { status: 429 }),
+    () => new Response(JSON.stringify({ error: { code: 'Unauthorized', message: 'private' } }), { status: 401 }),
+    () => new Response(JSON.stringify({ error: { code: 'InternalError', message: 'private' } }), { status: 500 }),
+    () => { throw new TypeError('network failed'); },
+    () => { throw new DOMException('deadline', 'TimeoutError'); },
+    () => streamedContent(''),
+    () => new Response('data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"length"}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } }),
+    () => new Response('data: {"choices":[{"delta":{"content":"{}"},"finish_reason":"stop"}]}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } }),
+  ]) {
+    const api = fixture(async () => response(), { realSdk: true });
+    await assert.rejects(api.generateAssistantImageBatch(args(), new AbortController().signal));
+    assert.equal(api.calls.length, 1);
+  }
+});
+
+test('cancellation on an invalid response stops retries immediately', async () => {
+  const controller = new AbortController();
+  const reason = new Error('user cancelled');
+  const api = fixture(async () => { controller.abort(reason); return streamedObject([]); }, { realSdk: true });
+  await assert.rejects(api.generateAssistantImageBatch(args(), controller.signal), error => error === reason);
+  assert.equal(api.calls.length, 1);
+});
+
+test('retry attempts share the original ninety-second budget', async () => {
+  let elapsed = 0;
+  const api = fixture(async () => {
+    elapsed += 1000;
+    return api.calls.length < 3 ? [] : wire([row]);
+  }, { now: () => elapsed });
+  await api.generateAssistantImageBatch(args(), new AbortController().signal);
+  assert.deepEqual(api.calls.map(call => call[0].timeoutMs), [90000, 89000, 88000]);
+  assert.ok(api.calls.every(call => call[2] === api.calls[0][2]));
+  // The shared deadline must interrupt a hung retry, and its caller must still
+  // be able to cancel all requests. Verify exhaustion without waiting 90s.
+  const exhausted = fixture(async () => { elapsed += 90000; return streamedObject([]); }, { realSdk: true, now: () => elapsed });
+  await assert.rejects(exhausted.generateAssistantImageBatch(args(), new AbortController().signal), error => error.code === 'timeout');
+  assert.equal(exhausted.calls.length, 1);
+});
+
+test('a valid clarification is terminal and never retried as a format error', async () => {
+  const api = fixture(async () => streamedObject(wire([], { action: 'chat', outcome: 'needs_clarification', reply: '请补充日期' })), { realSdk: true });
+  const result = await api.generateAssistantImageBatch(args(), new AbortController().signal);
+  assert.equal(result.outcome, 'needs_clarification');
+  assert.equal(api.calls.length, 1);
+});
+
+test('date dependency evidence is required on new output and cannot cite a current, future or unseen image', async () => {
+  const api = fixture();
+  const dateContext = { year: 2026, month: 10, source_image_index: 1, evidence: '2026年10月' };
+  const request = api.buildAssistantImageBatch(args(2, { dateContext }));
+  const raw = wire([{ ...row, source: source(2, 1) }]);
+  for (const dependency of [undefined, {}, { ...dateContext, source_image_index: 3 },
+    { ...dateContext, source_image_index: 4 }, { ...dateContext, evidence: '今天' },
+    { ...dateContext, source_image_index: 1, month: 9, evidence: '2026年9月' }]) {
+    assert.equal((await request.schema.validate({ ...raw, date_dependency: dependency })).success, false);
+  }
+  assert.equal((await request.schema.validate({ ...raw, date_context: dateContext, date_dependency: null })).success, false,
+    'a forwarded preceding context cannot claim independence');
+  const result = request.expandOutput({ ...raw, date_context: dateContext, date_dependency: dateContext });
+  assert.deepEqual(plain(result.date_dependency), dateContext);
+  const corrupted = { ...result, date_dependency: { ...dateContext, source_image_index: 3 } };
+  assert.throws(() => api.validateAssistantImageBatchResult(corrupted, 2, 5, categories, members));
+});
+
+test('cache refresh requires actual preceding date dependency and a changed basis, including mixed-month targets', () => {
+  const api = fixture();
+  const oldContext = { year: 2026, month: 10, source_image_index: 1, evidence: '2026年10月' };
+  const newContext = { year: 2026, month: 9, source_image_index: 1, evidence: '2026年9月' };
+  const request = api.buildAssistantImageBatch(args(1, { dateContext: oldContext }));
+  const raw = wire([{ ...row, source: source(2, 1) }], { date_context: oldContext, date_dependency: oldContext });
+  const dependent = request.expandOutput(raw);
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(dependent, oldContext, plain(oldContext)), false);
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(dependent, null, plain(oldContext)), false,
+    'recovered previous recognition with the same visual date basis preserves a successful target');
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(dependent, oldContext, newContext), true);
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(dependent, oldContext, null), true);
+  const mixed = request.expandOutput({ ...raw,
+    date_context: { year: 2026, month: 11, source_image_index: 2, evidence: '2026年11月' },
+    drafts: [raw.drafts[0], { ...row, date: '2026-11-01', source: source(2, 2) }] });
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(mixed, oldContext, newContext), true,
+    'an own header at the end does not erase dependency of earlier rows');
+  const independent = request.expandOutput(wire([{ ...row, source: source(2, 1) }]));
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(independent, oldContext, newContext), false);
+  const legacy = { ...dependent }; delete legacy.date_dependency;
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(legacy, oldContext, plain(oldContext)), false);
+  assert.equal(api.assistantImageBatchNeedsDateRefresh(legacy, oldContext, newContext), true);
 });
 
 test('a complete target batch can include unknown transfer purpose and refund category without asking for clarification', () => {
   const f=fixture();
   const request=f.buildAssistantImageBatch({input:{...input,images:[images[0]]},categories,members,imageIndex:0});
   const data=[['income',10000,'转账-来自测试成员'],['expense',30000,'转账-转给测试成员'],['income',14,'测试商户-退...']];
-  const raw={action:'record',reply:'请核对草稿。',outcome:'complete',date_context:{year:2026,month:10,source_image_index:1,evidence:'2026年10月'},drafts:data.map(([type,amount_cents,description],i)=>({type,amount_cents,category:null,member:null,date:'2026-10-08',description,payment_method:null,note:'具体用途和分类待核对',source:{image_index:1,row_index:i+1,time:'14:15',transaction_id:null,kind:'statement'}}))};
+  const raw={action:'record',reply:'请核对草稿。',outcome:'complete',date_dependency:null,date_context:{year:2026,month:10,source_image_index:1,evidence:'2026年10月'},drafts:data.map(([type,amount_cents,description],i)=>({type,amount_cents,category:null,member:null,date:'2026-10-08',description,payment_method:null,note:'具体用途和分类待核对',source:{image_index:1,row_index:i+1,time:'14:15',transaction_id:null,kind:'statement'}}))};
   const expanded=request.expandOutput(raw);
   const checked=f.validateAssistantImageBatchResult(expanded,0,1,categories,members);
   assert.equal(checked.outcome,'complete');assert.equal(checked.output.drafts.length,3);

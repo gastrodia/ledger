@@ -12,7 +12,7 @@ import { BAILIAN_ASSISTANT_MODEL, BailianError, bailianConfig, bailianFailure } 
 import { ensureAssistantTaskSchema } from "@/lib/assistant-task-schema";
 import type { AssistantImageProgress, AssistantTask, AssistantTaskPhase } from "@/lib/assistant-task-types";
 
-import { ASSISTANT_IMAGE_BATCH_VERSION, AssistantImageBatchError, generateAssistantImageBatch, finalizeAssistantImageBatches, validateAssistantImageBatchResult, type AssistantImageBatchResult } from "@/lib/assistant-image-batches";
+import { ASSISTANT_IMAGE_BATCH_VERSION, ASSISTANT_IMAGE_BATCH_LEGACY_VERSION, AssistantImageBatchError, assistantImageBatchNeedsDateRefresh, generateAssistantImageBatch, finalizeAssistantImageBatches, validateAssistantImageBatchResult, type AssistantImageBatchResult } from "@/lib/assistant-image-batches";
 
 export class AssistantTaskError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -543,15 +543,21 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
       const { categories, members } = await assistantOptions(userId);
       if (loadContext) execution.finish("context", [`截图 ${input.images.length} 张；当前日期 ${input.today}`, `可用分类 ${categories.length} 个、成员 ${members.length} 位`]);
       signal.throwIfAborted();
-      const key = createHash("sha256").update(JSON.stringify({ version: ASSISTANT_IMAGE_BATCH_VERSION, input,
+      const fingerprint = (version: string) => createHash("sha256").update(JSON.stringify({ version, input,
         model: process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL, endpoint: config.baseURL,
         categories: categories.map(({ id, name, type }) => ({ id, name, type })),
         members: members.map(({ id, name }) => ({ id, name })) })).digest("hex");
+      const key = fingerprint(ASSISTANT_IMAGE_BATCH_VERSION);
       const total = input.images.length;
       const previous = row.image_checkpoint;
-      const checkpoint: ImageCheckpoint = previous?.version === ASSISTANT_IMAGE_BATCH_VERSION && previous.key === key
+      // V6 adds dependency evidence without changing the financial row format.
+      // Migrate matching v5 checkpoints through the same strict validation.
+      const checkpoint: ImageCheckpoint = previous
+        && [ASSISTANT_IMAGE_BATCH_VERSION, ASSISTANT_IMAGE_BATCH_LEGACY_VERSION].includes(previous.version)
+        && previous.key === fingerprint(previous.version)
         && Array.isArray(previous.results) && previous.results.length === total
-        ? previous : { version: ASSISTANT_IMAGE_BATCH_VERSION, key, attempt: row.attempt, failures: {}, contextInputs: {}, results: Array.from({ length: total }, () => null) };
+        ? { ...previous, version: ASSISTANT_IMAGE_BATCH_VERSION, key }
+        : { version: ASSISTANT_IMAGE_BATCH_VERSION, key, attempt: row.attempt, failures: {}, contextInputs: {}, results: Array.from({ length: total }, () => null) };
       checkpoint.failures = checkpoint.failures && typeof checkpoint.failures === "object" ? checkpoint.failures : {};
       checkpoint.contextInputs = checkpoint.contextInputs && typeof checkpoint.contextInputs === "object" ? checkpoint.contextInputs : {};
       checkpoint.results = checkpoint.results.map((result, index) => {
@@ -566,25 +572,13 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
           && typeof message === "string" && Boolean(message.trim()) && message.length <= 2000 && !complete(checkpoint.results[position - 1]);
       }));
       if (checkpoint.attempt !== row.attempt) {
-        // A null context does not prove independence: an earlier failure can
-        // have removed the month header needed by a later screenshot. Recheck
-        // the entire suffix so retry never preserves a guessed/stale month.
-        const firstUnfinished = checkpoint.results.findIndex((result, index) => !complete(result) || Boolean(checkpoint.failures[index + 1]));
-        if (firstUnfinished >= 0) checkpoint.results = checkpoint.results.map((result, index) =>
-          index > firstUnfinished ? null : result);
+        // Keep successful targets. Resolve dependencies in image order after
+        // predecessors recover, rather than invalidating an entire suffix.
         checkpoint.attempt = row.attempt;
         checkpoint.failures = {};
       }
-      checkpoint.results.forEach((result, index) => {
-        if (complete(result) && !execution.snapshot().some(step => step.id === `image-${index + 1}`)) {
-          execution.start(`image-${index + 1}`, `识别第 ${index + 1} 张截图`, "tool");
-          execution.finish(`image-${index + 1}`, [`复用已校验的识别结果：${result!.output.drafts.length} 条候选账目`]);
-        }
-      });
-      const remaining = () => checkpoint.results.flatMap((result, index) => complete(result) || checkpoint.failures[index + 1] ? [] : [index]);
-      const targets = remaining().slice(0, 2);
       const progress: AssistantImageProgress = { total, completed: checkpoint.results.filter(complete).length,
-        active: targets.slice(0, 1).map(index => index + 1), failed: Object.keys(checkpoint.failures).map(Number).sort((a, b) => a - b), stage: checkpoint.results.every(complete) && !Object.keys(checkpoint.failures).length ? "merging" : "recognizing" };
+        active: [], failed: Object.keys(checkpoint.failures).map(Number).sort((a, b) => a - b), stage: "recognizing" };
       // Completion writes are serialized, so out-of-order model responses cannot
       // replace a sibling checkpoint. The DB token additionally fences processes.
       let imageWrites: Promise<void> = Promise.resolve();
@@ -604,20 +598,50 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
       // Adjacent screenshots can inherit a month only from completed preceding
       // recognition. Concurrent siblings could consume a stale pre-transition
       // month, so each wave processes up to two targets in image order.
-      for (const imageIndex of targets) {
+      let requests = 0, moreWork = false;
+      const resolved = new Set<number>();
+      for (let imageIndex = 0; imageIndex < total; imageIndex++) {
+        signal.throwIfAborted();
+        const earlier = imageIndex ? checkpoint.results[imageIndex - 1] : null;
+        const predecessorResolved = imageIndex === 0 || resolved.has(imageIndex - 1);
+        const dateContext = predecessorResolved && complete(earlier) ? earlier!.date_context : null;
+        const cached = checkpoint.results[imageIndex];
+        let dateRefresh = false;
+        if (complete(cached)) {
+          // A failed predecessor cannot establish a changed date basis yet.
+          // Keep the validated cache for following images, but never publish
+          // a plan while that predecessor remains failed. Recheck in order
+          // after recovery, before merge or any dependent reuse is finalized.
+          dateRefresh = predecessorResolved
+            && assistantImageBatchNeedsDateRefresh(cached!, checkpoint.contextInputs[imageIndex + 1], dateContext);
+          if (!dateRefresh) {
+            resolved.add(imageIndex);
+            if (!execution.snapshot().some(step => step.id === `image-${imageIndex + 1}`)) {
+              execution.start(`image-${imageIndex + 1}`, `识别第 ${imageIndex + 1} 张截图`, "tool");
+              execution.finish(`image-${imageIndex + 1}`, [`复用已校验的识别结果：${cached!.output.drafts.length} 条候选账目`,
+                cached!.date_dependency === null ? "日期不依赖前图"
+                  : predecessorResolved ? "日期依据未变化" : "前图恢复后核对日期依赖"]);
+            }
+            continue;
+          }
+        }
+        if (errors.has(imageIndex + 1)) continue;
+        if (requests >= 2) {
+          moreWork = true;
+          // Keep the old cache only as dependency evidence for the next wave;
+          // it is no longer a completed target and cannot reach final merge.
+          if (dateRefresh) { progress.completed--; await persistImages(); }
+          break;
+        }
+        requests++;
+        checkpoint.results[imageIndex] = null;
+        progress.completed = checkpoint.results.filter(complete).length;
         progress.active = [imageIndex + 1];
-        execution.start(`image-${imageIndex + 1}`, `识别第 ${imageIndex + 1} 张截图`, "tool", [`共 ${total} 张；仅提取本张账目${imageIndex ? "，前图用于日期参考" : ""}`]);
+        execution.start(`image-${imageIndex + 1}`, `识别第 ${imageIndex + 1} 张截图`, "tool", [
+          ...(dateRefresh ? ["前图日期依据已变化，重新核对本图日期"] : []),
+          `共 ${total} 张；仅提取本张账目${imageIndex ? "，前图用于日期参考" : ""}`]);
         await persistImages();
         try {
-          // Never carry a month across a failed/unreadable image. An unset
-          // result must not be skipped; an explicit null context on
-          // the latest complete result also ends the chain.
-          let dateContext: AssistantImageBatchResult["date_context"] = null;
-          for (let previousIndex = imageIndex - 1; previousIndex >= 0; previousIndex--) {
-            const earlier = checkpoint.results[previousIndex];
-            if (checkpoint.failures[previousIndex + 1] || earlier?.outcome === "needs_clarification") break;
-            if (complete(earlier)) { dateContext = earlier!.date_context; break; }
-          }
           checkpoint.contextInputs[imageIndex + 1] = dateContext;
           const imageTelemetryId = randomUUID();
           console.info("AI task image linked", { taskId: id, attempt: row.attempt, imageIndex: imageIndex + 1, telemetryId: imageTelemetryId });
@@ -628,7 +652,9 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
             errors.set(imageIndex + 1, result.output.reply.slice(0, 500));
             execution.finish(`image-${imageIndex + 1}`, ["这张截图需要补充信息，详见错误提示"], "failed");
           } else {
-            execution.finish(`image-${imageIndex + 1}`, [`提取 ${result.output.drafts.length} 条候选账目`,
+            resolved.add(imageIndex);
+            execution.finish(`image-${imageIndex + 1}`, [...(dateRefresh ? ["前图日期依据已变化，已重新识别本图"] : []),
+              `提取 ${result.output.drafts.length} 条候选账目`,
               dateContext ? `日期衔接参考：第 ${dateContext.source_image_index} 张的 ${dateContext.year ? `${dateContext.year} 年 ` : ""}${dateContext.month} 月` : "未继承前图月份",
               result.date_context ? `识别到月份：${result.date_context.year ?? "年份待核对"} / ${result.date_context.month}` : "未保留可继续衔接的月份信息"]);
           }
@@ -645,7 +671,7 @@ export async function runAssistantTask(userId: string, id: string, expected?: As
         await persistImages();
       }
       signal.throwIfAborted();
-      if (remaining().length) {
+      if (moreWork) {
         await finishProgress();
         const queued = await sql.query(`UPDATE assistant_tasks SET status='queued',lease_until=NULL,execution_steps=$5::jsonb,updated_at=NOW()
           WHERE user_id=$1 AND id=$2 AND attempt=$3 AND run_token=$4 AND status='running' AND lease_until>NOW() RETURNING id`,

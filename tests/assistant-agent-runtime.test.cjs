@@ -619,6 +619,34 @@ test('final provider schema failures retry the current decision without replayin
  assert.equal(paused.agent.status,'interrupted');assert.equal(paused.agent.awaiting_answer,undefined);assert.equal(paused.agent.operations[0].status,'pending');assert.equal(repeated.calls.filter(call=>call[0]==='event').length,0);
 });
 
+test('wrapped schema corrections reach the next decision and repair a loan read without replaying completed work', async () => {
+ const first=fixture([agenda([item('done','record'),item('loan','manage',[],'read')]),recordStep('done')]);await first.run();
+ const checkpoint=first.checkpoints.at(-1),receiptId=checkpoint.pending_batch.batch_id;
+ const loanCommand=command('list',{resource:'loans',filter:{...command().filter,type:'owed',status:'outstanding'}});
+ const invalid=async()=>{
+  const validation=await schemaExports.ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA.validate(forItem('loan',choose('read','command',loanCommand)));
+  assert.equal(validation.success,false);
+  throw Object.assign(new Error('private provider body'),{code:'invalid_output',stepValidationError:validation.error});
+ };
+ const repaired=messages=>{
+  const feedback=messages.findLast(message=>message.content.includes('账本工具 validation_error'));
+  assert.match(feedback.content,/tool.*read.*records.*command/);assert.equal(feedback.content.includes('private provider body'),false);
+  return forItem('loan',choose('read','records',loanCommand));
+ };
+ const f=fixture([invalid,repaired,forItem('loan',respond('已查到借还记录')), {...respond('全部事项已完成'),operation_id:null}],{adapters:{verifyTargets:async()=>({verified:true,records:[]})}});
+ const result=await f.run({checkpoint,approvalOutcome:{id:receiptId,status:'succeeded',text:'已入账',targets:[{resource:'transactions',operation:'create',ids:[ID]}]}});
+ assert.equal(result.agent.status,'completed');assert.equal(result.agent.operations[0].receipt_id,receiptId);
+ assert.equal(f.calls.filter(call=>call[0]==='command').length,1);assert.equal(f.calls.find(call=>call[0]==='command')[1].operation,'list');
+ assert.equal(f.calls.filter(call=>call[0]==='event').length,0);assert.equal(JSON.stringify(f.checkpoints).includes('private provider body'),false);
+});
+
+test('untrusted validation detail fields do not become model feedback', async () => {
+ const invalid=()=>{throw Object.assign(new Error('private provider body'),{code:'invalid_output',stepValidationError:{message:'private provider body'}});};
+ const f=fixture([agenda([{...item('loan','manage'),sources:['核对并整理账本']}]),invalid,invalid,invalid]);const result=await f.run({requireWorkflow:true});
+ assert.equal(result.agent.status,'interrupted');assert.equal(JSON.stringify(f.checkpoints).includes('private provider body'),false);
+ assert.equal(f.calls.filter(call=>call[0]==='command').length,0);
+});
+
 
 test('resolved event choices continue deterministically without letting the model repeat the duplicate question', async () => {
  const input={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:true};

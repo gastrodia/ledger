@@ -1,6 +1,7 @@
 import { generateText, Output, streamText, wrapLanguageModel, type FlexibleSchema, type LanguageModelUsage, type ModelMessage } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { structuredOutputMiddleware } from "@/lib/structured-output";
+import { AssistantAgentStepError } from "@/lib/assistant-agent-step";
 
 // Server-side only. Never return this configuration or provider payloads to the client.
 export const BAILIAN_SUMMARY_MODEL = "qwen3.8-max";
@@ -8,6 +9,8 @@ export const BAILIAN_ASSISTANT_MODEL = "qwen3.8-max";
 export const BAILIAN_ASR_MODEL = "qwen3-asr-flash";
 
 export class BailianError extends Error {
+  /** Only our schema's field/rule error may survive SDK wrapping. */
+  stepValidationError?: AssistantAgentStepError;
   constructor(public status: number, public code = "") {
     super("百炼请求失败");
     this.name = "BailianError";
@@ -44,9 +47,19 @@ function providerError(error: unknown): BailianError {
   // Output.object wraps parsing and schema errors in its own error. Preserve
   // that classification instead of treating its parser cause as a network error.
   if (e.name === "AI_NoObjectGeneratedError") {
-    return typeof e.text === "string" && !e.text.trim()
+    const failure = typeof e.text === "string" && !e.text.trim()
       ? new BailianError(502, "empty")
       : new BailianError(422, "invalid_output");
+    if (failure.code === "invalid_output") {
+      // The SDK nests schema errors under TypeValidationError. Never copy its
+      // message, value, provider body or arbitrary errors into task feedback.
+      let cause: unknown = e.cause;
+      for (let depth = 0; depth < 8 && cause && typeof cause === "object"; depth++) {
+        if (cause instanceof AssistantAgentStepError) { failure.stepValidationError = cause; break; }
+        cause = (cause as { cause?: unknown }).cause;
+      }
+    }
+    return failure;
   }
   // The SDK can wrap a transport validation failure in an APICallError with
   // HTTP status 200. Keep our actual terminal-stream error classification.

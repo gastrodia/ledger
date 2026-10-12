@@ -296,7 +296,8 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (signal.aborted || !(c.operations || c.workflow_required)
           || !(error instanceof AssistantAgentStepError || (error as { code?: string })?.code === "invalid_output")) throw error;
         o.execution?.finish(id, ["模型步骤格式未通过校验，正在修正；未执行账本操作"], "failed");
-        append("validation_error", { message: error instanceof AssistantAgentStepError ? error.message : "模型步骤格式无效，请重新输出符合步骤schema的单个步骤，保留原任务及事项ID；不能重放已完成事项。", writes_executed: false });
+        const validationError = error instanceof AssistantAgentStepError ? error : (error as { stepValidationError?: unknown })?.stepValidationError;
+        append("validation_error", { message: validationError instanceof AssistantAgentStepError ? validationError.message : "模型步骤格式无效，请重新输出符合步骤schema的单个步骤，保留原任务及事项ID；不能重放已完成事项。", writes_executed: false });
         await save();
         if (++malformedSteps >= 3) return interrupt("AI 返回的处理步骤暂时未能通过校验。原任务和已完成结果已保留，可继续处理。");
         continue;

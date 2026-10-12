@@ -20,7 +20,7 @@ const imageBatch = settings => {
   const label = content.filter(part => part.type === 'text').at(-1).text;
   const localIndex = Number(label.match(/source\.image_index=(\d+)/)[1]);
   const targetIndex = Number(label.match(/原始第(\d+)张/)[1]);
-  return { ...imageRecord, outcome: 'complete', date_context: null, drafts: imageRecord.drafts.map(value => ({ ...value, description: `午餐 ${targetIndex}`,
+  return { ...imageRecord, outcome: 'complete', date_context: null, date_dependency: null, drafts: imageRecord.drafts.map(value => ({ ...value, description: `午餐 ${targetIndex}`,
     source: { image_index: localIndex, row_index: 1, time: '12:00', transaction_id: null, kind: 'statement' } })) };
 };
 const chat = { action: 'chat', reply: '可以把收支发给我。', drafts: [], query: null };
@@ -316,7 +316,8 @@ if (PGlite) {
     await Promise.all(f.background.map(callback => callback()));
     assert.equal(f.paidCalls.length, 1, 'list and detail recovery cannot execute the same queued task twice');
     assert.equal(f.paidCalls[0][0].schemaName, 'ledger_image_batch');
-    assert.equal(f.paidCalls[0][0].timeoutMs, 90000, 'each image target has a bounded provider budget');
+    assert.ok(f.paidCalls[0][0].timeoutMs > 0 && f.paidCalls[0][0].timeoutMs <= 90000,
+      'each image target has a bounded provider budget after preparation');
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'succeeded');
   });
 
@@ -510,7 +511,56 @@ if (PGlite) {
     assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
   });
 
-  test('real PostgreSQL: each image checkpoints before a sibling finishes and retry rechecks the suffix even without carried context', async t => {
+  test('real PostgreSQL: automatic image retries publish one draft batch without checkpointing invalid attempts or posting transactions', async t => {
+    const retryStarted = deferred(), retryFinish = deferred();
+    let calls = 0;
+    const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
+      if (++calls === 1) return [];
+      retryStarted.resolve();
+      await retryFinish.promise;
+      return imageBatch(settings);
+    } } });
+    await f.tasks.createAssistantTask('owner', body({ images: ['data:image/png;base64,YWJj'] }));
+    const worker = f.tasks.runAssistantTask('owner', taskId);
+    await retryStarted.promise;
+    const pending = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(pending.status, 'running');
+    assert.equal(pending.result, null);
+    assert.equal(pending.image_progress.completed, 0);
+    assert.deepEqual((await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint.results, [null]);
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+    assert.equal(await f.tasks.runAssistantTask('owner', taskId), null, 'a duplicate worker cannot start additional attempts');
+    assert.equal(calls, 2);
+    retryFinish.resolve();
+    await worker;
+    const completed = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(completed.status, 'succeeded');
+    assert.equal(completed.attempt, 1, 'automatic retries remain inside the original task attempt');
+    assert.equal(completed.result.drafts.length, 1);
+    assert.equal(completed.result.drafts[0].amount_cents, 1200);
+    const draftId = completed.result.drafts[0].id;
+    await f.tasks.runAssistantTask('owner', taskId);
+    const replay = await f.tasks.createAssistantTask('owner', body({ images: ['data:image/png;base64,YWJj'] }));
+    assert.equal(replay.result.drafts[0].id, draftId);
+    assert.equal(calls, 2);
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+  });
+
+  test('real PostgreSQL: exhausting automatic image retries saves failure without a partial draft or ledger write', async t => {
+    const f = await databaseFixture(t, { provider: { bailianObjectStream: async () => [] } });
+    await f.tasks.createAssistantTask('owner', body({ images: ['data:image/png;base64,YWJj'] }));
+    await f.tasks.runAssistantTask('owner', taskId);
+    const failed = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.result, null);
+    assert.equal(failed.image_progress.completed, 0);
+    assert.deepEqual(plain(failed.image_progress.failed), [1]);
+    assert.equal(f.paidCalls.length, 3);
+    assert.deepEqual((await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint.results, [null]);
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+  });
+
+  test('real PostgreSQL: each image checkpoints before a sibling finishes and retry reuses independent successful targets', async t => {
     const siblingStarted = deferred(), siblingFinish = deferred();
     let failSecond = true;
     const calls = [];
@@ -518,7 +568,7 @@ if (PGlite) {
       const output = imageBatch(settings), index = Number(output.drafts[0].description.split(' ')[1]);
       calls.push(index);
       if (index === 2 && failSecond) { siblingStarted.resolve(); await siblingFinish.promise; throw new Error('private provider detail'); }
-      if (index >= 3) output.drafts[0].date = failSecond ? '2026-11-03' : '2026-10-03';
+      if (index >= 3) output.drafts[0].date = '2026-11-03';
       return output;
     } } });
     await f.tasks.createAssistantTask('owner', body({ images: Array(5).fill('data:image/png;base64,YWJj') }));
@@ -550,11 +600,12 @@ if (PGlite) {
     assert.deepEqual(plain(retried.image_progress.failed), []);
     continuation = await f.tasks.runAssistantTask('owner', taskId);
     while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
-    assert.deepEqual(calls, [1, 2, 3, 4, 5, 2, 3, 4, 5], 'missing carried context after a failure is not evidence that later dates are independent');
+    assert.deepEqual(calls, [1, 2, 3, 4, 5, 2], 'independent successful targets are reused after the failed target recovers');
     const succeeded = await f.tasks.getAssistantTask('owner', taskId);
     assert.equal(succeeded.status, 'succeeded');
     assert.equal(succeeded.result.drafts.length, 5);
-    assert.ok(succeeded.result.drafts.slice(2).every(draft => draft.transaction_date === '2026-10-03'), 'retry must replace later dates guessed while preceding month evidence was missing');
+    assert.ok(succeeded.result.drafts.slice(2).every(draft => draft.transaction_date === '2026-11-03'), 'independent target dates stay unchanged');
+    assert.ok(succeeded.execution_steps.filter(step => ['image-3', 'image-4', 'image-5'].includes(step.id)).every(step => step.details.some(detail => detail.includes('复用'))));
     assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
   });
 
@@ -641,7 +692,7 @@ if (PGlite) {
     const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
       const output = imageBatch(settings);
       return unclear && output.drafts[0].description === '午餐 2'
-        ? { action: 'chat', drafts: [], outcome: 'needs_clarification', date_context: null, reply: '日期看不清，请补充清晰截图。' } : output;
+        ? { action: 'chat', drafts: [], outcome: 'needs_clarification', date_context: null, date_dependency: null, reply: '日期看不清，请补充清晰截图。' } : output;
     } } });
     await f.tasks.createAssistantTask('owner', body({ images: Array(2).fill('data:image/png;base64,YWJj') }));
     await f.tasks.runAssistantTask('owner', taskId);
@@ -743,6 +794,7 @@ if (PGlite) {
         source_image_index: target < 3 ? target : 3, evidence: target < 3 ? '2026年10月' : '2026年9月' };
       if (target >= 4) assert.match(settings.messages[0].content, /已完成前图的日期标题引用：.*"month":9.*"source_image_index":3/);
       output.date_context = context;
+      output.date_dependency = target >= 4 ? context : null;
       output.drafts[0].date = target < 3 ? '2026-10-03' : '2026-09-30';
       return output;
     } } });
@@ -754,7 +806,7 @@ if (PGlite) {
     assert.ok(result.result.drafts.slice(2).every(draft => draft.transaction_date === '2026-09-30'));
   });
 
-  test('real PostgreSQL: retry invalidates a later cached target after its preceding image failed', async t => {
+  test('real PostgreSQL: retry reuses an independent later target after its preceding image recovers', async t => {
     let failThird = true;
     const calls = [];
     const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
@@ -777,8 +829,93 @@ if (PGlite) {
     await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
     continuation = await f.tasks.runAssistantTask('owner', taskId);
     while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
-    assert.deepEqual(calls, [1, 2, 3, 4, 3, 4], 'the cached fourth image is rechecked because it consumed earlier model-derived month context');
+    assert.deepEqual(calls, [1, 2, 3, 4, 3], 'the independent fourth image is reused regardless of available context');
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'succeeded');
+  });
+
+  test('real PostgreSQL: a recovered first image preserves dependent targets when their actual visual date basis is unchanged', async t => {
+    let failFirst = true;
+    const calls = [], basis = { year: 2026, month: 10, source_image_index: 1, evidence: '2026年10月' };
+    const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
+      const output = imageBatch(settings), target = Number(output.drafts[0].description.split(' ')[1]);
+      calls.push(target);
+      if (target === 1 && failFirst) throw new Error('network');
+      if (target <= 2) {
+        output.date_context = basis;
+        output.date_dependency = target === 1 ? null : basis;
+      } else output.date_context = { ...basis, source_image_index: 3 };
+      return output;
+    } } });
+    await f.tasks.createAssistantTask('owner', body({ images: Array(3).fill('data:image/png;base64,YWJj') }));
+    let continuation = await f.tasks.runAssistantTask('owner', taskId);
+    while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
+    const before = (await f.db.query('SELECT image_checkpoint FROM assistant_tasks')).rows[0].image_checkpoint;
+    assert.equal(before.contextInputs['2'], null);
+    assert.deepEqual(before.results[1].date_dependency, basis);
+    failFirst = false;
+    await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
+    continuation = await f.tasks.runAssistantTask('owner', taskId);
+    while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
+    assert.deepEqual(calls, [1, 2, 3, 1]);
+    const saved = await f.tasks.getAssistantTask('owner', taskId);
+    assert.equal(saved.status, 'succeeded');
+    assert.equal(saved.result.drafts.length, 3);
+    const draftIds = saved.result.drafts.map(row => row.id);
+    await f.tasks.runAssistantTask('owner', taskId);
+    assert.deepEqual(plain((await f.tasks.getAssistantTask('owner', taskId)).result.drafts.map(row => row.id)), plain(draftIds));
+    assert.deepEqual(calls, [1, 2, 3, 1]);
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+  });
+
+  test('real PostgreSQL: changed dates invalidate only actual dependencies, including mixed rows before a new own header', async t => {
+    for (const resetBoundary of [false, true]) {
+      let failFirst = true;
+      const calls = [], oldBasis = { year: 2026, month: 10, source_image_index: 1, evidence: '2026年10月' };
+      const newBasis = { ...oldBasis, month: 9, evidence: '2026年9月' };
+      const ownBasis = { year: 2026, month: 11, source_image_index: 2, evidence: '2026年11月' };
+      const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
+        const output = imageBatch(settings), target = Number(output.drafts[0].description.split(' ')[1]);
+        calls.push(target);
+        if (target === 1 && failFirst) throw new Error('network');
+        const basis = failFirst ? oldBasis : newBasis;
+        if (target === 1) { output.date_context = basis; output.drafts[0].date = '2026-09-03'; }
+        if (target === 2) {
+          output.date_dependency = basis;
+          output.date_context = resetBoundary ? ownBasis : basis;
+          output.drafts[0].date = failFirst ? '2026-10-03' : '2026-09-03';
+          if (resetBoundary) output.drafts.push({ ...output.drafts[0], date: '2026-11-01', description: '本图新月份',
+            source: { ...output.drafts[0].source, row_index: 2 } });
+        }
+        if (target === 3) {
+          output.date_dependency = resetBoundary ? ownBasis : basis;
+          output.date_context = output.date_dependency;
+          output.drafts[0].date = resetBoundary ? '2026-11-03' : failFirst ? '2026-10-03' : '2026-09-03';
+        }
+        return output;
+      } } });
+      await f.tasks.createAssistantTask('owner', body({ images: Array(3).fill('data:image/png;base64,YWJj') }));
+      let continuation = await f.tasks.runAssistantTask('owner', taskId);
+      while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
+      assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'failed');
+      failFirst = false;
+      await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
+      continuation = await f.tasks.runAssistantTask('owner', taskId);
+      if (!resetBoundary) {
+        assert.ok(continuation, 'dependent cascade beyond two requests continues in a fresh wave');
+        const pending = await f.tasks.getAssistantTask('owner', taskId);
+        assert.equal(pending.status, 'queued');
+        assert.equal(pending.image_progress.completed, 2, 'stale cached dates no longer count as completed');
+        assert.equal(pending.result, null, 'a stale dependent target cannot reach the draft card');
+      }
+      while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
+      assert.deepEqual(calls, resetBoundary ? [1, 2, 3, 1, 2] : [1, 2, 3, 1, 2, 3]);
+      const saved = await f.tasks.getAssistantTask('owner', taskId);
+      assert.equal(saved.status, 'succeeded');
+      assert.ok(saved.execution_steps.find(step => step.id === 'image-2').details.some(detail => detail.includes('日期依据已变化')));
+      assert.deepEqual(plain(saved.result.drafts.map(draft => draft.transaction_date)), resetBoundary
+        ? ['2026-09-03', '2026-09-03', '2026-11-01', '2026-11-03'] : Array(3).fill('2026-09-03'));
+      assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
+    }
   });
 
 
@@ -794,6 +931,38 @@ if (PGlite) {
     assert.equal(saved.status, 'succeeded');
     assert.deepEqual(plain(saved.image_progress), { total: 3, completed: 3, failed: [], active: [], stage: 'merging' });
     assert.equal(f.paidCalls.length, 3);
+  });
+
+  test('real PostgreSQL: matching v5 financial checkpoints migrate and remain reusable when date inputs are unchanged', async t => {
+    let failThird = true;
+    const calls = [];
+    const f = await databaseFixture(t, { provider: { bailianObjectStream: async settings => {
+      const output = imageBatch(settings), target = Number(output.drafts[0].description.split(' ')[1]);
+      calls.push(target);
+      if (target === 3 && failThird) throw new Error('network');
+      output.date_context = { year: 2026, month: 10, source_image_index: target, evidence: '2026年10月' };
+      return output;
+    } } });
+    await f.tasks.createAssistantTask('owner', body({ images: Array(3).fill('data:image/png;base64,YWJj') }));
+    let continuation = await f.tasks.runAssistantTask('owner', taskId);
+    while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
+    const old = (await f.db.query('SELECT payload,image_checkpoint FROM assistant_tasks')).rows[0];
+    const checkpoint = old.image_checkpoint;
+    checkpoint.results.filter(Boolean).forEach(result => { delete result.date_dependency; });
+    checkpoint.version = 'target-image-v5';
+    const input = f.load('lib/assistant-generation.ts').validateAssistantInput(old.payload);
+    const categories = (await f.db.query('SELECT id,name,type FROM categories WHERE user_id=$1 ORDER BY created_at', ['owner'])).rows;
+    const members = (await f.db.query('SELECT id,name FROM members WHERE user_id=$1 ORDER BY created_at', ['owner'])).rows;
+    checkpoint.key = crypto.createHash('sha256').update(JSON.stringify({ version: checkpoint.version, input,
+      model: 'fixture-object', categories, members })).digest('hex');
+    await f.db.query('UPDATE assistant_tasks SET image_checkpoint=$1::jsonb', [JSON.stringify(checkpoint)]);
+    failThird = false;
+    await f.tasks.changeAssistantTask('owner', taskId, 'retry', 1);
+    continuation = await f.tasks.runAssistantTask('owner', taskId);
+    while (continuation) continuation = await f.tasks.runAssistantTask('owner', taskId, continuation);
+    assert.deepEqual(calls, [1, 2, 3, 3]);
+    assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'succeeded');
+    assert.deepEqual((await f.db.query('SELECT * FROM transactions')).rows, []);
   });
 
   test('real PostgreSQL: detailed query steps persist while generating and survive task recovery', async t => {

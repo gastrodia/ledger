@@ -6,12 +6,14 @@ import { MAX_ASSISTANT_IMAGES } from "@/lib/assistant-images";
 import { mergeAssistantImageImport } from "@/lib/assistant-image-import";
 import { buildAssistantImageRecognition } from "@/lib/assistant-image-recognition";
 import type { AssistantModelOutput } from "@/lib/assistant-output";
-import { BAILIAN_ASSISTANT_MODEL, bailianObjectStream } from "@/lib/bailian";
+import { BAILIAN_ASSISTANT_MODEL, BailianError, bailianObjectStream } from "@/lib/bailian";
 
 // Changes to the prompt, schema, provenance mapping or merge contract require a
 // new version so a resumed task cannot mix incompatible recognition results.
-export const ASSISTANT_IMAGE_BATCH_VERSION = "target-image-v5";
+export const ASSISTANT_IMAGE_BATCH_VERSION = "target-image-v6";
+export const ASSISTANT_IMAGE_BATCH_LEGACY_VERSION = "target-image-v5";
 export const ASSISTANT_IMAGE_BATCH_TIMEOUT_MS = 90_000;
+export const ASSISTANT_IMAGE_BATCH_MAX_ATTEMPTS = 3;
 export class AssistantImageBatchError extends Error {}
 export type AssistantImageBatchOutcome = "complete" | "empty" | "needs_clarification";
 export type AssistantImageDateContext = { year: number | null; month: number; source_image_index: number; evidence: string };
@@ -19,6 +21,9 @@ export type AssistantImageBatchResult = {
   image_index: number;
   outcome: AssistantImageBatchOutcome;
   date_context: AssistantImageDateContext | null;
+  // Null certifies that neither rows nor outgoing context use preceding dates.
+  // Absent only on validated v5 checkpoints, whose dependency is unknown.
+  date_dependency?: AssistantImageDateContext | null;
   output: AssistantModelOutput;
 };
 export type AssistantImageBatchInput = {
@@ -74,6 +79,26 @@ function parseDateContext(raw: unknown, imageCount: number): AssistantImageDateC
   return { year, month, source_image_index, evidence };
 }
 
+export function sameAssistantImageDateContext(a: AssistantImageDateContext | null | undefined,
+  b: AssistantImageDateContext | null | undefined) {
+  return a === b || !!a && !!b && a.year === b.year && a.month === b.month
+    && a.source_image_index === b.source_image_index && a.evidence === b.evidence;
+}
+
+export function assistantImageBatchNeedsDateRefresh(result: AssistantImageBatchResult,
+  previousInput: AssistantImageDateContext | null | undefined, currentInput: AssistantImageDateContext | null) {
+  if (result.date_dependency === null || sameAssistantImageDateContext(previousInput, currentInput)) return false;
+  // Legacy results have no proof of independence. Recheck only when the
+  // available date input changes, instead of discarding the entire suffix.
+  return result.date_dependency === undefined || !sameAssistantImageDateContext(result.date_dependency, currentInput);
+}
+
+function checkDateDependency(dependency: AssistantImageDateContext | null, context: AssistantImageDateContext | null,
+  imageIndex: number, outcome: AssistantImageBatchOutcome) {
+  if (dependency && (dependency.source_image_index >= imageIndex || outcome === "needs_clarification")) throw new Error(INVALID_BATCH);
+  if (context && context.source_image_index < imageIndex && !sameAssistantImageDateContext(dependency, context)) throw new Error(INVALID_BATCH);
+}
+
 /** Only the target image produces rows. The preceding image is visual context
  * for a visible date/month header; it must never create another copy of rows.
  */
@@ -103,16 +128,20 @@ date_context必须为null或{year,month,source_image_index,evidence}，供后续
     content.push({ type: "file", mediaType: image.slice(5, image.indexOf(";")), data: image });
   });
   const messages: ModelMessage[] = [
-    { role: "system", content: `${recognition.messages[0].content}\n${rules}\n字段示例：交易收支类型只能用type字段（\"type\":\"expense\"），不能使用direction。当前目标图标题只有“10月”时，date_context必须为{\"year\":null,\"month\":10,\"source_image_index\":${imageIndex + 1},\"evidence\":\"10月\"}；即使交易date根据today使用当前年份，标题year仍是null，并在相关交易note提示核对年份。` },
+    { role: "system", content: `${recognition.messages[0].content}\n${rules}\n日期依赖必填date_dependency：若任何一行的日期，或末尾date_context，实际使用了前图标题或已完成前图引用，填该日期依据{year,month,source_image_index,evidence}，source_image_index必须是原始前图编号；若使用提供的已完成引用，四个字段原样保留。即使末尾出现本图新月份标题，前面行使用前图日期时仍必须保留依赖。仅当全部交易日期和末尾引用均来自目标图，或没有交易且没有前图日期引用时才填null。仅看到前图或收到引用不代表使用它；目标图有完整年月且覆盖全部行时必须填null。needs_clarification时填null。不得把来源不明当作独立；缺少必要日期证据应澄清。\n字段示例：交易收支类型只能用type字段（\"type\":\"expense\"），不能使用direction。当前目标图标题只有“10月”时，date_context必须为{\"year\":null,\"month\":10,\"source_image_index\":${imageIndex + 1},\"evidence\":\"10月\"}；即使交易date根据today使用当前年份，标题year仍是null，并在相关交易note提示核对年份。` },
     { role: "user", content },
   ];
   const expandOutput = (raw: unknown): AssistantImageBatchResult => {
     const value = Array.isArray(raw) && raw.length === 1 ? raw[0] : raw;
     if (!isObject(value)) throw new Error(INVALID_BATCH);
-    const { outcome, date_context, ...wire } = value;
+    const { outcome, date_context, date_dependency, ...wire } = value;
     const output = recognition.expandOutput(wire);
     checkOutcome(outcome, output);
     const context = parseDateContext(date_context, input.images.length);
+    const dependency = parseDateContext(date_dependency, input.images.length);
+    checkDateDependency(dependency, context, imageIndex + 1, outcome as AssistantImageBatchOutcome);
+    if (dependency && dependency.source_image_index !== imageIndex
+      && !sameAssistantImageDateContext(dependency, carriedContext)) throw new Error(INVALID_BATCH);
     if (outcome === "needs_clarification" && context) throw new Error(INVALID_BATCH);
     if (context && context.source_image_index !== imageIndex + 1 && context.source_image_index !== imageIndex
       && (!carriedContext || JSON.stringify(context) !== JSON.stringify(carriedContext))) throw new Error(INVALID_BATCH);
@@ -128,6 +157,7 @@ date_context必须为null或{year,month,source_image_index,evidence}，供后续
       image_index: imageIndex + 1,
       outcome: outcome as AssistantImageBatchOutcome,
       date_context: context,
+      date_dependency: dependency,
       output: { ...output, drafts: output.drafts.map(draft => ({
         ...draft, source: { ...draft.source!, image_index: imageIndex + 1 },
       })) },
@@ -137,19 +167,21 @@ date_context必须为null或{year,month,source_image_index,evidence}，供后续
   // provider schema; retain that concrete document while adding our outcome.
   const base = recognition.schema.jsonSchema as Awaited<typeof recognition.schema.jsonSchema>;
   const draftsSchema = base.properties?.drafts;
+  const dateContextSchema: Parameters<typeof jsonSchema>[0] = { anyOf: [{ type: "null" }, { type: "object", additionalProperties: false,
+    properties: { year: { anyOf: [{ type: "integer", minimum: 1000, maximum: 9999 }, { type: "null" }] },
+      month: { type: "integer", minimum: 1, maximum: 12 },
+      source_image_index: { type: "integer", minimum: 1, maximum: input.images.length },
+      evidence: { type: "string", minLength: 1, maxLength: 120 } },
+    required: ["year", "month", "source_image_index", "evidence"],
+  }] };
   const schema = jsonSchema<Record<string, unknown>>({
     ...base,
     properties: { ...base.properties,
       ...(draftsSchema && typeof draftsSchema === "object" ? { drafts: { ...draftsSchema, maxItems: MAX_ASSISTANT_DRAFTS } } : {}),
       outcome: { type: "string", enum: [...outcomeValues] },
-      date_context: { anyOf: [{ type: "null" }, { type: "object", additionalProperties: false,
-        properties: { year: { anyOf: [{ type: "integer", minimum: 1000, maximum: 9999 }, { type: "null" }] },
-          month: { type: "integer", minimum: 1, maximum: 12 },
-          source_image_index: { type: "integer", minimum: 1, maximum: input.images.length },
-          evidence: { type: "string", minLength: 1, maxLength: 120 } },
-        required: ["year", "month", "source_image_index", "evidence"],
-      }] } },
-    required: [...(base.required ?? []), "outcome", "date_context"],
+      date_context: dateContextSchema,
+      date_dependency: dateContextSchema },
+    required: [...(base.required ?? []), "outcome", "date_context", "date_dependency"],
   }, { validate: raw => {
     try {
       expandOutput(raw);
@@ -176,24 +208,49 @@ export async function generateAssistantImageBatch(args: AssistantImageBatchInput
       : message.content.reduce((size, part) => size + (part.type === "text" ? part.text.length : 0), 0)), 0),
     preparationMs: Date.now() - startedAt });
   let outcome = "failed";
+  let attempts = 0;
+  // All attempts share the original per-image deadline and cancellation. Only
+  // recognition is retried; no checkpoint, merge, confirmation or write runs
+  // until one complete result passes both output and financial validation.
+  const deadline = startedAt + ASSISTANT_IMAGE_BATCH_TIMEOUT_MS;
+  const batchSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - Date.now()))]);
   try {
     const model = process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL;
-    const raw = await bailianObjectStream<unknown>({
-      model,
-      thinking: false, temperature: 0.2, maxOutputTokens: 5000,
-      timeoutMs: ASSISTANT_IMAGE_BATCH_TIMEOUT_MS, telemetryId,
-      messages: request.messages, schema: request.schema, schemaName: request.schemaName,
-    }, () => {}, signal);
-    signal.throwIfAborted();
-    let result: AssistantImageBatchResult;
-    try { result = validateAssistantImageBatchResult(request.expandOutput(raw), args.imageIndex, args.input.images.length, args.categories, args.members); }
-    catch (error) { throw new AssistantImageBatchError(error instanceof Error ? error.message : INVALID_BATCH); }
-    outcome = result.outcome;
-    return result;
+    while (attempts < ASSISTANT_IMAGE_BATCH_MAX_ATTEMPTS) {
+      signal.throwIfAborted();
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0 || batchSignal.aborted) throw new BailianError(504, "timeout");
+      attempts++;
+      try {
+        const raw = await bailianObjectStream<unknown>({
+          model,
+          thinking: false, temperature: 0.2, maxOutputTokens: 5000,
+          timeoutMs: remainingMs, telemetryId,
+          messages: request.messages, schema: request.schema, schemaName: request.schemaName,
+        }, () => {}, batchSignal);
+        signal.throwIfAborted();
+        if (batchSignal.aborted || Date.now() >= deadline) throw new BailianError(504, "timeout");
+        let result: AssistantImageBatchResult;
+        try { result = validateAssistantImageBatchResult(request.expandOutput(raw), args.imageIndex, args.input.images.length, args.categories, args.members); }
+        catch (error) { throw new AssistantImageBatchError(error instanceof Error ? error.message : INVALID_BATCH); }
+        outcome = result.outcome;
+        return result;
+      } catch (error) {
+        signal.throwIfAborted();
+        if (batchSignal.aborted || Date.now() >= deadline) throw new BailianError(504, "timeout");
+        const invalidOutput = error instanceof BailianError && error.status === 422 && error.code === "invalid_output"
+          || error instanceof AssistantImageBatchError;
+        if (!invalidOutput || attempts >= ASSISTANT_IMAGE_BATCH_MAX_ATTEMPTS) throw error;
+        console.info("AI image batch retry", { telemetryId, imageIndex: args.imageIndex + 1,
+          attempt: attempts, nextAttempt: attempts + 1, maxAttempts: ASSISTANT_IMAGE_BATCH_MAX_ATTEMPTS,
+          failure: "invalid_output", remainingMs: deadline - Date.now() });
+      }
+    }
+    throw new AssistantImageBatchError(INVALID_BATCH);
   } finally {
     console.info("AI image batch finished", { telemetryId, imageIndex: args.imageIndex + 1,
       imageCount: args.input.images.length, outcome: signal.aborted ? "aborted" : outcome,
-      generationMs: Date.now() - startedAt, version: ASSISTANT_IMAGE_BATCH_VERSION });
+      generationMs: Date.now() - startedAt, attempts, version: ASSISTANT_IMAGE_BATCH_VERSION });
   }
 }
 
@@ -211,6 +268,8 @@ export function validateAssistantImageBatchResult(raw: unknown, imageIndex: numb
     || (output.undo !== undefined && output.undo !== null)) throw new Error(INVALID_BATCH);
   checkOutcome(raw.outcome, output);
   const dateContext = parseDateContext(raw.date_context, imageCount);
+  const dependency = raw.date_dependency === undefined ? undefined : parseDateContext(raw.date_dependency, imageCount);
+  if (dependency !== undefined) checkDateDependency(dependency, dateContext, imageIndex + 1, raw.outcome as AssistantImageBatchOutcome);
   if (dateContext && (dateContext.source_image_index > imageIndex + 1 || raw.outcome === "needs_clarification")) throw new Error(INVALID_BATCH);
   output.drafts.forEach((draft, rowIndex) => {
     if (!isObject(draft)) throw new Error(INVALID_BATCH);
@@ -220,7 +279,7 @@ export function validateAssistantImageBatchResult(raw: unknown, imageIndex: numb
   });
   validatePlan(mergeAssistantImageImport(output, 1).output, [...categories], [...members], randomUUID);
   return { image_index: imageIndex + 1, outcome: raw.outcome as AssistantImageBatchOutcome,
-    date_context: dateContext, output };
+    date_context: dateContext, ...(dependency !== undefined ? { date_dependency: dependency } : {}), output };
 }
 
 /** Checkpoint outputs remain internal until every target has completed. Sorting
