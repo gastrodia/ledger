@@ -210,12 +210,12 @@ export function validatePlan(raw: unknown, categories: AssistantCategory[], memb
   const p = raw as Record<string, unknown>;
   if (typeof p.action !== "string" || !["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event"].includes(p.action) || typeof p.reply !== "string" || p.reply.length > 4000 || !Array.isArray(p.drafts)) throw new Error("AI 返回格式异常，请重试。");
   for (const [action, key] of [["event", "event"], ["manage", "command"], ["edit", "edit"], ["confirm", "confirm"], ["navigate", "navigation"]]) {
-    if (p.action !== action && p[key] != null) throw new Error("AI 返回的操作不一致，请重试。");
+    if (p.action !== action && p[key] != null) throw new Error(`AI 返回的操作不一致：action=${p.action}时${key}必须为null或省略；该字段仅用于action=${action}。请修正当前步骤字段，保留原任务清单。`);
   }
-  if (["manage", "edit", "confirm", "navigate", "event"].includes(p.action) && (p.drafts.length || p.query !== null)) throw new Error("AI 返回的操作不一致，请重试。");
-  if (p.action !== "remove" && p.remove != null) throw new Error("AI 返回的操作不一致，请重试。");
-  if (p.action !== "update" && p.update !== undefined && p.update !== null) throw new Error("AI 返回的操作不一致，请重试。");
-  if (p.action !== "undo" && p.undo !== undefined && p.undo !== null) throw new Error("AI 返回的操作不一致，请重试。");
+  if (["manage", "edit", "confirm", "navigate", "event"].includes(p.action) && (p.drafts.length || p.query !== null)) throw new Error(`AI 返回的操作不一致：action=${p.action}时drafts必须为空数组，query必须为null。请修正当前步骤字段，保留原任务清单。`);
+  if (p.action !== "remove" && p.remove != null) throw new Error(`AI 返回的操作不一致：action=${p.action}时remove必须为null或省略。请修正当前步骤字段，保留原任务清单。`);
+  if (p.action !== "update" && p.update !== undefined && p.update !== null) throw new Error(`AI 返回的操作不一致：action=${p.action}时update必须为null或省略。请修正当前步骤字段，保留原任务清单。`);
+  if (p.action !== "undo" && p.undo !== undefined && p.undo !== null) throw new Error(`AI 返回的操作不一致：action=${p.action}时undo必须为null或省略。请修正当前步骤字段，保留原任务清单。`);
   if (p.drafts.length > MAX_ASSISTANT_DRAFTS) throw new Error("一次最多识别20笔，请分批输入。");
   const drafts = p.action === "record" ? p.drafts.map((value): AssistantDraft => {
     const d = value as AssistantDraft;

@@ -790,19 +790,68 @@ test('inline read cannot hide a write, a compound agenda, an unanswered question
   const cases = [
     singleRead(goal, 'records', command('delete', { resource: 'notes' })),
     singleRead(goal, 'records', command(), 'result', [{ ...item('a', 'manage', [], 'write'), sources: [goal] }]),
-    singleRead(goal, 'records', command(), 'result', [{ ...item('a', 'manage', [], 'read'), sources: [goal] }, { ...item('b', 'record'), sources: [goal] }]),
+    singleRead(goal, 'records', command(), 'result', [{ ...item('a', 'manage', [], 'read'), sources: ['本次'] }, { ...item('b', 'record'), sources: ['目标'] }]),
     singleRead(goal, 'records', command(), 'result', [{ ...item('a', 'manage', [], 'read'), questions: ['哪条？'], sources: [goal] }]),
     singleRead(goal, 'draft_matches', {}),
     singleRead(goal, 'records', command(), 'unknown'),
     (() => { const s = base(), args = JSON.parse(s.arguments_json); args.initial_read.approval = true; s.arguments_json = JSON.stringify(args); return s; })(),
   ];
   for (const invalid of cases) {
-    const f = fixture([invalid, invalid, invalid]);
-    const result = await f.run({ goal, requireWorkflow: true });
-    assert.equal(result.agent.status, 'interrupted');
+    const f = fixture([invalid]);
+    const result = await f.run({ goal, requireWorkflow: true, maxSteps: 1 });
+    assert.equal(result.agent.status, 'running');
     assert.equal(f.calls.filter(call => call[0] !== 'model').length, 0);
-    assert.equal(f.checkpoints.at(-1).operations, undefined);
+    assert.ok(f.checkpoints.at(-1).operations.length, 'optional hints cannot discard the valid agenda');
   }
+});
+
+test('a misplaced inline hint on two reads falls back to the whole agenda and one final answer',async()=>{
+ const goal='帮我查一下还没结清的借还，区分我欠别人的和别人欠我的。';
+ const operations=[{...item('owed','manage',[],'read'),sources:['帮我查一下还没结清的借还，区分我欠别人的']},
+  {...item('lent','manage',[],'read'),sources:['和别人欠我的。']}];
+ const loan=type=>command('list',{resource:'loans',filter:{...command().filter,type,status:'outstanding'}});
+ const inline=singleRead(goal,'records',loan('owed'),'result',operations);
+ const f=fixture([inline,messages=>{
+  assert.ok(messages.some(m=>m.role==='system'&&m.content.includes('完整清单已保存')));
+  assert.equal(f.checkpoints.at(-1).operations.length,2);assert.equal(f.calls.filter(c=>c[0]==='command').length,0,'the misplaced hint is never executed');
+  return forItem('owed',choose('read','records',loan('owed')));
+ },forItem('lent',choose('read','records',loan('lent'))),{...respond('两个方向的借还结果'),operation_id:null}]);
+ const result=await f.run({goal,requireWorkflow:true});assert.equal(result.agent.status,'completed');
+ assert.equal(f.calls.filter(c=>c[0]==='command').length,2);assert.equal(f.checkpoints.at(-1).outputs.length,1);
+ assert.equal(f.checkpoints.at(-1).tool_results.filter(t=>t.name==='validation_error').length,0);
+});
+
+test('a stale inline hint cannot replay a completed read during an agenda revision',async()=>{
+ const goal='查询借还';const operations=[{...item('done','manage',[],'read'),sources:[goal],status:'completed'},
+  {...item('tail','manage',[],'read'),sources:[goal],status:'pending'}];
+ const checkpoint={version:1,goal_id:ID,goal,status:'running',steps:3,messages:[],tool_results:[],pending_approval:null,preview_fingerprints:[],operations};
+ const pending=operations.map(op=>{const copy={...op};delete copy.status;return copy;});
+ const f=fixture([singleRead(goal,'records',command('list',{resource:'loans'}),'result',pending),
+  forItem('tail',choose('read','records',command('list',{resource:'loans'}))),forItem('tail',respond('剩余查询完成'))]);
+ const result=await f.run({checkpoint,requireWorkflow:true});assert.equal(result.agent.status,'completed');
+ assert.equal(f.calls.filter(c=>c[0]==='command').length,1);assert.equal(result.agent.operations[0].status,'completed');
+});
+
+test('a rejected agenda or read parameter is visibly failed instead of a completed model step',async()=>{
+ for(const steps of [[agenda([item('a','query'),item('a','query')])],[agenda([item('read','query')]),forItem('read',choose('read','query',{sql:'private-provider-text'}))]]){
+  const execution=require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
+  const count=steps.length,f=fixture(steps);await f.run({execution,maxSteps:count});
+  const last=execution.snapshot().find(s=>s.id===`agent_${count}`);assert.equal(last.state,'failed');
+  assert.match(last.details.join(' '),/未通过/);assert.equal(JSON.stringify(execution.snapshot()).includes('private-provider-text'),false);
+  assert.equal(f.calls.filter(c=>['query','command','event'].includes(c[0])).length,0);
+ }
+});
+
+test('conflicting chat fields name the offending field so retries repair the step without replanning',async()=>{
+ const execution=require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
+ const f=fixture([agenda([item('read','query')]),forItem('read',choose('read','query',query())),
+  forItem('read',respond('查询结果',{command:command('list',{resource:'loans'})})),messages=>{
+   const feedback=messages.findLast(m=>m.content.startsWith('账本工具 validation_error'));
+   assert.match(feedback.content,/action=chat.*command.*null.*保留原任务清单/);
+   return {...respond('根据真实汇总给出结果'),operation_id:null};
+  }],{adapters:{validatePlan:strictPlan}});
+ const result=await f.run({execution});assert.equal(result.agent.status,'completed');assert.equal(f.checkpoints.at(-1).outputs.length,1);
+ assert.equal(f.calls.filter(c=>c[0]==='query').length,1);assert.equal(execution.snapshot().find(s=>s.id==='agent_3').state,'failed');
 });
 
 test('a failed inline read does not fabricate completion and a later decision can repair the query', async () => {
@@ -829,5 +878,89 @@ test('legacy multi-round query traces name the query, planning and result action
   const execution = require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
   const f = fixture([agenda([item('query', 'query')]), forItem('query', choose('read', 'query', query({ type: 'expense', scope: 'daily' }))), forItem('query', respond('查询结果。'))]);
   await f.run({ execution });
-  assert.deepEqual(Array.from(execution.snapshot(), step => step.label), ['整理任务清单', '确定查询条件', '查询日常支出', '整理查询结果']);
+  assert.deepEqual(Array.from(execution.snapshot(), step => step.label), ['理解查询请求', '确定查询条件', '查询日常支出', '整理查询结果']);
+});
+
+const batchReads = (goal, requests, mode = 'result') => ({ ...choose('plan', null, {
+  operations: requests.map((request, index) => ({ ...item(`q${index}`, request.tool === 'query' ? 'query' : 'manage', [], 'read'),
+    label: request.args.resource === 'gifts_given' ? '查询本月送礼记录' : request.args.resource === 'gift_records' ? '查询本月收礼记录' : `查询范围${index + 1}`, sources: [goal] })),
+  initial_reads: requests.map((request, index) => ({ operation_id: `q${index}`, tool: request.tool, arguments_json: JSON.stringify(request.args), reply_mode: mode })),
+}), operation_id: null });
+
+test('independent gift lists execute once from one model decision and return both authoritative results', async () => {
+  const goal = '帮我看看这个月的送礼和收礼记录。';
+  const args = resource => command('list', { resource, filter: { ...command().filter, start_date: '2026-10-01', end_date: '2026-10-31' } });
+  const execution = require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
+  const f = fixture([batchReads(goal, [{ tool: 'records', args: args('gifts_given') }, { tool: 'records', args: args('gift_records') }])], { adapters: { command: async c => {
+    f.calls.push(['command', c]);
+    assert.equal(f.checkpoints.at(-1).operations.length, 2, 'full scope was saved before any read');
+    return { reply: c.resource === 'gifts_given' ? '送礼实际金额100元。' : '收礼实际金额200元。', record_context: { resource: c.resource, rows: [{ id: c.resource === 'gifts_given' ? ID : ACTION }] } };
+  } } });
+  const result = await f.run({ goal, requireWorkflow: true, execution });
+  assert.equal(f.calls.filter(call => call[0] === 'model').length, 1);
+  assert.equal(f.calls.filter(call => call[0] === 'command').length, 2);
+  assert.equal(result.agent.status, 'completed');
+  assert.equal(result.agent.operations.every(op => op.status === 'completed'), true);
+  assert.match(result.reply, /送礼记录[\s\S]*100元[\s\S]*收礼记录[\s\S]*200元/);
+  assert.deepEqual(Array.from(execution.snapshot(), step => step.label), ['理解查询请求', '查询送礼记录', '查询收礼记录', '整理查询结果']);
+  assert.equal(f.checkpoints.at(-1).outputs.length, 1);
+  assert.ok(f.checkpoints.some(c => c.operations?.[0].status === 'completed' && c.operations[1].status === 'pending'));
+});
+
+test('batch analysis retains both observed queries for one fact-grounded model summary', async () => {
+  const goal = '对比两个月支出';
+  const f = fixture([batchReads(goal, [{ tool: 'query', args: query({ scope: 'daily' }) }, { tool: 'query', args: query({ scope: 'daily', start_date: '2026-09-01', end_date: '2026-09-30' }) }], 'analysis'), messages => {
+    assert.ok(messages.some(m => m.content.includes('query_comparison')));
+    return { ...respond('根据两个范围的真实汇总进行比较。'), operation_id: null };
+  }]);
+  const result = await f.run({ goal, requireWorkflow: true });
+  assert.equal(f.calls.filter(call => call[0] === 'model').length, 2);
+  assert.equal(f.calls.filter(call => call[0] === 'query').length, 2);
+  assert.equal(result.agent.status, 'completed');
+});
+
+test('one invalid batch read never executes an earlier valid hint or discards the complete scope', async () => {
+  const goal = '查询两类记录';
+  const initial = batchReads(goal, [{ tool: 'records', args: command('list', { resource: 'gifts_given' }) }, { tool: 'records', args: command('delete', { resource: 'gift_records' }) }]);
+  const execution = require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
+  const f = fixture([initial]);
+  const result = await f.run({ goal, requireWorkflow: true, execution, maxSteps: 1 });
+  assert.equal(result.agent.status, 'running');
+  assert.equal(result.agent.operations.length, 2);
+  assert.equal(f.calls.filter(call => call[0] === 'command').length, 0);
+  assert.equal(execution.snapshot().find(step => step.label === '校验快捷查询条件').state, 'failed');
+  assert.equal(execution.snapshot()[0].state, 'done', 'agenda itself was valid and retained');
+});
+
+test('batch read failure preserves the successful item and continuation never replays it', async () => {
+  const goal = '查看送礼和收礼';
+  const execution = require('./helpers/assistant-contracts.cjs')('@/lib/assistant-execution').createAssistantExecution();
+  const f = fixture([batchReads(goal, [{ tool: 'records', args: command('list', { resource: 'gifts_given' }) }, { tool: 'records', args: command('list', { resource: 'gift_records' }) }])], { adapters: { command: async c => {
+    f.calls.push(['command', c]);
+    if (c.resource === 'gift_records') throw new Error('temporary database failure');
+    return { reply: '送礼查询完成。', record_context: { resource: c.resource, rows: [] } };
+  } } });
+  const interrupted = await f.run({ goal, requireWorkflow: true, maxSteps: 1, execution });
+  assert.equal(interrupted.agent.status, 'running');
+  assert.equal(interrupted.agent.operations[0].status, 'completed');
+  assert.equal(interrupted.agent.operations[1].status, 'pending');
+  assert.equal(execution.snapshot()[0].state, 'done');
+  assert.equal(execution.snapshot().find(step => step.label === '查询收礼记录').state, 'failed');
+  const resumed = fixture([forItem('q1', choose('read', 'records', command('list', { resource: 'gift_records' }))), forItem('q1', respond('两项查询已完成。'))]);
+  const result = await resumed.run({ checkpoint: f.checkpoints.at(-1) });
+  assert.equal(result.agent.status, 'completed');
+  assert.equal(resumed.calls.filter(call => call[0] === 'command').length, 1);
+  assert.equal(resumed.calls.find(call => call[0] === 'command')[1].resource, 'gift_records');
+});
+
+test('a completed agenda revision cannot publish an empty shortcut reply without new observed reads', async () => {
+  const goal = '查询送礼';
+  const operation = { ...item('done', 'manage', [], 'read'), sources: [goal], status: 'completed' };
+  const checkpoint = { version: 1, goal_id: ID, goal, status: 'running', steps: 2, messages: [], tool_results: [], pending_approval: null, preview_fingerprints: [], operations: [operation] };
+  const revised = { ...operation }; delete revised.status;
+  const f = fixture([agenda([revised]), { ...respond('原查询结果已展示。'), operation_id: null }]);
+  const result = await f.run({ checkpoint, requireWorkflow: true });
+  assert.equal(result.reply, '原查询结果已展示。');
+  assert.equal(result.agent.status, 'completed');
+  assert.equal(f.calls.filter(call => call[0] === 'model').length, 2);
 });

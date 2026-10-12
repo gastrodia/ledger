@@ -216,6 +216,17 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
   let lastValidation = "", repeatedValidation = 0;
   let completionClaimRepairs = 0;
   let unverifiedCompletion = false;
+  const prepareReadPlan = async (step: AssistantAgentStep): Promise<AssistantPlan> => {
+    const args = json(step.arguments_json);
+    if (step.tool === "query") {
+      if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["scope", "start_date", "end_date", "type", "category_id", "member_id", "keyword"].includes(key))) throw new Error("查询参数格式无效，仅可填写账本日期和筛选条件。");
+      const query = { ...args, category_id: "category_id" in args ? args.category_id : null, member_id: "member_id" in args ? args.member_id : null, keyword: "keyword" in args ? args.keyword : null };
+      return o.adapters.validatePlan({ action: "query", reply: "正在查询", drafts: [], query });
+    }
+    const command = o.adapters.validateCommand(args);
+    if (!["list", "duplicates"].includes(command.operation)) throw new Error("只读工具仅允许查询或查找重复候选。");
+    return o.adapters.validatePlan({ action: "manage", reply: "正在核对", drafts: [], query: null, command });
+  };
   const runPlan = async (plan: AssistantPlan): Promise<AssistantPlan | null> => {
     if (plan.action === "query" && plan.query) { if (verificationRequired && expectedReadResource !== "transactions") throw new Error(`请先读取刚执行的${expectedReadResource}记录核对。`); const result = await o.adapters.query(plan.query, signal);
       const previous = [...c.tool_results].reverse().find(r => r.name === "query")?.result as { filters?: AssistantQuery; facts?: { summary?: Record<string, unknown> } } | undefined;
@@ -306,30 +317,43 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       const stepLabel = resolved ? "使用已核对的事项条件" : s.kind === "plan" ? "整理任务清单" : s.kind === "reuse" ? "核对已处理事项" : s.kind === "read" ? "确定查询条件" : s.kind === "preview" ? "整理操作方案" : "生成回复";
       o.execution?.finish(id, [], "done", stepLabel);
       const toolId = `agent_tool_${c.steps}`;
+      let activeToolId: string | undefined;
       let plan: AssistantPlan;
-      let directRead = false;
       try {
         if (s.kind === "plan") {
           if (c.pending_approval || c.pending_batch) throw new Error("当前有待确认方案，不能改写其执行范围；请先处理原确认方案。");
           const args = json(s.arguments_json);
-          if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["operations", "initial_read"].includes(key))) throw new Error("任务计划只允许operations和单一查询的initial_read。");
+          if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["operations", "initial_read", "initial_reads"].includes(key))) throw new Error("任务计划只允许operations和可选的查询参数。");
           const operations = validateWorkflow(args.operations);
           if (c.workflow_required) assertWorkflowCoverage(operations, c.goal, c.authorized_answers);
-          let initialRead: AssistantAgentStep | undefined;
-          if (args.initial_read !== undefined) {
-            const read = args.initial_read;
-            if (c.operations || c.tool_results.some(r => r.name !== "validation_error") || verificationRequired || operations.length !== 1
-              || operations[0].effect !== "read" || operations[0].questions?.length || operations[0].depends_on.length
-              || !read || typeof read !== "object" || Array.isArray(read)
-              || Object.keys(read).some(key => !["tool", "arguments_json", "reply_mode"].includes(key))
-              || !["result", "analysis"].includes(read.reply_mode)
-              || !(read.tool === "query" && operations[0].action === "query" || read.tool === "records" && operations[0].action === "manage")) {
-              throw new Error("initial_read仅可用于新目标中无歧义、无依赖的单一查询；复合任务和写操作继续完整清单。");
+          const preparedReads: Array<{ step: AssistantAgentStep; plan: AssistantPlan; mode: "result" | "analysis" }> = [];
+          let readHintError = "";
+          let ignoredReadHints = false;
+          try {
+            const hints = args.initial_reads !== undefined ? args.initial_reads : args.initial_read !== undefined ? [args.initial_read] : [];
+            if (!Array.isArray(hints) || hints.length > 32 || args.initial_read !== undefined && args.initial_reads !== undefined) throw new Error("查询参数应使用initial_read或initial_reads之一，最多32项。");
+            // Optional shortcuts must never invalidate a valid full agenda.
+            // Mixed goals, refinements and dependent reads use the normal loop.
+            const eligible = !c.operations && (args.initial_reads !== undefined || operations.length === 1) && !verificationRequired && !c.tool_results.some(r => r.name !== "validation_error")
+              && operations.every(op => op.effect === "read" && ["query", "manage"].includes(op.action) && !op.questions?.length && !op.depends_on.length);
+            ignoredReadHints = !eligible && hints.length > 0;
+            if (eligible) for (const hint of hints) {
+              if (!hint || typeof hint !== "object" || Array.isArray(hint)
+                || Object.keys(hint).some(key => !["operation_id", "tool", "arguments_json", "reply_mode"].includes(key))
+                || !["result", "analysis"].includes(hint.reply_mode)) throw new Error("快捷查询参数格式无效，请按已保存清单继续read。");
+              const operationId = hint.operation_id ?? (args.initial_reads === undefined && operations.length === 1 ? operations[0].id : undefined);
+              const operation = operations.find(op => op.id === operationId);
+              if (!operation || preparedReads.some(read => read.step.operation_id === operationId)
+                || !(hint.tool === "query" && operation.action === "query" || hint.tool === "records" && operation.action === "manage")) throw new Error("快捷查询必须对应清单中不同的只读事项ID。");
+              const step = parseAssistantAgentStep({ kind: "read", tool: hint.tool, arguments_json: hint.arguments_json,
+                operation_id: operation.id, plan_json: null, needs_input: false }, true);
+              const readPlan = await prepareReadPlan(step);
+              if (readPlan.command && readPlan.command.operation !== "list") throw new Error("快捷记录查询仅允许list，不能准备写操作或重复核对。");
+              preparedReads.push({ step, plan: readPlan, mode: hint.reply_mode });
             }
-            initialRead = parseAssistantAgentStep({ kind: "read", tool: read.tool, arguments_json: read.arguments_json,
-              operation_id: operations[0].id, plan_json: null, needs_input: false }, true);
-            if (initialRead.tool === "records" && json(initialRead.arguments_json)?.operation !== "list") throw new Error("单一记录查询仅允许list，不能准备写操作或重复核对。");
-            directRead = read.reply_mode === "result";
+          } catch (error) {
+            preparedReads.length = 0;
+            readHintError = error instanceof Error ? error.message.slice(0, 500) : "快捷查询参数无效。";
           }
           if (c.operations) {
             for (const previous of c.operations) {
@@ -346,12 +370,52 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           }
           c.operations = operations;
           if (c.event_resolutions) c.event_resolutions = c.event_resolutions.filter(resolution => operations.some(item => item.id === resolution.operation_id && item.action === "event"));
+          if (ignoredReadHints || readHintError) c.messages.push({ role: "system", content: `${args.initial_read !== undefined ? "initial_read未应用" : "initial_reads未应用"}，但完整清单已保存。直接处理清单中未完成的事项，不要为可选参数重建plan；按事项选择read、preview或respond，operation_id使用：${operations.filter(item => item.status !== "completed").map(item => item.id).join("、")}。` });
           append("workflow", { operations: c.operations }); await save();
-          if (!initialRead) continue;
-          // The agenda and read parameters came from one model decision. Keep
-          // the normal identity, ownership and read-only validation below.
-          s = initialRead;
-          o.execution?.finish(id, ["已确定单一查询的条件"], "done", "理解查询请求");
+          const pureReads = operations.every(op => op.effect === "read" && ["query", "manage"].includes(op.action));
+          o.execution?.finish(id, pureReads ? [`需查询 ${operations.length} 项内容`] : [`共 ${operations.length} 项事项`], "done", pureReads ? "理解查询请求" : "整理任务清单");
+          if (readHintError) {
+            const checkId = `agent_check_${c.steps}`;
+            o.execution?.start(checkId, "校验快捷查询条件", "check");
+            o.execution?.finish(checkId, ["快捷条件未通过校验；完整任务清单已保留，按正常查询流程继续"], "failed");
+            append("validation_error", { message: readHintError, writes_executed: false });
+            await save();
+          }
+          const replies: string[] = [];
+          for (let index = 0; index < preparedReads.length; index++) {
+            signal.throwIfAborted();
+            const read = preparedReads[index];
+            const operation = workflowOperation(c.operations, read.step.operation_id);
+            c.current_operation_id = operation.id; operation.status = "running";
+            activeToolId = `agent_tool_${c.steps}_${index}`;
+            o.execution?.start(activeToolId, assistantToolExecutionLabel(read.plan), "tool", o.adapters.toolDetails?.(read.plan) || []);
+            await runPlan(read.plan);
+            signal.throwIfAborted();
+            const observed = c.tool_results.at(-1)?.result as { reply?: string; limited?: boolean; approval?: unknown; record_context?: AssistantPlan["record_context"]; facts?: { summary?: { count?: unknown } } } | undefined;
+            const rawCount = observed?.record_context?.rows.length ?? observed?.facts?.summary?.count;
+            const count = rawCount == null ? NaN : Number(rawCount);
+            o.execution?.finish(activeToolId, [...(o.adapters.toolDetails?.(read.plan) || []), Number.isSafeInteger(count) && count >= 0 ? `找到 ${count} ${read.plan.command ? "条" : "笔"}记录` : "查询完成"]);
+            if (read.mode === "result" && !observed?.limited && !observed?.approval && !c.pending_approval
+              && typeof observed?.reply === "string" && observed.reply.trim()) {
+              operation.status = "completed";
+              const resourceLabel = assistantToolExecutionLabel(read.plan).replace(/^查询/, "");
+              const label = operation.label.includes(resourceLabel) ? operation.label : `${operation.label}（${resourceLabel}）`;
+              replies.push(preparedReads.length === 1 && operations.length === 1 ? observed.reply : `${label}：\n${observed.reply}`);
+            }
+            await save();
+            activeToolId = undefined;
+          }
+          if (preparedReads.length && c.operations.every(op => op.status === "completed")) {
+            c.awaiting_answer = false; c.awaiting_delivery = false;
+            o.execution?.start(`agent_result_${c.steps}`, "整理查询结果", "check");
+            o.execution?.finish(`agent_result_${c.steps}`, ["全部查询结果已整理"]);
+            return finish(safePlan(replies.join("\n\n")), "completed");
+          }
+          // Successful reads are durable. If this wave ends or a later read
+          // fails, the normal continuation only queries unfinished items.
+          lastValidation = ""; repeatedValidation = 0;
+          await save();
+          continue;
         }
         if (c.workflow_required && !c.operations) throw new Error("请先使用kind=plan保存本次完整任务清单及依赖，再处理具体事项，不能只处理第一件事。");
         let operation: WorkflowOperation | undefined;
@@ -423,6 +487,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           if (s.tool === "draft_matches") {
             if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length) throw new Error("草稿核对参数必须为{}，仅核对本次上下文中的草稿。");
             if (!o.adapters.draftMatches) throw new Error("当前无法核对草稿，请补充具体账目。");
+            activeToolId = toolId;
             o.execution?.start(toolId, "逐笔核对草稿是否已录入", "tool", ["按类型与金额检查邻近日期的已保存流水，核对商户及日期偏差"]);
             const matches = await o.adapters.draftMatches(signal);
             signal.throwIfAborted(); append("draft_matches", matches);
@@ -430,13 +495,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
             await save();
             continue;
           }
-          if (s.tool === "query") {
-            if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["scope", "start_date", "end_date", "type", "category_id", "member_id", "keyword"].includes(key))) throw new Error("查询参数格式无效，仅可填写账本日期和筛选条件。");
-            // Omitted nullable filters mean no filter. Supplied invalid values,
-            // dates, types and ownership references still reach strict validation.
-            const query = { ...args, category_id: "category_id" in args ? args.category_id : null, member_id: "member_id" in args ? args.member_id : null, keyword: "keyword" in args ? args.keyword : null };
-            plan = await o.adapters.validatePlan({ action: "query", reply: "正在查询", drafts: [], query });
-          }
+          if (s.kind === "read" && ["query", "records"].includes(s.tool || "")) plan = await prepareReadPlan(s);
           else if (s.tool === "event") plan = { action: "event", reply: "正在核对", drafts: [], query: null, event: o.adapters.validateEvent(args) };
           else {
             const command = o.adapters.validateCommand(args);
@@ -485,7 +544,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (resolution?.input.allow_duplicate && plan.action === "chat" && isDuplicateEventQuestion(plan.reply)) throw new Error("用户已明确确认该事项是新发生的一笔。不要再次询问同一重复问题，不可reuse旧记录；继续event核对，已确认条件见event_resolutions。");
         const usesTool = ["query", "manage", "event"].includes(plan.action);
         if (usesTool && o.adapters.domainInstructions) c.messages.push({ role: "system", content: o.adapters.domainInstructions(plan.command?.resource || (plan.action === "query" ? "query" : "event")) });
-        if (usesTool) o.execution?.start(toolId, assistantToolExecutionLabel(plan), "tool", o.adapters.toolDetails?.(plan) || []);
+        if (usesTool) { activeToolId = toolId; o.execution?.start(toolId, assistantToolExecutionLabel(plan), "tool", o.adapters.toolDetails?.(plan) || []); }
         const result = await runPlan(plan);
         if (resolution && plan.action === "event") resolution.pending = false;
         lastValidation = ""; repeatedValidation = 0;
@@ -497,17 +556,6 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           const rawCount = facts?.facts?.summary?.count ?? records?.record_context?.rows.length;
           const count = rawCount == null ? NaN : Number(rawCount);
           o.execution?.finish(toolId, [...(o.adapters.toolDetails?.(plan) || []), c.pending_approval ? "方案已准备，等待明确批准" : Number.isSafeInteger(count) && count >= 0 ? `找到 ${count} ${records ? "条" : "笔"}记录` : s.kind === "read" ? "查询完成" : "核对完成"]);
-          const observed = latestRead?.result as { reply?: string; limited?: boolean; approval?: unknown } | undefined;
-          if (directRead && operation && c.operations?.length === 1 && s.kind === "read"
-            && latestRead?.operation_id === operation.id && ["query", "records"].includes(latestRead.name)
-            && !observed?.limited && !observed?.approval && !c.pending_approval && !c.pending_batch && typeof observed?.reply === "string" && observed.reply.trim()) {
-            // Plain retrieval uses the authoritative tool summary. Analysis,
-            // comparisons and incomplete/oversized results still enter the loop.
-            operation.status = "completed"; c.awaiting_answer = false; c.awaiting_delivery = false;
-            o.execution?.start(`agent_result_${c.steps}`, "整理查询结果", "check", ["使用实际查询结果"]);
-            o.execution?.finish(`agent_result_${c.steps}`, ["查询结果已整理"]);
-            return finish(safePlan(observed.reply), "completed");
-          }
         }
         if (result && !usesTool) o.execution?.finish(id, plan.drafts.length ? [`已生成 ${plan.drafts.length} 笔待确认草稿`] : []);
         if (result?.action === "record" && result.drafts.length) c.pending_batch = { batch_id: c.operations ? c.output_id! : c.goal_id, draft_ids: result.drafts.map(draft => draft.id) };
@@ -538,7 +586,8 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         if (result) return finish(result, c.pending_approval || c.pending_batch ? "waiting_approval" : result.action === "chat" && !s.needs_input && !unverifiedCompletion ? "completed" : "needs_input");
       } catch (error) {
         if (signal.aborted) throw error;
-        o.execution?.finish(toolId, ["条件未通过校验，未执行账本更改"], "failed");
+        if (activeToolId) o.execution?.finish(activeToolId, ["本步骤未完成，正在修正条件；未执行账本更改"], "failed");
+        else o.execution?.finish(id, ["本步参数校验未通过，正在修正；未执行账本操作"], "failed", s.kind === "plan" ? "任务清单校验未通过" : "操作条件校验未通过");
         const message = error instanceof Error ? error.message.slice(0, 500) : "操作条件无效。";
         append("validation_error", { message, writes_executed: false });
         repeatedValidation = message === lastValidation ? repeatedValidation + 1 : 1; lastValidation = message;
