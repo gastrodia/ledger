@@ -68,15 +68,26 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {}, extraDepen
   const invoke = fn => async (...args) => { paidCalls.push(args); const output = await fn(...args); return args[0].schemaName === 'ledger_image_batch' && output && Array.isArray(output.drafts) ? { ...output, total_rows: output.total_rows ?? output.drafts.length } : output; };
   const pendingPlans = new Map();
   let latestRecord = record;
+  let scriptedModel;
   const load = loader({
     '@/lib/assistant-task-dispatch': { runAndContinueAssistantTask: async (...args) => { await load('lib/assistant-tasks.ts').runAssistantTask(...args); } },
     'next/server': { NextResponse, after: callback => background.push(callback) },
     ai: require('ai'), zod: require('zod'),
+    // SQL/concurrency fixtures provide domain decisions directly. Native wire
+    // encoding and schema validation are exercised in ai-sdk/native-tools tests.
+    '@/lib/assistant-native-tools': {
+      ASSISTANT_NATIVE_AGENT_PROMPT: '仅Ledger业务工具；执行由任务状态与凭据核验。',
+      assistantNativeToolsForState: () => ({ scripted: {} }),
+      assistantNativeRecordIds: () => [],
+      assistantNativeMessages: messages => messages,
+      assistantNativeDecision: call => ({ step: call.input, call }),
+    },
     'node:crypto': crypto, 'node:async_hooks': require('node:async_hooks'), '@/lib/db': { sql: database }, '@/lib/auth': { getSession: async () => session },
     '@/lib/bailian': {
       BAILIAN_ASSISTANT_MODEL: 'fixture-object', BAILIAN_SUMMARY_MODEL: 'fixture-summary', BailianError,
       bailianConfig: () => ({}), bailianFailure: error => ({ status: error.status || 502, message: 'AI 服务暂时无法连接，请稍后重试。' }),
-      bailianObject: async (settings, signal) => {
+      bailianTool: async (settings, signal) => ({ id: `fixture-${paidCalls.length}`, name: 'scripted', input: await scriptedModel({ ...settings, schemaName: 'ledger_agent_step' }, signal) }),
+      bailianObject: scriptedModel = async (settings, signal) => {
         if (settings.schemaName === 'ledger_record_page') {
           if (provider.bailianRecordPage) return provider.bailianRecordPage(settings, signal);
           return { plan: latestRecord, segments: [{ text: JSON.parse(settings.messages.at(-1).content).remaining, draft_indexes: latestRecord.drafts.map((_, i) => i + 1) }] };
@@ -262,7 +273,7 @@ if (PGlite) {
     await started.promise;
     await f.tasks.runAssistantTask('owner', taskId);
     assert.equal(f.paidCalls.length, 1);
-    assert.equal(f.paidCalls[0][0].schemaName, 'ledger_agent_step');
+    assert.ok(f.paidCalls[0][0].tools, 'Agent calls the native tool transport');
     assert.equal(f.paidCalls[0][0].timeoutMs, 60000, 'each agent model call is bounded within the 75-second runtime budget');
     assert.equal((await f.tasks.getAssistantTask('owner', taskId)).status, 'running');
     finish.resolve(); await running;

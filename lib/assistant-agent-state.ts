@@ -11,10 +11,13 @@ const approval = (value: unknown) => object(value) && text(value.action_id, 36) 
 
 /** Only server-written checkpoints are restored. None of this private trace is returned by task APIs. */
 export function restoreAssistantAgentCheckpoint(value: unknown): AssistantAgentCheckpoint | null {
-  if (!object(value) || value.version !== 1 || !text(value.goal_id, 100) || !text(value.goal, 4000)
+  if (!object(value) || (value.version !== 1 && value.version !== 2) || !text(value.goal_id, 100) || !text(value.goal, 4000)
     || !statuses.includes(String(value.status)) || !Number.isSafeInteger(value.steps) || Number(value.steps) < 0 || Number(value.steps) > 192
     || !Array.isArray(value.messages) || value.messages.length > 600 || value.messages.some(message => !object(message)
-      || !["system", "user", "assistant"].includes(String(message.role)) || !text(message.content, 128_000))
+      || !["system", "user", "assistant"].includes(String(message.role)) || !text(message.content, 128_000)
+      || (message.tool_feedback !== undefined && (value.version !== 2 || message.role !== "user" || !object(message.tool_feedback) || !text(message.tool_feedback.name, 100) || !("result" in message.tool_feedback)))
+      || (message.native_call !== undefined && (value.version !== 2 || message.role !== "assistant" || !object(message.native_call)
+        || !text(message.native_call.id, 200) || !message.native_call.id || !text(message.native_call.name, 100) || !message.native_call.name || !object(message.native_call.input))))
     || !Array.isArray(value.tool_results) || value.tool_results.length > 300 || value.tool_results.some(result => !object(result)
       || !text(result.call_id, 200) || !text(result.name, 100) || !("result" in result))
     || !Array.isArray(value.preview_fingerprints) || value.preview_fingerprints.length > 100

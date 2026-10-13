@@ -1,4 +1,4 @@
-import { generateText, Output, streamText, wrapLanguageModel, type FlexibleSchema, type LanguageModelUsage, type ModelMessage } from "ai";
+import { generateText, Output, streamText, wrapLanguageModel, type FlexibleSchema, type LanguageModelUsage, type ModelMessage, type ToolSet } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { structuredOutputMiddleware } from "@/lib/structured-output";
 import { AssistantAgentStepError } from "@/lib/assistant-agent-step";
@@ -44,6 +44,7 @@ function providerError(error: unknown): BailianError {
   if (e.name === "TimeoutError") return new BailianError(504, "timeout");
   if (e.name === "AbortError") return new BailianError(502, "cancelled");
   if (e.name === "AI_NoOutputGeneratedError") return new BailianError(502, "empty");
+  if (e.name === "AI_ToolChoiceViolationError") return new BailianError(422, "invalid_output");
   // Output.object wraps parsing and schema errors in its own error. Preserve
   // that classification instead of treating its parser cause as a network error.
   if (e.name === "AI_NoObjectGeneratedError") {
@@ -107,6 +108,7 @@ export type BailianRequest = {
   thinking?: boolean;
   reasoningEffort?: string;
   asrOptions?: { language?: string; enable_itn?: boolean };
+  onUsage?: (usage: LanguageModelUsage) => void;
 };
 
 export type BailianStreamPart =
@@ -118,6 +120,7 @@ export type BailianStreamPart =
 function transformBailianBody(body: Record<string, unknown>): Record<string, unknown> {
   const { max_tokens: maxTokens, ...result } = body;
   result.stream ??= false;
+  if (Array.isArray(result.tools)) result.parallel_tool_calls = false;
   if (maxTokens !== undefined) result.max_completion_tokens = maxTokens;
   if (!Array.isArray(body.messages)) return result;
   result.messages = body.messages.map(message => {
@@ -157,7 +160,7 @@ function requireCompletedTransport(body: ReadableStream<Uint8Array>) {
   }));
 }
 
-type BailianOperation = "text" | "object" | "stream" | "object-stream";
+type BailianOperation = "text" | "object" | "stream" | "object-stream" | "tool";
 
 function failureClassification(error: BailianError) {
   if (["timeout", "cancelled", "invalid_output", "truncated", "empty", "incomplete", "incomplete_stream"].includes(error.code)) return error.code;
@@ -242,6 +245,44 @@ function checkFinish(finishReason: string, text: string) {
   if (finishReason !== "stop") throw new BailianError(502, "incomplete");
 }
 
+/** One decision only. Domain execution and persistence belong to the Agent. */
+export async function bailianTool(request: BailianRequest & { tools: ToolSet }, signal?: AbortSignal) {
+  const runtime = requestSettings(request, "tool", signal);
+  try {
+    const names = Object.keys(request.tools);
+    const result = await generateText({ ...runtime.settings, tools: request.tools,
+      toolChoice: request.thinking ? "auto" : names.length === 1 ? { type: "tool", toolName: names[0] } : "required" });
+    request.onUsage?.(result.totalUsage);
+    if (result.finishReason === "length") throw new BailianError(502, "truncated");
+    if (result.finishReason !== "tool-calls") throw new BailianError(502, "invalid_output");
+    // No execute callbacks: multiple calls cannot accidentally run in parallel.
+    if (result.toolCalls.length !== 1) {
+      const error = new BailianError(422, "invalid_output");
+      error.stepValidationError = new AssistantAgentStepError("tool_calls", "必须且只能包含一个工具调用，请按当前清单选择下一步");
+      throw error;
+    }
+    if (result.toolCalls[0].invalid) {
+      const error = new BailianError(422, "invalid_output");
+      const invalid = result.toolCalls[0].error as { name?: string };
+      let cause: unknown = invalid, detail: string | undefined = invalid.name === "AI_NoSuchToolError"
+        ? "所调用工具不在本轮可用工具中；不要沿用历史工具或重新执行已完成事项，只能选择当前实际提供的工具"
+        : undefined;
+      for (let depth = 0; depth < 5 && cause && typeof cause === "object"; depth++) {
+        const current = cause as { message?: string; cause?: unknown };
+        if (current.message?.startsWith("工具参数不符合schema：")) { detail = current.message; break; }
+        cause = current.cause;
+      }
+      error.stepValidationError = new AssistantAgentStepError("tool_input", detail || "参数校验失败，请按工具schema修正字段");
+      throw error;
+    }
+    const call = result.toolCalls[0];
+    runtime.signal.throwIfAborted();
+    runtime.recordUsage(result.totalUsage);
+    return { id: call.toolCallId, name: call.toolName, input: call.input };
+  } catch (error) { throw runtime.recordFailure(error); }
+  finally { runtime.controller.abort(); }
+}
+
 export async function bailianText(request: BailianRequest, signal?: AbortSignal): Promise<string> {
   const runtime = requestSettings(request, "text", signal);
   try {
@@ -260,6 +301,7 @@ export async function bailianObject<T>(request: BailianRequest & { schema: Flexi
     const result = await generateText({
       ...runtime.settings, output: Output.object({ schema: request.schema, name: request.schemaName }),
     });
+    request.onUsage?.(result.totalUsage);
     checkFinish(result.finishReason, result.text);
     const output = result.output;
     runtime.signal.throwIfAborted();

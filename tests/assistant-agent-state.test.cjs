@@ -46,7 +46,7 @@ test('checkpoint restores defensively and public state excludes model prompts an
   assert.equal(JSON.stringify(metadata).includes('PRIVATE'), false);
   assert.equal(JSON.stringify(metadata).includes('secret'), false);
   assert.deepEqual(plain(state.assistantAgentApprovalIds(restored)), [actionId]);
-  for (const patch of [{ version: 2 }, { steps: -1 }, { status: 'made_up' }, { pending_approval: { action_id: 'foreign', fingerprint: '' } }, { messages: [{ role: 'tool', content: '' }] }]) {
+  for (const patch of [{ version: 3 }, { steps: -1 }, { status: 'made_up' }, { pending_approval: { action_id: 'foreign', fingerprint: '' } }, { messages: [{ role: 'tool', content: '' }] }]) {
     assert.equal(state.restoreAssistantAgentCheckpoint({ ...checkpoint(), ...patch }), null);
   }
 });

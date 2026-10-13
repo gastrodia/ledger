@@ -14,11 +14,16 @@ const repeat = repeatIndex < 0 ? 1 : Number(process.argv[repeatIndex + 1]);
 if (!Number.isInteger(repeat) || repeat < 1 || repeat > 3)
     throw Error('--repeat must be 1 to 3');
 fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+const legacy = process.argv.includes("--legacy");
+const baselineIndex = process.argv.indexOf('--baseline');
+const baselinePath = baselineIndex < 0 ? null : path.resolve(process.argv[baselineIndex + 1]);
+const baselineFiles = new Set(["assistant-agent-runtime", "assistant-agent-schema", "assistant-agent-step", "assistant-agent-instructions", "assistant-generation", "bailian", "assistant-agent-state"].map(name => `lib/${name}.ts`));
 const cache = new Map();
 function load(file) { if (cache.has(file))
-    return cache.get(file); const exports = {}; cache.set(file, exports); vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, process, console, JSON, Error, Number, Date, Set, Map, Promise, AbortController, AbortSignal, Buffer, URL, fetch, TextEncoder, TextDecoder, ReadableStream, Request, Response, Headers, setTimeout, clearTimeout, structuredClone, require: n => { if (n === '@/lib/db')
+    return cache.get(file); const exports = {}; cache.set(file, exports); vm.runInNewContext(ts.transpileModule(fs.readFileSync(baselinePath ? path.join(baselinePath, `${file}.snapshot`) : legacy && baselineFiles.has(file) ? `output/assistant-native-tools/${path.basename(file)}.snapshot` : file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, process, console, JSON, Error, Number, Date, Set, Map, Promise, AbortController, AbortSignal, Buffer, URL, fetch, TextEncoder, TextDecoder, ReadableStream, Request, Response, Headers, setTimeout, clearTimeout, structuredClone, require: n => { if (n === '@/lib/db')
         throw Error('Semantic evaluation cannot access the account database'); return n.startsWith('@/') ? load(n.slice(2) + '.ts') : require(n); } }, { filename: file }); return exports; }
-const { bailianObject, BAILIAN_ASSISTANT_MODEL } = load('lib/bailian.ts');
+const { bailianObject, bailianTool, BAILIAN_ASSISTANT_MODEL } = load("lib/bailian.ts");
+const native = legacy ? null : load("lib/assistant-native-tools.ts");
 const { ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA, ASSISTANT_AGENT_RUNTIME_PROMPT } = load('lib/assistant-agent-schema.ts');
 const { ASSISTANT_COMMAND_PROMPT } = load('lib/assistant-commands.ts');
 const { ASSISTANT_SYSTEM_PROMPT, validatePlan } = load('lib/assistant.ts');
@@ -58,14 +63,21 @@ const selected = scenarioIndex < 0 ? cases : cases.filter(c => c[0] === process.
 if (!selected.length)
     throw Error('Unknown scenario');
 async function one([name, message, contexts, decision, targetId], i) {
-    let chosen = null, checkpoint;
+    let chosen = null, checkpoint; const started = Date.now(), usage = []; let calls = 0;
     const emittedEvents = [], choices = [], commands = [];
     const adapters = { controlContexts: contexts,
-        chooseStep: async (messages, signal) => { const step = await bailianObject({ model: process.env.BAILIAN_ASSISTANT_MODEL || BAILIAN_ASSISTANT_MODEL, thinking: false, temperature: 0.2, maxOutputTokens: 6000, timeoutMs: 60000, schema: ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA, schemaName: 'ledger_agent_step', messages }, signal); choices.push(step); return step; },
+        ...(legacy ? {} : { protocol: "native" }),
+        chooseStep: async (messages, signal, operations, targets, toolResults = [], userMessage = message) => {
+            if (++calls > 24) throw Error('Evaluation model-call limit exceeded');
+            const settings = { model: process.env.BAILIAN_ASSISTANT_MODEL || BAILIAN_ASSISTANT_MODEL, thinking: false, temperature: 0.2, maxOutputTokens: 6000, timeoutMs: 60000, onUsage: u => usage.push(u) };
+            const choice = legacy ? await bailianObject({ ...settings, schema: ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA, schemaName: 'ledger_agent_step', messages }, signal)
+                : native.assistantNativeDecision(await bailianTool({ ...settings, tools: native.assistantNativeToolsForState(operations, targets, { draft_batch: false, saved_batch: false, record_ids: toolResults.filter(item => item.name === "records").flatMap(item => item.result.record_context?.rows.map(row => row.id) || []) }), messages: native.assistantNativeMessages(messages) }, signal), targets || [], userMessage, operations);
+            choices.push(legacy ? choice : choice.step); return choice;
+        },
         validatePlan: p => validatePlan(p, [{ id: uuid(71), name: '餐饮', type: 'expense' }], [{ id: uuid(70), name: '本人' }], () => uuid(89)), validateCommand: validateLedgerCommand, validateEvent: validateLedgerEvent, query: async () => ({ reply: '查询完成' }), command: async (command) => { commands.push(command); return command.operation === 'list' ? { reply: '读取到早餐20元', record_context: { resource: command.resource, rows: [{ id: uuid(50), description: '早餐', amount: 20, transaction_date: '2026-10-12', type: 'expense', category_id: uuid(71), member_id: uuid(70) }] } } : { reply: '新方案待确认', approval: { id: uuid(80), summary: '待确认', expires_at: null, count: 1 } }; }, event: async (event) => { emittedEvents.push(event); return { reply: '新事件待确认', approval: { id: uuid(81), summary: '送礼500元及鞋子估值200元', expires_at: null, count: 1 } }; },
         control: async (control) => { chosen = control; return { action: 'control', control, reply: '决定已保存，等待执行', drafts: [], query: null }; } };
     const original = decision === 'new_occurrence' ? '给小美送礼500元' : '早餐3.9元 地铁2.96元 小美生日送礼500元外加一双估值200元的鞋子';
-    const basePrompt = ASSISTANT_SYSTEM_PROMPT + '\n' + ASSISTANT_COMMAND_PROMPT + '\n' + ASSISTANT_DRAFT_ACTION_PROMPT + '\n' + LEDGER_EVENT_PROMPT + '\n' + ASSISTANT_AGENT_RUNTIME_PROMPT;
+    const basePrompt = legacy ? ASSISTANT_SYSTEM_PROMPT + '\n' + ASSISTANT_COMMAND_PROMPT + '\n' + ASSISTANT_DRAFT_ACTION_PROMPT + '\n' + LEDGER_EVENT_PROMPT + '\n' + ASSISTANT_AGENT_RUNTIME_PROMPT : native.ASSISTANT_NATIVE_AGENT_PROMPT + '\n' + LEDGER_EVENT_PROMPT;
     const inputCheckpoint = ['stop', 'continue', 'new_occurrence'].includes(decision) ? { version: 1, workflow_required: true, goal_id: uuid(100 + i), goal: original, status: 'running', steps: 2, messages: [{ role: 'system', content: basePrompt }, { role: 'user', content: '可用数据：today=2026-10-12；成员ID=' + uuid(70) + '；分类ID=' + uuid(71) }, { role: 'user', content: original }, { role: 'assistant', content: decision === 'new_occurrence' ? '有已登记的同类送礼，请核对是同一发生还是另一次。' : '鞋子是实际购买还是已有物品估值？' }, { role: 'user', content: message }], tool_results: [], pending_approval: null, preview_fingerprints: [], current_operation_id: 'gift', turn_input: { message, display_text: message, display_images: [] }, authorized_answers: [message], clarification_answers: [{ operation_id: 'gift', message_id: uuid(90), output_id: uuid(91), text: message }], operations: [{ id: 'record', label: '早餐和地铁', action: 'record', effect: 'write', depends_on: [], status: 'completed', receipt_id: uuid(92), sources: ['早餐3.9元 地铁2.96元'] }, { id: 'gift', label: '小美生日礼金500和鞋子估值200', action: 'event', effect: 'write', depends_on: [], status: 'pending', sources: ['小美生日送礼500元外加一双估值200元的鞋子'] }] } : undefined;
     if (decision === 'new_occurrence') {
         inputCheckpoint.operations = inputCheckpoint.operations.slice(1).map(op => ({ ...op, label: '小美送礼500元', sources: [original] }));
@@ -79,16 +91,23 @@ async function one([name, message, contexts, decision, targetId], i) {
         let result = await runAssistantAgent(options);
         for (let wave = 0; wave < 2 && result.agent.status === 'running'; wave++)
             result = await runAssistantAgent({ ...options, checkpoint });
-        const pass = !['running', 'interrupted'].includes(result.agent.status) && (decision === 'note' ? chosen == null && commands.some(c => c.resource === 'notes' && c.operation === 'create' && JSON.parse(c.values_json).content.includes('2026-10-13')) : decision === 'explain' ? chosen == null && commands.length === 0 && emittedEvents.length === 0 && result.action === 'chat' : decision === 'item_gift' ? chosen == null && commands.some(c => c.resource === 'gifts_given' && c.operation === 'create' && JSON.parse(c.values_json).cash_amount == null && JSON.parse(c.values_json).items?.[0]?.estimated_value === 150) && emittedEvents.length === 0 : decision === 'new_occurrence' ? chosen == null && emittedEvents.length === 1 && emittedEvents[0].allow_duplicate === true && emittedEvents[0].amount_cents === 50000 && choices.length > 0 : decision === 'stop' ? result.agent.status === 'stopped' && result.agent.operations[0].status === 'completed' && emittedEvents.length === 0 : decision === 'continue' ? result.agent.goal === original && emittedEvents.length === 1 && emittedEvents[0].amount_cents === 50000 && emittedEvents[0].cashflow !== 'none' && chosen == null : decision ? chosen?.decision === decision && chosen?.target_id === uuid(targetId) : chosen == null || name === 'question' && chosen.decision === 'status');
-        const entry = { name, message, pass, choices, commands, events: emittedEvents, control: chosen, result: { action: result.action, reply: result.reply, status: result.agent.status }, validation: checkpoint?.tool_results.filter(x => x.name === 'validation_error').map(x => x.result) };
+        // The real preview can resolve a unique name without an extra ID read.
+        // This fixture's breakfast row is the only matching named transaction.
+        const revisedPreview = commands.find(c => c.resource === 'transactions' && c.operation === 'update'
+            && (c.ids.includes(uuid(50)) || c.ids.length === 0 && c.scope === 'one' && c.filter.keyword === '早餐')
+            && JSON.parse(c.values_json).amount === 100);
+        const pass = !['running', 'interrupted'].includes(result.agent.status) && (name === 'conditional_change'
+            ? chosen == null && !!revisedPreview && result.agent.status === 'waiting_approval' && !!result.approval
+            : decision === 'note' ? chosen == null && commands.some(c => c.resource === 'notes' && c.operation === 'create' && JSON.parse(c.values_json).content.includes('2026-10-13')) : decision === 'explain' ? chosen == null && commands.length === 0 && emittedEvents.length === 0 && result.action === 'chat' : decision === 'item_gift' ? chosen == null && commands.some(c => c.resource === 'gifts_given' && c.operation === 'create' && JSON.parse(c.values_json).cash_amount == null && JSON.parse(c.values_json).items?.[0]?.estimated_value === 150) && emittedEvents.length === 0 : decision === 'new_occurrence' ? chosen == null && emittedEvents.length === 1 && emittedEvents[0].allow_duplicate === true && emittedEvents[0].amount_cents === 50000 && choices.length > 0 : decision === 'stop' ? result.agent.status === 'stopped' && result.agent.operations[0].status === 'completed' && emittedEvents.length === 0 : decision === 'continue' ? result.agent.goal === original && emittedEvents.length === 1 && emittedEvents[0].amount_cents === 50000 && emittedEvents[0].cashflow !== 'none' && chosen == null : decision ? chosen?.decision === decision && chosen?.target_id === uuid(targetId) : chosen == null || name === 'question' && chosen.decision === 'status');
+        const entry = { name, message, pass, calls, usage, elapsed_ms: Date.now() - started, choices, commands, events: emittedEvents, control: chosen, result: { action: result.action, reply: result.reply, status: result.agent.status }, validation: checkpoint?.tool_results.filter(x => x.name === 'validation_error').map(x => x.result) };
         results.push(entry);
         console.log(name, pass ? 'PASS' : 'FAIL');
     }
     catch (e) {
-        results.push({ name, message, pass: false, error: e.message, error_code: e.code, status: e.status });
+        results.push({ name, message, pass: false, calls, usage, elapsed_ms: Date.now() - started, error: e.message, error_code: e.code, status: e.status });
         console.log(name, 'ERROR', e.message);
     }
-    fs.writeFileSync(outputPath, JSON.stringify({ model: process.env.BAILIAN_ASSISTANT_MODEL || BAILIAN_ASSISTANT_MODEL, account_database_access: false, account_writes: 0, scenarios: results }, null, 2));
+    fs.writeFileSync(outputPath, JSON.stringify({ model: process.env.BAILIAN_ASSISTANT_MODEL || BAILIAN_ASSISTANT_MODEL, protocol: legacy ? 'legacy' : 'native', account_database_access: false, account_writes: 0, scenarios: results }, null, 2));
 }
 for (let round = 0; round < repeat; round++)
     for (let i = 0; i < selected.length; i += 3)

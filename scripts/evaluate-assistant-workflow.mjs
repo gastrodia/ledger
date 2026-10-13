@@ -1,5 +1,6 @@
 // Real model decisions against a sandbox ledger. Never imports the account DB.
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -23,21 +24,11 @@ function load(file) {
 }
 const { runAssistantAgent } = load("lib/assistant-agent-runtime.ts");
 const { resolveAssistantEventChoice } = load("lib/assistant-event-clarification.ts");
-const { ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA, ASSISTANT_AGENT_RUNTIME_PROMPT } = load("lib/assistant-agent-schema.ts");
-if(process.argv.includes("--trace")) {
-  const validateStep = ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA.validate;
-  ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA.validate = async value => {
-    const result = await validateStep(value);
-    if(!result.success) console.log(JSON.stringify({schema_error:{kind:value?.kind,keys:Object.keys(value||{}),types:Object.fromEntries(Object.entries(value||{}).map(([key,v])=>[key,v===null?"null":Array.isArray(v)?"array":typeof v])),issues:result.error?.issues?.map(issue=>({path:issue.path,code:issue.code})),message:result.error?.issues?undefined:result.error?.message}}));
-    return result;
-  };
-}
-const { ASSISTANT_AGENT_DOMAIN_PROMPT } = load("lib/assistant-agent-instructions.ts");
-const { ASSISTANT_SYSTEM_PROMPT, validatePlan } = load("lib/assistant.ts");
-const { ASSISTANT_COMMAND_PROMPT, validateLedgerCommand } = load("lib/assistant-commands.ts");
+const { validatePlan } = load("lib/assistant.ts");
+const { validateLedgerCommand } = load("lib/assistant-commands.ts");
 const { LEDGER_EVENT_PROMPT, validateLedgerEvent } = load("lib/ledger-event.ts");
-const { ASSISTANT_DRAFT_ACTION_PROMPT } = load("lib/assistant-draft-actions.ts");
-const { bailianObject, BAILIAN_ASSISTANT_MODEL } = load("lib/bailian.ts");
+const { bailianTool, BAILIAN_ASSISTANT_MODEL } = load("lib/bailian.ts");
+const native = load("lib/assistant-native-tools.ts");
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const categories = [{ id: id(1), name: "餐饮", type: "expense" }, { id: id(2), name: "交通", type: "expense" }];
 const members = [{ id: id(3), name: "我" }];
@@ -52,9 +43,14 @@ const scenarios = [
 for (const scenario of (process.argv.includes("--short-replies") ? scenarios.filter(s=>s.name.startsWith("short_reply")) : process.argv.includes("--duplicates") ? scenarios.filter(s=>s.duplicateEvent) : process.argv.includes("--management") ? scenarios.slice(-1) : process.argv.includes("--single") ? scenarios.slice(0,1) : scenarios)) {
   const goalId=randomUUID(), trace=[], saved=[];
   let checkpoint=null, result=null, asked=false, unique=0;
-  const adapters={
-    chooseStep:async(messages,signal)=>bailianObject({model,temperature:0.2,maxOutputTokens:6000,timeoutMs:60000,thinking:false,schema:ASSISTANT_AGENT_WORKFLOW_STEP_SCHEMA,schemaName:'ledger_agent_step',messages},signal).then(step=>{if(process.argv.includes("--trace"))console.log(JSON.stringify({step}));return step;}),
-    validatePlan:raw=>validatePlan(raw,categories,members,randomUUID),validateCommand:validateLedgerCommand,validateEvent:validateLedgerEvent,
+  const adapters={ protocol:"native",
+    chooseStep:async(messages,signal,operations,targets,toolResults=[],userMessage=scenario.goal)=>{
+      const call=await bailianTool({model,temperature:0.2,maxOutputTokens:6000,timeoutMs:60000,thinking:false,tools:native.assistantNativeToolsForState(operations,targets,{draft_batch:false,saved_batch:false,record_ids: toolResults.filter(item => item.name === "records").flatMap(item => item.result.record_context?.rows.map(row => row.id) || [])}),messages:native.assistantNativeMessages(messages)},signal);
+      const decision=native.assistantNativeDecision(call,targets||[],userMessage,operations);if(process.argv.includes("--trace"))console.log(JSON.stringify({step:decision.step}));return decision;
+    },
+    validatePlan:raw=>validatePlan(raw.action==='record'&&!raw.drafts?.length&&!scenario.name.startsWith('management')?{...raw,drafts:[
+      {type:'expense',amount_cents:390,category_id:id(1),member_id:null,transaction_date:'2026-10-10',description:'早餐',payment_method:null,note:''},
+      {type:'expense',amount_cents:296,category_id:id(2),member_id:null,transaction_date:'2026-10-10',description:'地铁',payment_method:null,note:''}]}:raw,categories,members,randomUUID),validateCommand:validateLedgerCommand,validateEvent:validateLedgerEvent,
     verifyTargets:async targets=>({verified:true,records:targets.map(target=>({...target,rows:[]}))}),
     query:async query=>{trace.push({tool:'query',query});return {filters:query,facts:{summary:{income:'0.00',expense:'536.86',balance:'-536.86',count:4}}};},
     command:async (command,_signal,fp)=>{
@@ -64,7 +60,7 @@ for (const scenario of (process.argv.includes("--short-replies") ? scenarios.fil
     },
     event:async(event,_signal,fp)=>{trace.push({tool:'event',event,fingerprint:fp});if(scenario.duplicateEvent&&!event.allow_duplicate)return {reply:'发现同一天、同对方、同金额的已登记事项。请核对是不是已经记过；确实又发生一笔才继续。',event_context:{status:'pending',event_id:null,input:event},event_choices:[{label:'这是另外新发生的一笔，继续核对',input:{...event,allow_duplicate:true}}]};return {reply:'待确认',event_context:{status:'pending',event_id:null,input:event},approval:{id:randomUUID(),summary:'模拟事项确认',count:1,expires_at:null}};},
   };
-  const messages=[{role:'system',content:[ASSISTANT_SYSTEM_PROMPT,ASSISTANT_COMMAND_PROMPT,ASSISTANT_DRAFT_ACTION_PROMPT,LEDGER_EVENT_PROMPT,ASSISTANT_AGENT_DOMAIN_PROMPT,ASSISTANT_AGENT_RUNTIME_PROMPT,`可用数据：${JSON.stringify({today:'2026-10-10',categories,members})}`].join('\n')},{role:'user',content:scenario.goal}];
+  const messages=[{role:'system',content:[native.ASSISTANT_NATIVE_AGENT_PROMPT,LEDGER_EVENT_PROMPT,`可用数据：${JSON.stringify({today:'2026-10-10',categories,members})}`].join('\n')},{role:'user',content:scenario.goal}];
   try {
     for(let turn=0;turn<8;turn++) {
       result=await runAssistantAgent({requireWorkflow:true,goalId,goal:scenario.goal,messages,checkpoint,adapters,signal:AbortSignal.timeout(90000),attempt:turn+1,onCheckpoint:c=>{checkpoint=c; const error=c.tool_results.at(-1); if(error?.name==='validation_error') console.log(JSON.stringify({validation:error.result}));}});
@@ -81,6 +77,9 @@ for (const scenario of (process.argv.includes("--short-replies") ? scenarios.fil
         const answer=duplicateChoice?.label || (checkpoint.duplicate_review?'这是同一笔，请复用前面已确认的账目，不要重复入账。':scenario.answer);
         const resolved=op&&resolveAssistantEventChoice(checkpoint,op.id,answer);
         if(resolved) checkpoint.event_resolutions=[...(checkpoint.event_resolutions||[]).filter(item=>item.operation_id!==op.id),resolved];
+        const answerId=randomUUID();checkpoint.turn_message_id=answerId;
+        checkpoint.authorized_answers=[...(checkpoint.authorized_answers||[]),answer];
+        if(op)checkpoint.clarification_answers=[...(checkpoint.clarification_answers||[]),{operation_id:op.id,message_id:answerId,output_id:checkpoint.output_id,text:answer}];
         checkpoint.turn_input={message:answer,display_text:answer,display_images:[]};checkpoint.messages.push({role:'user',content:answer});
       } else if(checkpoint.awaiting_delivery) { checkpoint.awaiting_delivery=false;const op=checkpoint.operations.find(op=>op.id===checkpoint.current_operation_id);if(op?.status==='needs_input')op.status='completed';checkpoint.messages.push({role:'user',content:'隔离页面已经展示此结果，继续未完成事项。'}); }
       else if(result.agent.status!=="running") break;
@@ -92,5 +91,5 @@ for (const scenario of (process.argv.includes("--short-replies") ? scenarios.fil
     console.log(JSON.stringify({name:scenario.name,passed:check,asked,status:result.agent.status,operations:result.agent.operations?.map(op=>({label:op.label,status:op.status})),validation_errors:checkpoint.tool_results.filter(tool=>tool.name==='validation_error').map(tool=>tool.result)}));
   } catch(error) {report.scenarios.push({name:scenario.name,passed:false,error:String(error),trace});console.log(JSON.stringify({name:scenario.name,error:String(error)}));}
 }
-fs.mkdirSync('output/assistant-workflow',{recursive:true});fs.writeFileSync('output/assistant-workflow/live-evaluation.json',JSON.stringify(report,null,2));
+const outputIndex=process.argv.indexOf('--output');const output=outputIndex<0?'output/assistant-workflow/live-evaluation.json':process.argv[outputIndex+1];fs.mkdirSync(path.dirname(output),{recursive:true});fs.writeFileSync(output,JSON.stringify(report,null,2));
 process.exitCode=report.scenarios.every(s=>s.passed)?0:1;

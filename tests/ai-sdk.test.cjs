@@ -65,6 +65,46 @@ function schemaFromRequest(body) {
   assert.ok(instruction, 'the model must receive the exact output contract');
   return JSON.parse(instruction.content.split('\nJSON Schema:\n')[1]);
 }
+
+test('native tools use typed parameters and round-trip call IDs with empty assistant text', async () => {
+  const { z } = require('zod');
+  const tools = { lookup: ai.tool({ description: 'read synthetic ledger', inputSchema: z.object({ start_date: z.string() }).strict() }) };
+  const nativeCompletion = Response.json({ id: 'native', model: 'fixture-model', created: 1,
+    choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{"start_date":"2026-10-01"}' } }] }, finish_reason: 'tool_calls' }],
+    usage: { prompt_tokens: 12, completion_tokens: 6, total_tokens: 18 } });
+  const f = fixture(nativeCompletion.clone());
+  const call = await f.adapter.bailianTool({ model: 'fixture-model', messages: prompt, tools, thinking: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(call)), { id: 'call-1', name: 'lookup', input: { start_date: '2026-10-01' } });
+  assert.deepEqual(f.calls[0].body.tool_choice, { type: 'function', function: { name: 'lookup' } });
+  assert.equal(f.calls[0].body.parallel_tool_calls, false);
+  assert.equal(f.calls[0].body.response_format, undefined);
+  assert.equal(f.calls[0].body.tools[0].function.parameters.properties.start_date.type, 'string');
+  const response = fixture(nativeCompletion);
+  await response.adapter.bailianTool({ model: 'fixture-model', tools, thinking: true, messages: [...prompt,
+    { role: 'assistant', content: [{ type: 'tool-call', toolCallId: call.id, toolName: call.name, input: call.input }] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: call.id, toolName: call.name, output: { type: 'json', value: { expense: '80.00' } } }] }] });
+  assert.equal(response.calls[0].body.tool_choice, 'auto');
+  const wire = response.calls[0].body.messages;
+  assert.equal(wire.at(-1).role, 'tool');
+  assert.equal(wire.at(-1).tool_call_id, 'call-1');
+  assert.deepEqual(JSON.parse(wire.at(-1).content), { expense: '80.00' });
+});
+
+test('native transport rejects multiple calls and invalid input instead of dispatching partial work', async () => {
+  const { z } = require('zod');
+  const tools = { lookup: ai.tool({ inputSchema: z.object({ count: z.number().int() }).strict() }) };
+  for (const calls of [
+    [1, 2].map(n => ({ id: `call-${n}`, type: 'function', function: { name: 'lookup', arguments: '{"count":1}' } })),
+    [{ id: 'invalid', type: 'function', function: { name: 'lookup', arguments: '{"count":"bad"}' } }],
+  ]) {
+    const f = fixture(Response.json({ id: 'native', model: 'fixture-model', created: 1,
+      choices: [{ message: { role: 'assistant', content: null, tool_calls: calls }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
+    await assert.rejects(f.adapter.bailianTool({ model: 'fixture-model', messages: prompt, tools }), error => error.code === 'invalid_output');
+    assert.equal(f.calls.length, 1);
+  }
+  const textOnly = fixture(completion('do it now'));
+  await assert.rejects(textOnly.adapter.bailianTool({ model: 'fixture-model', messages: prompt, tools }), error => error.code === 'invalid_output');
+});
 function sse(events, { done = true, bytewise = false } = {}) {
   const payload = events.map(event => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\r\n\r\n`).join('')
     + (done ? 'data: [DONE]\r\n\r\n' : '');

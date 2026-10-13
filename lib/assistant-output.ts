@@ -7,6 +7,12 @@ import { z } from "zod";
 // The SDK validates the response shape. Account ownership and financial rules
 // remain in validatePlan, where the current categories and members are known.
 const nullableString = z.string().nullable();
+export const assistantQuerySchema = z.object({
+  scope: z.enum(["daily", "cashflow"]).optional(),
+  start_date: z.string(), end_date: z.string(),
+  type: z.enum(["income", "expense"]).nullable(),
+  category_id: nullableString, member_id: nullableString, keyword: nullableString,
+}).strict();
 const imageSource = z.object({
   image_index: z.number().int().positive(), row_index: z.number().int().positive(),
   time: nullableString, transaction_id: nullableString,
@@ -28,12 +34,7 @@ const assistantOutput = z.object({
     payment_method: nullableString, note: z.string(),
     source: imageSource.nullable().optional(),
   }).strict()),
-  query: z.object({
-    scope: z.enum(["daily", "cashflow"]).optional(),
-    start_date: z.string(), end_date: z.string(),
-    type: z.enum(["income", "expense"]).nullable(),
-    category_id: nullableString, member_id: nullableString, keyword: nullableString,
-  }).strict().nullable().describe("仅action=query时填写完整普通收支统计条件；其他动作包括借还查询均必须为null"),
+  query: assistantQuerySchema.nullable().describe("仅action=query时填写完整普通收支统计条件；其他动作包括借还查询均必须为null"),
   update: z.object({
     batch_id: z.string(), draft_ids: z.array(z.string()), member_id: nullableString,
   }).strict().nullable().optional().default(null),

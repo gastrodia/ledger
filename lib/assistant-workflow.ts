@@ -1,5 +1,7 @@
 /** A bounded agenda of existing Ledger operations; execution remains in domain adapters. */
 export const WORKFLOW_ACTIONS = ["record", "query", "chat", "update", "undo", "remove", "manage", "edit", "confirm", "navigate", "event", "control"] as const;
+export const WORKFLOW_MAX_QUESTIONS = 8;
+export const WORKFLOW_MAX_QUESTION_LENGTH = 500;
 export type WorkflowAction = typeof WORKFLOW_ACTIONS[number];
 export type WorkflowOperation = {
   id: string; label: string; action: WorkflowAction; effect: "read" | "write" | "local"; depends_on: string[];
@@ -20,7 +22,7 @@ export function validateWorkflow(value: unknown, restore = false): WorkflowOpera
       || (item.effect !== undefined && !["read", "write", "local"].includes(item.effect))
       || !Array.isArray(item.depends_on) || item.depends_on.length > 32 || item.depends_on.some(id => typeof id !== "string" || !operationId.test(id))
       || (item.sources !== undefined && (!Array.isArray(item.sources) || !item.sources.length || item.sources.length > 32 || item.sources.some(source => typeof source !== "string" || !source.trim() || source.length > 4000)))
-      || (item.questions !== undefined && (!Array.isArray(item.questions) || item.questions.length > 8 || item.questions.some(question => typeof question !== "string" || !question.trim() || question.length > 500)))
+      || (item.questions !== undefined && (!Array.isArray(item.questions) || item.questions.length > WORKFLOW_MAX_QUESTIONS || item.questions.some(question => typeof question !== "string" || !question.trim() || question.length > WORKFLOW_MAX_QUESTION_LENGTH)))
       || new Set(item.depends_on).size !== item.depends_on.length || (restore && !statuses.has(item.status))
       || (item.receipt_id !== undefined && (typeof item.receipt_id !== "string" || item.receipt_id.length > 100))) throw new Error("任务事项格式无效。");
     return { id: item.id, label: item.label, action: item.action, effect: item.effect || (["query", "chat"].includes(item.action) ? "read" : ["edit", "update", "remove", "navigate", "control"].includes(item.action) ? "local" : "write"), depends_on: [...item.depends_on], status: restore ? item.status : "pending" as const,
