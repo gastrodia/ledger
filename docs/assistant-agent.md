@@ -63,3 +63,11 @@ node scripts/evaluate-assistant-workflow.mjs --live
 确定性测试验证实际调度、校验和回放；PGlite集成测试执行隔离的真实PostgreSQL语句，不连接账户DATABASE_URL。真实模型脚本拒绝导入账户数据库，使用合成上下文、工具和凭据，会产生模型调用费用；报告保存在output/，不能提交。`--scenario`可单独选择场景，`--output`可指定报告路径。
 
 脚本通过证明的是列出的隔离场景，不能推断所有表达、真实账户页面或生产部署已经验收。运行波次最多8步，组合目标最多32项及192累计步；格式错误和实际读取失败保留可续接状态，不将中间结果冒充完成。
+
+## 前端会话职责
+
+`app/dashboard/assistant/page.tsx`只组装布局、恢复提示、消息区和输入区。`hooks/assistant/use-assistant-controller.ts`组合各模块；会话状态与本机持久化由`use-assistant-session.ts`负责，任务订阅和检查点续接由`use-assistant-tasks.ts`负责，确认、撤销、成员和草稿操作由`use-assistant-actions.ts`负责，文字发送和媒体输入分别由`use-assistant-send.ts`、`use-assistant-input.ts`负责。界面滚动和定位由`use-assistant-feed.ts`负责；初始化成员、分类和配置由`use-assistant-setup.ts`负责。
+
+`lib/assistant-conversation-state.ts`保留现有本机存储格式、恢复校验和历史迁移，在恢复、清空及退出登录时一次转换会话状态。流式回复直接取当前任务，不另存一份进度状态；预览、展开、录音计时等临时界面变化不改变持久化快照。`components/assistant/conversation-message.tsx`、`draft-editor.tsx`、`composer.tsx`只呈现原有交互。
+
+确认与撤销的同步锁、原批次/操作ID、不可变请求快照和待核对记录继续保留。清空对话会取消会话内请求，但不取消正在核对的确认/撤销；其迟到结果不得恢复旧对话。刷新只恢复数据和查询进度，不自动批准入账；未知结果只按原身份和原载荷重试。

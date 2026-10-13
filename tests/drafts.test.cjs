@@ -309,6 +309,11 @@ function draftHookHarness(storage) {
       if (!slots[key]) slots[key] = { value: initial };
       return [slots[key].value, value => { slots[key].value = value; }];
     },
+    useMemo(factory, deps) {
+      const key = index++, previous = slots[key];
+      if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) slots[key] = { deps, value: factory() };
+      return slots[key].value;
+    },
     useSyncExternalStore(_subscribe, getSnapshot) { index++; return getSnapshot(); },
     useEffect(callback, deps) {
       const key = index++;

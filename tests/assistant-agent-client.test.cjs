@@ -269,7 +269,7 @@ test('stopped pending action keeps one authoritative card across polls and fresh
 });
 
 test('sending an unrelated request preserves all waiting approvals and never submits cancellation', async () => {
-  const source = fs.readFileSync('app/dashboard/assistant/page.tsx', 'utf8');
+  const source = fs.readFileSync('hooks/assistant/use-assistant-send.ts', 'utf8');
   const file = ts.createSourceFile('page.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let send;
   function visit(node) { if (ts.isFunctionDeclaration(node) && node.name?.text === 'send') send = node; ts.forEachChild(node, visit); }
@@ -282,10 +282,10 @@ test('sending an unrelated request preserves all waiting approvals and never sub
   const exports = {};
   vm.runInNewContext(ts.transpileModule(`export ${send.getText(file)}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
     exports, assistantCardTarget: load('lib/assistant-card-updates.ts').assistantCardTarget, crypto: require('node:crypto'), answerTarget: undefined, setAnswerTarget() {}, input: '小美生日，我送她一双200元鞋子和500元礼金', images: [], messages: waiting,
-    actionPendingRef: ref(false), busy: false, outboxRef: ref(null), sendLock: ref(false), saveLock: ref(false),
+    actionPendingRef: ref(false), activity: () => ({ busy: false }), busy: false, outboxRef: ref(null), sendLockRef: ref(false), saveLockRef: ref(false),
     draft: { hasDraft: false, status: 'ready', persist: snapshot => { persisted.push(plain(snapshot)); return true; } }, configured: true,
-    conversationId: uuid(4), conversationEpoch: ref(0), currentConversation: () => true,
-    knownTasks: ref([task()]), assistantTaskAnswerable: client.assistantTaskAnswerable, assistantAgentWaiting: client.assistantAgentWaiting,
+    conversationId: uuid(4), conversationEpochRef: ref(0), currentConversation: () => true,
+    knownTasksRef: ref([task()]), assistantTaskAnswerable: client.assistantTaskAnswerable, assistantAgentWaiting: client.assistantAgentWaiting,
     cancelAssistantTaskCheckpoint: () => { throw new Error('New message must not cancel an old proposal'); },
     assistantCardControlContexts: load('lib/assistant-control.ts').assistantCardControlContexts, localCalendarDate: () => '2026-10-09',
     setSending() {}, setOutbox() {}, setOutboxPersistable() {}, setMessages() {}, setInput() {}, setImages() {},
@@ -431,14 +431,14 @@ test('a stopped clarification remains answerable while cancelled financial propo
 });
 
 test('the actual composer sends 已有物品 as an answer to the paused original goal', async () => {
- const source=fs.readFileSync('app/dashboard/assistant/page.tsx','utf8');const file=ts.createSourceFile('page.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let send;
+ const source=fs.readFileSync('hooks/assistant/use-assistant-send.ts','utf8');const file=ts.createSourceFile('page.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);let send;
  function visit(node){if(ts.isFunctionDeclaration(node)&&node.name?.text==='send')send=node;ts.forEachChild(node,visit);}visit(file);
  const paused=task({status:'cancelled',agent:agent({status:'stopped',awaiting_answer:true,output_id:uuid(50),pending_action_id:undefined}),result:plan({reply:'鞋子是实际购买还是已有物品？'})});
  const messages=client.mergeAssistantTasks([user],[paused],uuid(4),[]);const submitted=[],ref=current=>({current}),exports={};
  vm.runInNewContext(ts.transpileModule(`export ${send.getText(file)}`,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{
   exports,crypto:require('node:crypto'),input:'已有物品',images:[],messages,assistantCardTarget:load('lib/assistant-card-updates.ts').assistantCardTarget,
-  actionPendingRef:ref(false),busy:false,outboxRef:ref(null),sendLock:ref(false),saveLock:ref(false),draft:{hasDraft:false,status:'ready',persist:()=>true},configured:true,conversationId:uuid(4),conversationEpoch:ref(0),currentConversation:()=>true,
-  knownTasks:ref([paused]),assistantTaskAnswerable:client.assistantTaskAnswerable,restoreAssistantAgent:client.restoreAssistantAgent,assistantCardControlContexts:load('lib/assistant-control.ts').assistantCardControlContexts,localCalendarDate:()=> '2026-10-10',
+  actionPendingRef:ref(false),activity:()=>({busy:false}),busy:false,outboxRef:ref(null),sendLockRef:ref(false),saveLockRef:ref(false),draft:{hasDraft:false,status:'ready',persist:()=>true},configured:true,conversationId:uuid(4),conversationEpochRef:ref(0),currentConversation:()=>true,
+  knownTasksRef:ref([paused]),assistantTaskAnswerable:client.assistantTaskAnswerable,restoreAssistantAgent:client.restoreAssistantAgent,assistantCardControlContexts:load('lib/assistant-control.ts').assistantCardControlContexts,localCalendarDate:()=> '2026-10-10',
   setSending(){},setOutbox(){},setOutboxPersistable(){},setMessages(){},setInput(){},setImages(){},confirmationsRef:ref([]),undosRef:ref([]),toast:{error(message){throw new Error(message);},info(){}},
   stopTask(){throw new Error('An answer cannot stop its task');},submitTask:async request=>submitted.push(plain(request))
  });

@@ -18,7 +18,7 @@ const response = (value, status = 200) => Response.json(value, { status });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 function nodes(tree) {
   if (!tree || typeof tree !== 'object') return [];
-  if (typeof tree?.type === 'function' && ['AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return [tree, ...nodes(tree.type(tree.props))];
+  if (typeof tree?.type === 'function' && ['AssistantConversationFeed', 'AssistantConversationMessage', 'AssistantComposer', 'AssistantDraftEditor', 'AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return [tree, ...nodes(tree.type(tree.props))];
   return Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
 }
 function text(tree) {
@@ -27,7 +27,7 @@ function text(tree) {
   if (tree?.props?.['aria-hidden'] === 'true' || tree?.props?.['aria-hidden'] === true) return '';
   // The page's pure member label is a real child component rather than an icon
   // fixture; render it so assertions still exercise the displayed member name.
-  if (typeof tree?.type === 'function' && ['AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberLabel', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantProcessingDetails', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return text(tree.type(tree.props));
+  if (typeof tree?.type === 'function' && ['AssistantConversationFeed', 'AssistantConversationMessage', 'AssistantComposer', 'AssistantDraftEditor', 'AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberLabel', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantProcessingDetails', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return text(tree.type(tree.props));
   return typeof tree === 'object' ? text(tree.props?.children) : String(tree);
 }
 
@@ -59,6 +59,17 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
       const index = cursor++;
       if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial;
       return [slots[index], next => { slots[index] = typeof next === 'function' ? next(slots[index]) : next; }];
+    },
+    useReducer(reducer, initial) {
+      const index = cursor++;
+      if (!(index in slots)) slots[index] = initial;
+      return [slots[index], action => { slots[index] = reducer(slots[index], action); }];
+    },
+    useCallback(fn, deps) { return react.useMemo(() => fn, deps); },
+    useMemo(factory, deps) {
+      const index = cursor++, previous = slots[index];
+      if (!previous || deps.some((value, i) => !Object.is(value, previous.deps[i]))) slots[index] = { deps, value: factory() };
+      return slots[index].value;
     },
     useSyncExternalStore(_subscribe, getSnapshot) { return getSnapshot(); },
     useEffectEvent(fn) { const ref = react.useRef(fn); ref.current = fn; return (...args) => ref.current(...args); },
@@ -172,8 +183,10 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
     }).outputText;
     vm.runInNewContext(source, { ...globals, exports, require(name) {
       if (name === 'zod') return require('zod');
+      if (name.startsWith('./')) return load(path.join(path.dirname(filename), `${name}.ts${['composer', 'conversation-message', 'conversation-feed', 'draft-editor'].includes(name.slice(2)) ? 'x' : ''}`));
       if (name in modules) return modules[name];
       if (name.startsWith('@/components/') || name === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
+      if (name.startsWith('@/hooks/assistant/')) return modules[name] = load(`${name.slice(2)}.ts`);
       if (name.startsWith('@/lib/')) return modules[name] = load(`${name.slice(2)}.ts`);
       throw Error(`Unexpected import: ${name}`);
     } });
@@ -191,6 +204,8 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
   modules['@/components/assistant/member-picker'] = load('components/assistant/member-picker.tsx');
   modules['@/components/assistant/draft-card'] = load('components/assistant/draft-card.tsx');
   modules['@/components/assistant/action-card'] = load('components/assistant/action-card.tsx');
+  modules['@/components/assistant/page-styles'] = load('components/assistant/page-styles.ts');
+  for (const filename of ['composer', 'conversation-message', 'conversation-feed', 'draft-editor']) modules[`@/components/assistant/${filename}`] = load(`components/assistant/${filename}.tsx`);
   const Page = load('app/dashboard/assistant/page.tsx').default;
   const h = {
     calls, notices, revoked, taskStore, storage, feed, scrolls,
@@ -219,6 +234,7 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
     paste(files) { let prevented = false; h.control('记一笔，或问问账本').props.onPaste({ clipboardData: { items: files.map(file => ({ kind: 'file', type: file.type, getAsFile: () => file })), files }, preventDefault() { prevented = true; } }); h.render(); return prevented; },
     logout() { epoch++; logout?.(); h.render(); },
     unmount() { slots.forEach(slot => slot?.cleanup?.()); },
+    get snapshot() { return config.value; },
     get value() { return normalized(config.value); },
     get text() { return text(tree); },
   };
@@ -1879,4 +1895,62 @@ test('53 pending rows survive page persistence and confirmation retry without dr
     const calls=refreshed.calls.filter(c=>c.url==='/api/assistant/confirm');assert.equal(calls.length,2);assert.deepEqual(calls[1].body,first);
     assert.equal(refreshed.value.messages[0].status,'saved');assert.equal(refreshed.value.messages[0].drafts.length,53);
   } finally {refreshed.unmount();}
+});
+
+
+test('transient dialogs and recording ticks preserve the persisted conversation snapshot', async () => {
+  const h = await ready();
+  try {
+    h.restore({ messages: [], input: '核对截图', images: [image('截图')] });
+    await settleDraft(h);
+    const snapshot = h.snapshot;
+    clickTextButton(h, '更多工具'); await settleDraft(h);
+    assert.equal(h.snapshot, snapshot);
+    const tools = h.all(node => node.type === 'Dialog').find(node => node.props.open);
+    tools.props.onOpenChange(false); h.render();
+    h.find(node => node.type === 'SortableAssistantImages').props.onPreview(snapshot.images[0]);
+    await settleDraft(h);
+    assert.equal(h.snapshot, snapshot, 'image preview cannot trigger a new conversation snapshot');
+  } finally { h.unmount(); }
+
+  let callbacks;
+  const done = deferred();
+  const voice = await ready({ speechStart: options => {
+    callbacks = options; options.onPhase('recording');
+    return { done: done.promise, stop() { done.resolve(''); }, cancel() { done.resolve(''); } };
+  } });
+  try {
+    voice.click('语音输入'); await settleDraft(voice);
+    const snapshot = voice.snapshot;
+    callbacks.onSeconds(1); await settleDraft(voice);
+    callbacks.onSeconds(2); await settleDraft(voice);
+    assert.equal(voice.snapshot, snapshot, 'elapsed recording time is not persisted conversation content');
+    assert.ok(voice.text.includes('2 / 60'));
+  } finally { voice.unmount(); }
+});
+
+test('stale double confirmation clicks and chat clears keep one financial request and its recovery identity', async () => {
+  const done = deferred();
+  const storage = memoryStorage();
+  const h = await ready({ realDraft: true, storage, post: async url => {
+    assert.equal(url, '/api/assistant/confirm');
+    return done.promise;
+  } });
+  try {
+    h.restore({ messages: [draftGroup(2200, [{ ...row(2201, 1200, member.id), amount: '12.00' }])], input: '' });
+    await settleDraft(h);
+    const confirm = h.find(node => node.type === 'Button' && text(node) === '确认 1 笔');
+    confirm.props.onClick(); confirm.props.onClick(); await settleDraft(h);
+    const requests = h.calls.filter(call => call.url === '/api/assistant/confirm');
+    assert.equal(requests.length, 1, 'the synchronous lock rejects the second click before React renders');
+    const submitted = requests[0].body;
+    h.click('清空对话'); await settleDraft(h);
+    h.click('清空对话'); await settleDraft(h);
+    assert.deepEqual(savedConversation(storage).confirmations, [{ id: submitted.batch_id, drafts: submitted.drafts }]);
+    assert.equal(h.value.messages.length, 0);
+    done.resolve(response({ count: 1 })); await settleDraft(h);
+    assert.deepEqual(h.value.confirmations, []);
+    assert.equal(h.value.messages.length, 0, 'a late acknowledgement cannot restore the cleared conversation');
+    assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 1);
+  } finally { h.unmount(); }
 });

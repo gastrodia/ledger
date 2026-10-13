@@ -761,3 +761,9 @@ export function subscribeAssistantTasks(options: {
   void refresh();
   return { refresh: () => { void refresh(); }, stop: () => { stopped = true; clearTimeout(timer); controller?.abort(); } };
 }
+
+export async function assistantResponseJson(response: Response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : "服务暂时不可用，请重试。");
+  return data;
+}

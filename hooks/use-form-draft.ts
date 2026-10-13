@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { FormDraftSession, draftProtection, getDraftEpoch, serializeDraftValue, subscribeDraftLogout, type DraftReplacement, type DraftReplacementDirty, type DraftSnapshot } from "@/lib/form-drafts";
 
 const checking: DraftSnapshot = { hasDraft: false, status: "checking", error: null };
@@ -87,7 +87,7 @@ export function useFormDraft<T>({ scope, value, onRestore, dirty, enabled = true
   }, [scope, enabled, autoRestore]);
 
   useEffect(() => { session?.save(value, dirty); }, [session, value, dirty]);
-  const protection = draftProtection(snapshot, value, dirty);
+  const protection = useMemo(() => draftProtection(snapshot, value, dirty), [snapshot, value, dirty]);
   useEffect(() => {
     if (!enabled || !protection.needsProtection) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
