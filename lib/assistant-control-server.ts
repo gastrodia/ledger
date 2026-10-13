@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import { sql } from "@/lib/db";
 import { assistantControlTaskStatus, assistantControlContextSchema, validateAssistantControl, type AssistantControl, type AssistantControlContext } from "@/lib/assistant-control";
-import { ensureAssistantActionsSchema, getAssistantAction, decideAssistantAction } from "@/lib/assistant-command-server";
+import { ensureAssistantActionsSchema, getAssistantAction, decideAssistantAction, type AssistantActionPayload } from "@/lib/assistant-command-server";
 import type { AssistantPlan } from "@/lib/assistant";
 
 function actionContext(row: Record<string, unknown>): AssistantControlContext {
-  const payload = row.payload as { command?: { operation: string }; event?: { operation: string } };
+  const payload = row.payload as AssistantActionPayload;
   return assistantControlContextSchema.parse({ target_type: "action", target_id: row.id,
-    operation: payload.command?.operation || payload.event?.operation,
+    operation: "event" in payload ? payload.input.operation : payload.command.operation,
     revision: createHash("sha256").update(JSON.stringify(row.payload)).digest("hex"),
     summary: String(row.summary).slice(0, 4000), status: row.status });
 }

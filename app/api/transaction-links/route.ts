@@ -47,9 +47,10 @@ export async function GET(request: NextRequest) {
       WHERE l.user_id = $1 AND l.source_type = $2 AND l.source_id = ANY($3::varchar[])
         AND EXISTS (SELECT 1 FROM ${source.table} s
           WHERE s.user_id = l.user_id AND ${source.id} = l.source_id ${source.extra})
+      ORDER BY t.transaction_date DESC,t.id
     `, [session.userId, type, ids]);
     return NextResponse.json({ data: batch === null
-      ? (rows[0] ? formatLinkedTransaction(rows[0]) : null)
+      ? rows.map(formatLinkedTransaction)
       : rows.map(row => ({ sourceId: row.source_id, transaction: formatLinkedTransaction(row) })) });
   } catch (error) { return failure(error); }
 }
@@ -66,7 +67,7 @@ async function mutate(request: NextRequest, unlink: boolean) {
       return NextResponse.json({ error: '请求内容无效' }, { status: 400 });
     }
     const { sourceType: type, sourceId: id, transactionId } = body as Record<string, unknown>;
-    if (!isTransactionLinkSourceType(type) || !isTransactionLinkId(id) || (!unlink && !isTransactionLinkId(transactionId))) {
+    if (!isTransactionLinkSourceType(type) || !isTransactionLinkId(id) || (!unlink && !isTransactionLinkId(transactionId)) || (unlink && transactionId !== undefined && !isTransactionLinkId(transactionId))) {
       return NextResponse.json({ error: '关联来源或收支 ID 无效' }, { status: 400 });
     }
     await ensureTransactionLinksSchema();
@@ -76,7 +77,7 @@ async function mutate(request: NextRequest, unlink: boolean) {
     if (unlink) {
       const [owned] = await sql.transaction([
         lockSource,
-        sql.query(`DELETE FROM transaction_links WHERE user_id = $1 AND source_id = $2 AND source_type = $3 AND ${sourceExists}`, [session.userId, id, type]),
+        sql.query(`DELETE FROM transaction_links WHERE user_id = $1 AND source_id = $2 AND source_type = $3 AND ${sourceExists} AND ($4::varchar IS NULL OR transaction_id=$4)`, [session.userId, id, type, transactionId || null]),
       ], { isolationLevel: 'Serializable' });
       if (!owned.length) return NextResponse.json({ error: '来源记录不存在' }, { status: 404 });
       return NextResponse.json({ message: '已解除关联，原收支记录保留', data: null });
@@ -95,9 +96,10 @@ async function mutate(request: NextRequest, unlink: boolean) {
           CASE WHEN $3 = 'loan' THEN $2 END,
           CASE WHEN $3 = 'repayment' THEN $2 END
         WHERE ${sourceExists}
-          AND EXISTS (SELECT 1 FROM transactions t WHERE t.user_id = $1 AND t.id = $4)
-        ON CONFLICT (user_id, source_type, source_id) DO UPDATE
-          SET transaction_id = EXCLUDED.transaction_id, updated_at = NOW()
+          AND EXISTS (SELECT 1 FROM transactions t WHERE t.user_id = $1 AND t.id = $4 AND ($3 <> 'given_gift' OR t.type='expense'))
+        ${type === 'given_gift'
+          ? 'ON CONFLICT (user_id, source_type, source_id, transaction_id) DO UPDATE SET updated_at=NOW()'
+          : "ON CONFLICT (user_id, source_type, source_id) WHERE source_type <> 'given_gift' DO UPDATE SET transaction_id=EXCLUDED.transaction_id,updated_at=NOW()"}
         RETURNING transaction_id
       `, [session.userId, id, type, transactionId]),
     ], { isolationLevel: 'Serializable' });

@@ -264,6 +264,10 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
     }
     if (plan.action === "event" && plan.event) {
       if (verificationRequired) throw new Error("上一操作已执行，请先读取实际记录核对，再继续剩余目标。");
+      const paymentIds = plan.event.payments?.flatMap(payment => payment.transaction_id ? [payment.transaction_id] : []) || [];
+      if (paymentIds.some(id => !knownIds.has(id) && !o.adapters.trustedIds?.().includes(id))) throw new Error("关联付款ID必须来自真实查询、事件上下文或执行回执，不能猜测或新造原流水ID。");
+      if (c.version === 2 && plan.event.operation === "create" && plan.event.kind === "gift_given" && plan.event.payments === null)
+        throw new Error("送礼请使用payments逐笔表达真实付款，实付不明确填null并澄清，估值不作为付款；仅登记台账时payments=[]。");
       const previewFingerprint = fingerprint({ tool: "event", ...(c.current_operation_id ? { operation: c.current_operation_id } : {}), event: plan.event });
       if (c.preview_fingerprints.includes(previewFingerprint)) { if (!c.operations) return safePlan("该事项方案已经处理，本次不会重复生成。请核对之前的结果。"); throw new Error("该事项方案已经处理，不能重放；请继续未完成事项。"); }
       const result = await o.adapters.event(plan.event, signal, previewFingerprint); o.signal.throwIfAborted();

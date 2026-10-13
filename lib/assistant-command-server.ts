@@ -19,8 +19,9 @@ const resources: Record<LedgerResource, { table: string; text: string[]; date?: 
   notes: { table: "notes", text: ["title", "content"], date: "created_at" },
 };
 type CommandItem = { id: string; before: LedgerRow | null; values: Record<string, unknown> };
-type Prepared = { preview?: AssistantActionPreview; command: LedgerCommand; items: CommandItem[]; dependencies: Array<{ resource: LedgerResource; row: LedgerRow }>; summary: string; links?: Array<{ source_type: string; source_id: string; transaction_id: string | null; group_rows?: LedgerRow[] }> };
-type ActionRow = { id: string; user_id: string; conversation_id: string; status: AssistantActionResult["status"]; payload: Prepared | PreparedLedgerEvent; summary: string; expires_at: string; result: AssistantActionResult | null };
+type Prepared = { preview?: AssistantActionPreview; command: LedgerCommand; items: CommandItem[]; dependencies: Array<{ resource: LedgerResource; row: LedgerRow }>; summary: string; links?: Array<{ source_type: string; source_id: string; transaction_id: string | null; transaction_ids?: string[]; group_rows?: LedgerRow[] }> };
+export type AssistantActionPayload = Prepared | PreparedLedgerEvent;
+type ActionRow = { id: string; user_id: string; conversation_id: string; status: AssistantActionResult["status"]; payload: AssistantActionPayload; summary: string; expires_at: string; result: AssistantActionResult | null };
 type AgentPreviewKey = { userId: string; conversationId: string; goalId: string; fingerprint: string; signal: AbortSignal };
 const agentPreviewKeys = new AsyncLocalStorage<AgentPreviewKey>();
 function agentPreviewId(key: AgentPreviewKey) {
@@ -59,6 +60,7 @@ export async function readAssistantAgentTargets(userId: string, targets: NonNull
     const actions = await sql.query("SELECT * FROM assistant_actions WHERE user_id=$1 AND id=$2", [userId, actionId]);
     if (actions[0]?.status === "succeeded") prepared = (actions[0] as ActionRow).payload;
   }
+  const eventPayments = prepared && "event" in prepared ? (await import("@/lib/ledger-event-server")).preparedEventPayments(prepared) : [];
   const equal = (key: string, actual: unknown, expected: unknown): boolean => {
     if (key === "pinned" || key === "archived") return Boolean(actual) === expected;
     if (/(?:^amount$|_amount$|estimated_value$|quantity$|sort_order$)/.test(key)) return expected == null ? actual == null : Number(actual) === Number(expected);
@@ -76,13 +78,15 @@ export async function readAssistantAgentTargets(userId: string, targets: NonNull
       if (["create", "update"].includes(prepared.command.operation)) return (prepared.command.operation === "create" ? prepared.items[0] : prepared.items.find(item => item.id === rowId))?.values;
     }
     if (!("event" in prepared)) return undefined;
-    if (prepared.input.operation === "undo") return resource === "transactions" && rowId === prepared.transactionId && !prepared.ownsTransaction ? { flow_kind: prepared.previousFlowKind || "daily" } : undefined;
-    const input = prepared.input, amount = Number(input.amount_cents) / 100;
-    if (rowId === prepared.transactionId && resource === "transactions") {
-      const flow_kind = ["loan_lent", "loan_borrowed", "repayment_received", "repayment_paid"].includes(input.kind || "") ? "loan" : "daily";
-      if (!prepared.ownsTransaction) return { flow_kind };
-      return { amount: Number(input.transaction_amount_cents ?? input.amount_cents) / 100, transaction_date: input.date, category_id: input.category_id, member_id: input.member_id, flow_kind };
+    const payment = [...eventPayments, ...(prepared.removedPayments || [])].find(item => item.transactionId === rowId);
+    const removed = prepared.input.operation === "undo" || prepared.removedPayments?.some(item => item.transactionId === rowId);
+    if (resource === "transactions" && payment) {
+      if (removed) return payment.ownsTransaction ? undefined : { flow_kind: payment.previousFlowKind || "daily" };
+      const flow_kind = ["loan_lent", "loan_borrowed", "repayment_received", "repayment_paid"].includes(prepared.input.kind || "") ? "loan" : "daily";
+      return { amount: payment.input.amount_cents! / 100, transaction_date: payment.input.date, category_id: payment.input.category_id, member_id: payment.input.member_id, flow_kind };
     }
+    if (prepared.input.operation === "undo") return undefined;
+    const input = prepared.input, amount = Number(input.amount_cents) / 100;
     if (rowId !== prepared.sourceId) return undefined;
     if (resource === "gifts_given") return { recipient_name: input.counterparty, cash_amount: amount, items: input.items || [], occasion: input.occasion, gift_date: input.date, notes: input.note };
     if (resource === "gift_records") return { giftbook_id: input.book_id, counterparty_name: input.counterparty, amount, gift_date: input.date, notes: input.note };
@@ -107,13 +111,13 @@ export async function readAssistantAgentTargets(userId: string, targets: NonNull
       const sourceType = ({ loans: "loan", repayments: "repayment", gifts_given: "given_gift", gift_records: "gift_group" } as Record<string, string>)[target.resource];
       for (const item of prepared.items) {
         const links = await sql.query("SELECT transaction_id FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3", [userId, sourceType, item.before?.group_id || item.id]);
-        verified &&= target.operation === "unlink" ? links.length === 0 : links.length === 1 && links[0].transaction_id === item.values.transaction_id;
+        verified &&= target.operation === "unlink" ? links.length === 0 : links.some(link => link.transaction_id === item.values.transaction_id);
       }
     }
     if (prepared && "event" in prepared && target.ids.includes(prepared.sourceId)) {
       const sourceType = ({ loans: "loan", repayments: "repayment", gifts_given: "given_gift", gift_records: "gift_group" } as Record<string, string>)[target.resource];
       const links = await sql.query("SELECT transaction_id FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3", [userId, sourceType, prepared.sourceId]);
-      verified &&= prepared.input.operation === "undo" || !prepared.transactionId ? links.length === 0 : links.length === 1 && links[0].transaction_id === prepared.transactionId;
+      verified &&= prepared.input.operation === "undo" ? links.length === 0 : links.length === eventPayments.length && eventPayments.every(payment => links.some(link => link.transaction_id === payment.transactionId));
     }
     // Keep actual field evidence small; attachment keys and account columns never enter the model.
     const keys = ["id", "name", "title", "type", "direction", "amount", "cash_amount", "repaid_amount", "transaction_date", "gift_date", "occurred_at", "repaid_at", "description", "category_id", "member_id", "counterparty_name", "recipient_name", "flow_kind", "loan_id", "giftbook_id"];
@@ -324,7 +328,7 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
     const sourceType = ({ loans: "loan", repayments: "repayment", gift_records: "gift_group", gifts_given: "given_gift" } as Record<string, string>)[command.resource];
     const ids = rows.map(row => String(row.group_id || row.id));
     const events = command.resource === "transactions"
-      ? await sql.query("SELECT id,input FROM ledger_events WHERE user_id=$1 AND state='saved' AND transaction_id=ANY($2::varchar[])", [userId, ids])
+      ? await sql.query("SELECT id,input FROM ledger_events WHERE user_id=$1 AND state='saved' AND (transaction_id=ANY($2::varchar[]) OR EXISTS(SELECT 1 FROM transaction_links l WHERE l.user_id=ledger_events.user_id AND l.source_type=ledger_events.source_type AND l.source_id=ledger_events.source_id AND l.transaction_id=ANY($2::varchar[])))", [userId, ids])
       : sourceType ? await sql.query("SELECT id,input FROM ledger_events WHERE user_id=$1 AND state='saved' AND source_type=$2 AND source_id=ANY($3::varchar[])", [userId, sourceType, ids]) : [];
     if (command.resource === "giftbooks" && command.operation === "delete") {
       const linked = await sql.query("SELECT e.id FROM ledger_events e JOIN gift_records r ON r.id=e.source_id AND r.user_id=e.user_id WHERE e.user_id=$1 AND e.state='saved' AND e.source_type='gift_group' AND r.giftbook_id=ANY($2::varchar[]) LIMIT 1", [userId, ids]);
@@ -335,6 +339,19 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
       const values = commandValues(command);
       const keys: Record<string, string> = { amount: "amount_cents", cash_amount: "amount_cents", repaid_amount: "amount_cents", transaction_date: "date", gift_date: "date", occurred_at: "date", repaid_at: "date", notes: "note", category_id: "category_id", member_id: "member_id", counterparty_name: "counterparty", recipient_name: "counterparty" };
       if (Object.keys(values).some(key => !keys[key])) throw new Error("这项修改涉及联动事项，请说明整件事的新金额、日期、对方、备注或成员，以便同步修改台账与流水。");
+      if (command.resource === "transactions" && (events[0].input as LedgerEventContext["input"]).payments != null && command.operation === "update") {
+        const { prepareLedgerEvent } = await import("@/lib/ledger-event-server");
+        const payments = (events[0].input as LedgerEventContext["input"]).payments!;
+        const paymentKeys: Record<string, string> = { amount: "amount_cents", transaction_date: "date", category_id: "category_id", member_id: "member_id" };
+        const patch = Object.fromEntries(Object.entries(values).map(([key, value]) => [paymentKeys[key], key === "amount" ? Math.round(Number(value) * 100) : value]));
+        if (Object.keys(values).some(key => !paymentKeys[key])) throw new Error("请按原付款ID明确这笔支出的修改内容。");
+        const next = payments.map(payment => {
+          if (payment.transaction_id !== rows[0].id) return payment;
+          if (values.amount !== undefined && payment.components.length !== 1) throw new Error("这笔付款包含多个用途，请明确各分项的新实付金额，以便核对合计。");
+          return { ...payment, ...patch, ...(values.amount !== undefined ? { components: [{ ...payment.components[0], amount_cents: Math.round(Number(values.amount) * 100) }] } : {}) };
+        });
+        return prepareLedgerEvent(userId, conversationId, { event_id: events[0].id, operation: "update", payments: next });
+      }
       const patch = Object.fromEntries(Object.entries(values).map(([key, value]) => [keys[key], keys[key] === "amount_cents" ? Math.round(Number(value) * 100) : value]));
       const { prepareLedgerEvent } = await import("@/lib/ledger-event-server");
       return prepareLedgerEvent(userId, conversationId, { ...patch, event_id: events[0].id, operation: command.operation === "delete" ? "undo" : "update" });
@@ -359,7 +376,7 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
     const source_type = { loans: "loan", repayments: "repayment", gifts_given: "given_gift", gift_records: "gift_group" }[command.resource as "loans"];
     const source_id = String(rows[0].group_id || rows[0].id);
     const existing = await sql.query("SELECT transaction_id FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3", [userId, source_type, source_id]);
-    links = [{ source_type, source_id, transaction_id: existing[0]?.transaction_id as string || null }];
+    links = [{ source_type, source_id, transaction_id: existing[0]?.transaction_id as string || null, transaction_ids: existing.map(link => String(link.transaction_id)).sort() }];
     if (command.resource === "gift_records") {
       const group = await sql.query("SELECT * FROM gift_records WHERE user_id=$1 AND COALESCE(group_id,id)=$2 ORDER BY id LIMIT 101", [userId, source_id]) as LedgerRow[];
       if (group.length > 100) throw new Error("该收礼组明细过多，请先核对并缩小范围。");
@@ -524,7 +541,7 @@ export async function decideAssistantAction(userId: string, id: string, decision
         const group = await sql.query("SELECT * FROM gift_records WHERE user_id=$1 AND COALESCE(group_id,id)=$2 ORDER BY id LIMIT 101", [userId, link.source_id]);
         if (commandFingerprint(group) !== commandFingerprint(link.group_rows)) throw new Error("收礼组明细已变化，请重新核对整组关联范围。");
       }
-      if ((current[0]?.transaction_id || null) !== link.transaction_id) throw new Error("原收支关联已变化，请重新确认。");
+      if (link.transaction_ids ? JSON.stringify(current.map(row => String(row.transaction_id)).sort()) !== JSON.stringify(link.transaction_ids) : (current[0]?.transaction_id || null) !== link.transaction_id) throw new Error("原收支关联已变化，请重新确认。");
     }
     for (const item of payload.command.operation === "reorder" ? payload.items.slice(0, 1) : payload.items) {
       if (item.before && commandFingerprint(await byId(userId, payload.command.resource, item.id)) !== commandFingerprint(item.before)) throw new Error("该条记录已变化，已停止后续操作。");

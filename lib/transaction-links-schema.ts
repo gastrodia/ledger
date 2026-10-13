@@ -6,7 +6,15 @@ import { ensureLoansSchema } from "@/lib/loans-schema";
 /** Existing installations can apply scripts/transaction-links.sql with an admin role. */
 export async function ensureTransactionLinksSchema() {
   const present = await sql`SELECT to_regclass('public.transaction_links') IS NOT NULL AS present`;
-  if (present[0]?.present === true) return;
+  if (present[0]?.present === true) {
+    const legacy = await sql.query("SELECT 1 FROM pg_constraint WHERE conrelid='transaction_links'::regclass AND contype='p' AND array_length(conkey,1)=3");
+    if (legacy.length) await sql.transaction([
+      sql`SELECT pg_advisory_xact_lock(1818584946, 2)`,
+      sql`ALTER TABLE transaction_links DROP CONSTRAINT transaction_links_pkey, ADD PRIMARY KEY (user_id,source_type,source_id,transaction_id)`,
+      sql`CREATE UNIQUE INDEX IF NOT EXISTS transaction_links_single_source ON transaction_links(user_id,source_type,source_id) WHERE source_type <> 'given_gift'`,
+    ]);
+    return;
+  }
   await ensureGiftBooksSchema();
   await ensureGiftsGivenSchema();
   await ensureLoansSchema();
@@ -22,7 +30,7 @@ export async function ensureTransactionLinksSchema() {
   repayment_id VARCHAR(36) REFERENCES loan_repayments(id) ON DELETE CASCADE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (user_id, source_type, source_id),
+  PRIMARY KEY (user_id, source_type, source_id, transaction_id),
   CHECK (
     (source_type = 'given_gift' AND given_gift_id IS NOT NULL AND given_gift_id = source_id AND loan_id IS NULL AND repayment_id IS NULL) OR
     (source_type = 'loan' AND loan_id IS NOT NULL AND loan_id = source_id AND given_gift_id IS NULL AND repayment_id IS NULL) OR
@@ -30,6 +38,7 @@ export async function ensureTransactionLinksSchema() {
     (source_type = 'gift_group' AND given_gift_id IS NULL AND loan_id IS NULL AND repayment_id IS NULL)
   )
 )`,
+    sql`CREATE UNIQUE INDEX IF NOT EXISTS transaction_links_single_source ON transaction_links(user_id,source_type,source_id) WHERE source_type <> 'given_gift'`,
     sql`CREATE OR REPLACE FUNCTION cleanup_gift_group_transaction_link() RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN

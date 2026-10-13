@@ -261,13 +261,13 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 手动关联收支
 ---
 
-- 送礼、收礼组、借还单、归还记录均可手动关联一笔已有收支，支持更换和解除。每笔收支最多关联一个来源，重复提交同一关联可安全重试。
+- 送礼可关联多笔已有支出；收礼组、借还单、归还记录仍关联一笔已有收支。送礼支持逐笔添加和解除，其他台账支持更换和解除。每笔收支最多关联一个来源，重复提交同一关联可安全重试。
 - 关联只保存对应关系，不创建交易、不同步金额，也不改变任何台账或统计口径。删除来源只清除关系；删除收支只清除关系，其他台账的记录仍保留。
 - 收礼按整个 `group_id`（历史记录按 `COALESCE(group_id,id)`）关联，不依附礼金行。编辑时删除礼金、替换礼品行不会丢失组关联；整组或礼簿删除才解除。
-- `GET /api/transaction-links?sourceType=given_gift&sourceId=...` 返回 `{data: transaction|null}`；批量用 `sourceIds=id1,id2`（最多 100 个），返回 `{data:[{sourceId,transaction}]}`，只含当前账户仍存在的已关联来源。
+- `GET /api/transaction-links?sourceType=given_gift&sourceId=...` 返回 `{data: transaction[]}`；批量用 `sourceIds=id1,id2`（最多 100 个），返回 `{data:[{sourceId,transaction}]}`，只含当前账户仍存在的已关联来源。
 - `PUT /api/transaction-links` 接收 `{sourceType,sourceId,transactionId}`；`DELETE` 接收 `{sourceType,sourceId}`。`sourceType` 支持 `given_gift`、`gift_group`、`loan`、`repayment`。
 - 返回的 `transaction` 含 `id`、`type`、数值 `amount`、`description`、`transaction_date`。已被其他来源占用返回 409 / `TRANSACTION_ALREADY_LINKED`；并发变更返回 409 / `LINK_CONFLICT`，应刷新后重试。
-- 新数据库执行 `scripts/init-db.sql`。已有数据库可由管理员在各模块基础表已存在后执行 `scripts/transaction-links.sql`，其中包含关联表、外键和延迟组清理触发器；请完整执行。应用首次使用会尝试初始化，缺少权限明确返回 503 / `LINK_SCHEMA_UNAVAILABLE`，不会以成功或未关联状态掩盖配置失败。已初始化后的读写不再需要 DDL 权限。
+- 新数据库执行 `scripts/init-db.sql`。已有数据库可由管理员在各模块基础表已存在后执行 `scripts/transaction-links.sql`，升级多笔送礼付款执行 `scripts/ledger-event-payments.sql`，其中包含关联表、外键和延迟组清理触发器；请完整执行。应用首次使用会尝试初始化，缺少权限明确返回 503 / `LINK_SCHEMA_UNAVAILABLE`，不会以成功或未关联状态掩盖配置失败。完成当前版本升级后的读写不再需要 DDL 权限。
 
 便利贴升级
 ---
@@ -340,3 +340,12 @@ psql "$DATABASE_URL_UNPOOLED" -f scripts/init-db.sql
 - 对联动事项说“金额改成300”“撤销刚才整件事”会再次预览整体影响。撤销自建流水会一并移除；关联原流水的撤销保留原流水。已有还款的原借款须先撤销还款。
 - 联动借还流水标记为 `flow_kind=loan`，从日常收入/消费、分类与成员排行、趋势和 AI 分析中排除；统计页另列资金流入流出。原有普通流水不会仅凭转账描述重新分类；明确关联借还事项时预览并调整口径。
 - 升级脚本：`scripts/ledger-events.sql`；运行账号有 DDL 权限时按需初始化。详细能力与边界见 [联动事项设计与验证](docs/assistant-ledger-events.md)。
+
+### AI 送礼的付款与事项引用
+
+- 送礼台账保存礼金及实物估值；`payments` 保存每笔真实付款；`components` 区分礼金、购买及其他实际费用，程序按整数分求和并校验礼金完整覆盖。购买金额不明确时澄清，不以估值补实付。
+- 多笔付款保留各自日期、成员、分类、描述和流水 ID。一件送礼统一预览和确认；已有付款关联原 ID，不另记合计支出。
+- 语义引用由 Agent 解析，工作流通过 `depends_on` 等待原付款完成，再使用执行回执或查询取得的 ID 关联；不使用中文短语规则或金额相似度选择对象。
+- 修改与撤销逐笔校验原关联、版本和归属；只删除本事项新建的支出，已有支出解除关联并恢复原统计口径。回执与全部写入在同一事务中保存，重试复用原审批。
+- 旧单笔事件及已确认方案保持原 ID 和金额。升级只增加付款集合能力，不重新拆分或计算历史账目。
+- 隔离真实模型验证：`LEDGER_TASKS_PGLITE_MODULE=... node scripts/evaluate-assistant-gift-payments.mjs --live`。所有账本操作绑定临时 PGlite，不访问生产数据库。

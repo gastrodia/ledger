@@ -1175,7 +1175,7 @@ if(PGlite) {
 
 if(PGlite) {
  test('real PostgreSQL: offered event choices persist once and bypass model reinterpretation without authorizing writes',async t=>{
-  const event={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:false};
+  const event={operation:'create',kind:'gift_given',counterparty:'小美',amount_cents:50000,date:'2026-10-10',allow_duplicate:false,payments:[{components:[{purpose:'gift_cash',amount_cents:50000,basis:'小美生日送礼500元'}],transaction_id:null,amount_cents:50000,date:'2026-10-10',category_id:null,member_id:null,description:'礼金',cashflow:'auto',basis:'小美生日送礼500元'}]};
   let models=0;const events=[];
   const f=await databaseFixture(t,{provider:{bailianObject:async()=>{models++;return models===1?{kind:'plan',tool:null,operation_id:null,arguments_json:JSON.stringify({operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],sources:['小美生日送礼500元']}]}),plan_json:null}:{kind:'preview',tool:'event',operation_id:'gift',arguments_json:JSON.stringify(event),plan_json:null};}},extraDependencies:{
    '@/lib/assistant-control-server':{loadAssistantControlContexts:async()=>[]},
@@ -1289,3 +1289,14 @@ if (PGlite) {
   assert.equal((await f.db.query('SELECT count(*)::int count FROM transactions')).rows[0].count,0);
  });
 }
+
+if(PGlite) test('real PostgreSQL: control-context failure is a context error and retries before any model call',async t=>{
+ let unavailable=true;
+ const f=await databaseFixture(t,{extraDependencies:{'@/lib/assistant-control-server':{loadAssistantControlContexts:async()=>{if(unavailable)throw new Error('invalid stored control payload');return [];}}}});
+ await f.tasks.createAssistantTask('owner',body());await f.tasks.runAssistantTask('owner',taskId);
+ const failed=await f.tasks.getAssistantTask('owner',taskId);
+ assert.equal(failed.error,'读取记账上下文失败，请重新处理。');assert.equal(f.paidCalls.length,0);
+ assert.equal(failed.execution_steps.find(step=>step.id==='context').state,'failed');
+ unavailable=false;await f.tasks.changeAssistantTask('owner',taskId,'retry',1);await f.tasks.runAssistantTask('owner',taskId);
+ const recovered=await f.tasks.getAssistantTask('owner',taskId);assert.equal(recovered.id,taskId);assert.equal(recovered.status,'succeeded');
+});

@@ -14,11 +14,11 @@ type SourceType = "given_gift" | "gift_group" | "loan" | "repayment";
 type LinkedTransaction = { id: string; type: "income" | "expense"; amount: number; description: string | null; transaction_date: string };
 const LinksContext = createContext<{
   sourceType: SourceType;
-  data: Record<string, LinkedTransaction>;
+  data: Record<string, LinkedTransaction[]>;
   loading: boolean;
   loadedIds: string[];
   error: string | null;
-  update: (sourceId: string, transaction: LinkedTransaction | null) => void;
+  update: (sourceId: string, transaction: LinkedTransaction[]) => void;
 } | null>(null);
 
 export function TransactionLinksProvider({ sourceType, sourceIds, scopeKey = "", children }: {
@@ -27,20 +27,20 @@ export function TransactionLinksProvider({ sourceType, sourceIds, scopeKey = "",
   const idsKey = JSON.stringify([...new Set(sourceIds)].sort());
   const loader = useCallback(async (signal: AbortSignal) => {
     const ids: string[] = JSON.parse(idsKey);
-    const data: Record<string, LinkedTransaction> = {};
+    const data: Record<string, LinkedTransaction[]> = {};
     for (let offset = 0; offset < ids.length; offset += 100) {
       const params = new URLSearchParams({ sourceType, sourceIds: ids.slice(offset, offset + 100).join(",") });
       const response = await fetch(`/api/transaction-links?${params}`, { cache: "no-store", signal });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "关联状态加载失败");
-      for (const link of result.data as { sourceId: string; transaction: LinkedTransaction }[]) data[link.sourceId] = link.transaction;
+      for (const link of result.data as { sourceId: string; transaction: LinkedTransaction }[]) (data[link.sourceId] ||= []).push(link.transaction);
     }
     return { data, ids };
   }, [sourceType, idsKey]);
   const resource = useListResource(`${sourceType}:${scopeKey}`, loader);
-  const update = (sourceId: string, transaction: LinkedTransaction | null) => resource.update(current => {
+  const update = (sourceId: string, transaction: LinkedTransaction[]) => resource.update(current => {
     const next = { ...current.data };
-    if (transaction) next[sourceId] = transaction;
+    if (transaction.length) next[sourceId] = transaction;
     else delete next[sourceId];
     return { data: next, ids: [...new Set([...current.ids, sourceId])] };
   });
@@ -55,7 +55,7 @@ export function TransactionLinkButton({ sourceId, sourceDate, label = "这条记
   const [open, setOpen] = useState(false);
   const busy = useRef(false);
   if (!context) throw new Error("TransactionLinkButton requires TransactionLinksProvider");
-  const linked = context.data[sourceId];
+  const linked = context.data[sourceId]?.length;
   const waiting = context.loading || !context.loadedIds.includes(sourceId);
   const failed = waiting && !!context.error;
   const statusLabel = waiting ? failed ? "关联状态读取失败" : "读取关联中" : linked ? "已关联收支" : "未关联收支";
@@ -114,10 +114,10 @@ function TransactionOption({ transaction, selected, current, onSelect }: {
 
 function LinkEditor({ sourceType, sourceId, sourceDate, label, busyRef, onChanged }: {
   sourceType: SourceType; sourceId: string; sourceDate: string; label: string;
-  busyRef: { current: boolean }; onChanged: (transaction: LinkedTransaction | null) => void;
+  busyRef: { current: boolean }; onChanged: (transaction: LinkedTransaction[]) => void;
 }) {
   const currentVersion = useRef(0);
-  const [current, setCurrent] = useState<LinkedTransaction | null>(null);
+  const [current, setCurrent] = useState<LinkedTransaction[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [currentError, setCurrentError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -130,7 +130,7 @@ function LinkEditor({ sourceType, sourceId, sourceDate, label, busyRef, onChange
   const [selected, setSelected] = useState<LinkedTransaction | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const showSearch = loaded && (!current || editing);
+  const showSearch = loaded && (!current.length || editing);
   const query = new URLSearchParams({ ...(keyword ? { q: keyword } : {}), ...(date ? { startDate: date, endDate: date } : {}), ...(type !== "all" ? { type } : {}) }).toString();
   const [results, setResults] = useState<{ key: string; data: LinkedTransaction[]; error: string | null }>({ key: "", data: [], error: null });
   const searchKey = `${query}:${reload}`;
@@ -165,12 +165,12 @@ function LinkEditor({ sourceType, sourceId, sourceDate, label, busyRef, onChange
     return () => controller.abort();
   }, [query, searchKey, showSearch]);
   const startEditing = () => {
-    if (!current) return;
+    if (!current.length) return;
     setQ(""); setKeyword(""); setSelected(null); setSaveError(null);
-    setDate(formatDate(current.transaction_date)); setType(current.type);
+    setDate(formatDate(current[0].transaction_date)); setType(current[0].type);
     setEditing(true);
   };
-  const mutate = async (transaction: LinkedTransaction | null) => {
+  const mutate = async (transaction: LinkedTransaction | null, unlinkId?: string) => {
     if (busyRef.current || !loaded) return;
     if (transaction && (results.key !== searchKey || q.trim() !== keyword || !results.data.some(row => row.id === transaction.id))) return;
     busyRef.current = true;
@@ -179,12 +179,13 @@ function LinkEditor({ sourceType, sourceId, sourceDate, label, busyRef, onChange
     try {
       const response = await fetch("/api/transaction-links", {
         method: transaction ? "PUT" : "DELETE", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceType, sourceId, ...(transaction ? { transactionId: transaction.id } : {}) }),
+        body: JSON.stringify({ sourceType, sourceId, ...(transaction ? { transactionId: transaction.id } : unlinkId ? { transactionId: unlinkId } : {}) }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "关联保存失败，请重试");
       currentVersion.current += 1;
-      setCurrent(transaction ? result.data : null); setSelected(null); onChanged(transaction ? result.data : null);
+      const next = transaction ? sourceType === "given_gift" ? [...current.filter(row => row.id !== transaction.id), result.data] : [result.data] : current.filter(row => row.id !== unlinkId);
+      setCurrent(next); setSelected(null); onChanged(next);
       setEditing(false);
       if (!transaction) {
         setQ(""); setKeyword(""); setDate(sourceDate); setType(defaultType);
@@ -193,23 +194,25 @@ function LinkEditor({ sourceType, sourceId, sourceDate, label, busyRef, onChange
     finally { busyRef.current = false; setBusy(false); }
   };
   return <DialogContent className="sm:max-w-xl">
-    <DialogHeader><DialogTitle>{!loaded ? "收支关联" : current ? editing ? "修改收支关联" : "收支关联详情" : "关联已有收支"}</DialogTitle><DialogDescription>{label}。只保存关联，不新增交易、不修改金额；解除关联也不会删除收支。</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>{!loaded ? "收支关联" : current.length ? editing ? "修改收支关联" : "收支关联详情" : "关联已有收支"}</DialogTitle><DialogDescription>{label}。只保存关联，不新增交易、不修改金额；解除关联也不会删除收支。</DialogDescription></DialogHeader>
     <DialogBody className="space-y-4">
-      <section className={cn("space-y-3 rounded-lg border p-3", loaded && current ? "border-green-200 bg-green-50/50" : currentError ? "border-amber-200 bg-amber-50/50" : "border-dashed bg-muted/30")} aria-label="当前关联">
-        {!loaded ? <p className={cn("flex items-center gap-2 text-sm", currentError ? "text-amber-800" : "text-muted-foreground")} role={currentError ? "alert" : "status"}>{currentError ? <CircleAlert aria-hidden="true" className="size-4 shrink-0" /> : <LoaderCircle aria-hidden="true" className="size-4 shrink-0 animate-spin" />}{currentError || "正在读取关联…"}</p> : current ? <>
-          <p className="inline-flex items-center gap-1.5 rounded-md bg-green-100 px-2 py-1 text-xs font-semibold text-green-800"><CircleCheck aria-hidden="true" className="size-3.5" />已关联收支</p><TransactionSummary transaction={current} />
-          <div className="flex flex-wrap gap-2 border-t border-green-200/60 pt-3">
-            <Button asChild size="sm" variant="outline"><Link href={`/dashboard?${new URLSearchParams({ startDate: formatDate(current.transaction_date), endDate: formatDate(current.transaction_date) })}`}><CalendarDays aria-hidden="true" />查看当天收支</Link></Button>
-            {!editing ? <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={startEditing}><Pencil aria-hidden="true" />修改关联</Button> : null}
-            <Button type="button" variant="ghost" size="sm" className="text-red-700 hover:bg-red-50 hover:text-red-800" disabled={busy} onClick={() => void mutate(null)}><Unlink aria-hidden="true" />解除关联</Button>
-          </div>
+      <section className={cn("space-y-3 rounded-lg border p-3", loaded && current.length ? "border-green-200 bg-green-50/50" : currentError ? "border-amber-200 bg-amber-50/50" : "border-dashed bg-muted/30")} aria-label="当前关联">
+        {!loaded ? <p className={cn("flex items-center gap-2 text-sm", currentError ? "text-amber-800" : "text-muted-foreground")} role={currentError ? "alert" : "status"}>{currentError ? <CircleAlert aria-hidden="true" className="size-4 shrink-0" /> : <LoaderCircle aria-hidden="true" className="size-4 shrink-0 animate-spin" />}{currentError || "正在读取关联…"}</p> : current.length ? <>
+          <p className="inline-flex items-center gap-1.5 rounded-md bg-green-100 px-2 py-1 text-xs font-semibold text-green-800"><CircleCheck aria-hidden="true" className="size-3.5" />已关联收支</p>{current.map(transaction => <div key={transaction.id} className="space-y-2">
+            <TransactionSummary transaction={transaction} />
+            <div className="flex flex-wrap gap-2 border-t border-green-200/60 pt-3">
+              <Button asChild size="sm" variant="outline"><Link href={`/dashboard?${new URLSearchParams({ startDate: formatDate(transaction.transaction_date), endDate: formatDate(transaction.transaction_date) })}`}><CalendarDays aria-hidden="true" />查看当天收支</Link></Button>
+              <Button type="button" variant="ghost" size="sm" className="text-red-700 hover:bg-red-50 hover:text-red-800" disabled={busy} onClick={() => void mutate(null, transaction.id)}><Unlink aria-hidden="true" />解除这笔关联</Button>
+            </div>
+          </div>)}
+          {!editing ? <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={startEditing}><Pencil aria-hidden="true" />{sourceType === "given_gift" ? "添加关联支出" : "修改关联"}</Button> : null}
         </> : <>
           <p className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground"><CircleDashed aria-hidden="true" className="size-4" />未关联收支</p>
           <p className="text-xs text-muted-foreground">从下方选择已有收支，再点击“确认关联”。</p>
         </>}
         {currentError ? <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setReload(value => value + 1)}>重试关联状态</Button> : null}
       </section>
-      <p className="text-xs text-muted-foreground">每条台账和每笔收支最多保留一个关联。请核对日期、金额及备注；金额不会自动分摊或同步修改。</p>
+      <p className="text-xs text-muted-foreground">{sourceType === "given_gift" ? "一件送礼可关联多笔支出，每笔支出只关联一件事项。" : "每条台账和每笔收支最多保留一个关联。"}请核对日期、金额及备注；金额不会自动分摊或同步修改。</p>
       {showSearch ? <>
       <div className="space-y-2">
         <label className="block space-y-1 text-sm"><span>搜索已有收支备注</span><Input value={q} onChange={event => { setQ(event.target.value); setSelected(null); }} disabled={busy} placeholder="输入备注关键词" /></label>
@@ -218,13 +221,13 @@ function LinkEditor({ sourceType, sourceId, sourceDate, label, busyRef, onChange
           <label className="min-w-0 flex-1 space-y-1 text-sm"><span>交易日期（可选）</span><Input type="date" value={date} disabled={busy} onChange={event => { setDate(event.target.value); setSelected(null); }} /></label>
         </div>
       </div>
-      {results.key !== searchKey ? <p role="status">正在查找收支…</p> : results.error ? <div role="alert" className="space-y-2"><p>{results.error}</p><Button type="button" variant="outline" disabled={busy} onClick={() => setReload(value => value + 1)}>重试收支列表</Button></div> : results.data.length === 0 ? <p className="py-4 text-sm text-muted-foreground">没有匹配的收支，请调整关键词或日期。需要先在记账页保存收支，再回到这里关联。</p> : <fieldset disabled={busy || !loaded || q.trim() !== keyword} className="min-w-0 space-y-2"><legend className="sr-only">选择要关联的收支</legend>{results.data.slice(0, 50).map(transaction => <TransactionOption key={transaction.id} transaction={transaction} selected={selected?.id === transaction.id} current={transaction.id === current?.id} onSelect={() => setSelected(transaction)} />)}{results.data.length > 50 ? <p className="text-xs text-muted-foreground">当前显示前 50 笔，请用关键词或日期缩小范围。</p> : null}</fieldset>}
+      {results.key !== searchKey ? <p role="status">正在查找收支…</p> : results.error ? <div role="alert" className="space-y-2"><p>{results.error}</p><Button type="button" variant="outline" disabled={busy} onClick={() => setReload(value => value + 1)}>重试收支列表</Button></div> : results.data.length === 0 ? <p className="py-4 text-sm text-muted-foreground">没有匹配的收支，请调整关键词或日期。需要先在记账页保存收支，再回到这里关联。</p> : <fieldset disabled={busy || !loaded || q.trim() !== keyword} className="min-w-0 space-y-2"><legend className="sr-only">选择要关联的收支</legend>{results.data.slice(0, 50).map(transaction => <TransactionOption key={transaction.id} transaction={transaction} selected={selected?.id === transaction.id} current={current.some(row => row.id === transaction.id)} onSelect={() => setSelected(transaction)} />)}{results.data.length > 50 ? <p className="text-xs text-muted-foreground">当前显示前 50 笔，请用关键词或日期缩小范围。</p> : null}</fieldset>}
       </> : null}
       {saveError ? <p role="alert" className="text-sm text-destructive">{saveError}</p> : null}
     </DialogBody>
     {showSearch ? <div className="flex justify-end gap-2">
-      {current ? <Button type="button" variant="outline" disabled={busy} onClick={() => { setEditing(false); setSelected(null); setSaveError(null); }}>取消修改</Button> : null}
-      <Button type="button" disabled={!selected || !loaded || busy || results.key !== searchKey || q.trim() !== keyword || !results.data.some(row => row.id === selected.id)} onClick={() => void mutate(selected)}>{busy ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : <Link2 aria-hidden="true" />}{busy ? "保存中…" : current ? "确认更换关联" : "确认关联"}</Button>
+      {current.length ? <Button type="button" variant="outline" disabled={busy} onClick={() => { setEditing(false); setSelected(null); setSaveError(null); }}>取消修改</Button> : null}
+      <Button type="button" disabled={!selected || !loaded || busy || results.key !== searchKey || q.trim() !== keyword || !results.data.some(row => row.id === selected.id)} onClick={() => void mutate(selected)}>{busy ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : <Link2 aria-hidden="true" />}{busy ? "保存中…" : current.length && sourceType !== "given_gift" ? "确认更换关联" : "确认关联"}</Button>
     </div> : null}
   </DialogContent>;
 }

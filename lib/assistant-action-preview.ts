@@ -24,7 +24,7 @@ export function eventActionPreview(input: LedgerEventInput, summary: string, sco
   if (!input.kind) return fallback;
   const kind = input.kind;
   const paid = eventCashflowCents(input);
-  const hasFlow = input.cashflow !== "none";
+  const hasFlow = input.payments != null ? input.payments.length > 0 : input.cashflow !== "none";
   const gift = kind === "gift_given";
   const knownValues = (input.items || []).every(item => item.estimated_value !== null);
   const giftValue = (input.amount_cents || 0) + (input.items || []).reduce((sum, item) => sum + Math.round((item.estimated_value || 0) * 100), 0);

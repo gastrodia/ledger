@@ -27,7 +27,7 @@ module.exports = async function createFixture(modulePath) {
     const exports = {};
     modules.set(file, exports);
     vm.runInNewContext(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText,
-      { exports, process, console, Date, JSON, Error, SyntaxError, URL, Number, Buffer, Request, Response, Headers, fetch, AbortSignal, AbortController, ReadableStream, TextEncoder, TextDecoder, setTimeout, clearTimeout, structuredClone,
+      { exports, process, console, Date, JSON, Error, SyntaxError, URL, Number, Buffer, Request, Response, Headers, fetch, AbortSignal, AbortController, ReadableStream, TextEncoder, TextDecoder, setTimeout, clearTimeout, setInterval, clearInterval, TransformStream, structuredClone,
         require: name => name in supplied ? supplied[name] : name.startsWith('@/') ? load(name.slice(2) + '.ts') : require(name) });
     return exports;
   }

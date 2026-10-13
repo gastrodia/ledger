@@ -78,7 +78,7 @@ const descriptions: Record<keyof typeof assistantNativeSchemas, string> = {
   read_records: "查询真实记录、重复候选或导出；所有资源均可查询。收支明细用transactions/list，程序读取全部记录；日期排序使用order=desc/asc。不修改数据；values为空对象。",
   match_drafts: "逐笔核对当前草稿与真实账本，只返回候选；不会删除、跳过或确认。对应事项action=chat、effect=read，不是query统计或record记账。核对结果本身已完成查询，respond needs_input=false展示卡片，不要求用户先决定候选是否重复。",
   prepare_command: "准备已保存记录/资源的影响预览，修改已保存金额用transactions/update（元）。values只传明确修订字段；有确定ID或可唯一定位的名称/日期可直接准备，服务端重新读取并校验范围，不必为取得ID先额外list；只有需要未知现有字段或关联信息时先查询。link仅transaction_id，unlink/delete/reorder为空对象。新普通收支用prepare_records，钱款关联事件用prepare_event；全部写入等待新预览批准。",
-  prepare_event: "准备涉及钱款或现金流水的借还、归还、送收礼整件方案，不执行付款或写入。纯实物且没有现金付款/收入的送礼或借还用manage清单与prepare_command台账，估值不产生流水。",
+  prepare_event: "准备涉及钱款或现金流水的借还、归还、送收礼整件方案，不执行付款或写入。新送礼使用payments表达每次真实付款；引用前序付款须等待依赖完成，再按执行回执中的transaction_id关联已有流水，不另建合计支出。纯实物且没有现金付款/收入的送礼或借还用manage清单与prepare_command台账，估值不产生流水。",
   prepare_records: "准备普通收支核对组；覆盖全部相关未完成record事项。系统从原文sources和回答分页提取，不由本工具填写账目事实；等待用户确认入账。",
   draft_action: "仅处理页面提供的真实草稿/已入账批次，不能用账本记录ID或审批ID冒充批次。edit修改未入账草稿字段；update只修改草稿成员；remove移除草稿；confirm准备草稿确认；undo撤销已入账批次。修改数据库中的记录使用prepare_command。实际结果由页面和数据库回执确定。",
   navigate: "仅Ledger页面入口、草稿排序或清空对话；页面交付回执才表示完成，不允许任意URL。",
@@ -283,6 +283,7 @@ export function assistantReadSummaryMessages(goal: string, results: AssistantAge
 }
 
 export const ASSISTANT_NATIVE_AGENT_PROMPT = `${ASSISTANT_AGENT_DOMAIN_PROMPT}\n${ASSISTANT_CONTROL_AUTHORIZATION_PROMPT.replaceAll("respond/chat", "respond").replaceAll("plan准备", "set_workflow准备")}\n当前使用Ledger原生工具协议。日期以today为基准；本月或这个月未限定截至今日时使用整月首尾日。每轮提交一个决定；set_workflow中的reads一次提供多个独立查询，由程序执行后再调用模型汇总。参数是对象，不输出自定义步骤JSON、arguments_json或plan_json。普通回复和澄清使用respond提交reply与needs_input，不直接输出无状态正文。只填写本轮工具schema实际提供的字段；schema没有operation_id/target_reference/user_quote时不填写这些字段，服务端会绑定它们，不用生成空字符串或null占位。
+理解整段请求后再规划。指代、省略和跨句引用是正常语言：以对话中实际出现的事项为候选，唯一且语义相容的先行事项直接建立depends_on；不存在于上下文中的假想事项不是候选，不构成需要澄清的理由。关联付款只准备新预览，用户会在该预览确认关系，不在唯一引用前再额外询问一次。依赖执行后，以该事项成功回执及target_verification取得原流水ID来继续，不重新猜测对象或创建重复付款。成员、分类等修饰条件附在业务事项sources中，不另建修改操作。
 业务目标先set_workflow保存完整清单与全部独立查询参数reads，sources逐字覆盖原目标；保留稳定事项ID、完整原文和已接受条件，最多32项。未完成且依赖满足的步骤引用operation_id；纯聊天、完整只读总结及单一control省略operation_id。不修改已完成状态或凭据。
 sources分别引用各事项对应的原文片段，合起来覆盖全部目标。多个同类action可共享原句；不同action不能把同一完整目标重复当作各自来源。明确事实有多次发生时保留独立身份，不重复同一次发生。保存原文及已接受回答，不增删目标或靠改sources绕过校验。已有清单不再重建；事实回答能继续就执行下一步。确需修订时revise_workflow只传未完成事项的改动，程序组装完整清单并执行原有全部校验，已完成事项无需也不能让模型重写。
 纯解释/能力询问/普通回应直接respond({reply:具体回答,needs_input:false})；没有业务调用不建立清单。可选标识无对应对象时省略或填null，不填空字符串。查当前草稿是否已录入属于chat/read事项，随后match_drafts；不建立record或query事项，不用reads替代草稿逐笔核对。核对成功后respond needs_input=false完成原只读任务；用户没要求处置候选时不追问删除/跳过/批准。

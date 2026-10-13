@@ -106,3 +106,14 @@ test('long reviewed snapshots have compact stable revisions and remain within th
  const [reloaded]=await controls.assistantCardControlContexts([plain(card)]);assert.equal(reloaded.revision,context.revision);
  card.confirmChoice.snapshot=card.confirmChoice.snapshot.replace('22','23');const [changed]=await controls.assistantCardControlContexts([card]);assert.notEqual(changed.revision,context.revision);
 });
+
+test('real event payloads expose create/update/undo in pending and succeeded control contexts', async()=>{
+ const f=serverFixture();
+ for(const operation of ['create','update','undo']) for(const status of ['pending','succeeded']) {
+  f.actions[0].payload={event:true,input:{operation}};f.actions[0].status=status;
+  const [actual]=await f.exports.loadAssistantControlContexts('owner',uuid(20),f.task.id);
+  assert.equal(actual.operation,operation);assert.equal(actual.status,status);
+ }
+ f.actions[0].payload={event:true,input:{}};
+ await assert.rejects(()=>f.exports.loadAssistantControlContexts('owner',uuid(20),f.task.id));
+});

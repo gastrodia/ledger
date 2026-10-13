@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS transaction_links (
   repayment_id VARCHAR(36) REFERENCES loan_repayments(id) ON DELETE CASCADE,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (user_id, source_type, source_id),
+  PRIMARY KEY (user_id, source_type, source_id, transaction_id),
   CHECK (
     (source_type = 'given_gift' AND given_gift_id IS NOT NULL AND given_gift_id = source_id AND loan_id IS NULL AND repayment_id IS NULL) OR
     (source_type = 'loan' AND loan_id IS NOT NULL AND loan_id = source_id AND given_gift_id IS NULL AND repayment_id IS NULL) OR
@@ -240,6 +240,8 @@ CREATE TABLE IF NOT EXISTS transaction_links (
 );
 
 -- Check the final transaction state: replacing all rows of a group must retain its link.
+CREATE UNIQUE INDEX IF NOT EXISTS transaction_links_single_source ON transaction_links(user_id,source_type,source_id) WHERE source_type <> 'given_gift';
+
 CREATE OR REPLACE FUNCTION cleanup_gift_group_transaction_link() RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -296,7 +298,7 @@ ALTER TABLE transactions ADD COLUMN IF NOT EXISTS flow_kind VARCHAR(20) NOT NULL
 CREATE TABLE IF NOT EXISTS ledger_events (
     id VARCHAR(36) PRIMARY KEY,user_id VARCHAR(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,source_type TEXT NOT NULL,source_id VARCHAR(36) NOT NULL,
-    transaction_id VARCHAR(36),owns_transaction BOOLEAN NOT NULL,
+    transaction_id VARCHAR(36),owns_transaction BOOLEAN NOT NULL,payments JSONB,
     state TEXT NOT NULL DEFAULT 'saved' CHECK(state IN ('saved','undone')),input JSONB NOT NULL,
     original_flow_kind TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(user_id,source_type,source_id)

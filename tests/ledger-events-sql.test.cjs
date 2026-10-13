@@ -287,3 +287,100 @@ test('missing event categories are not silently created and ledger-only requires
   assert.equal(ledgerOnly.event_choices[0].input.cashflow_basis, ledgerOnly.event_choices[0].label);
   assert.equal(Number((await f.db.query('SELECT count(*) FROM given_gifts')).rows[0].count), 0);
 });
+
+const payment = patch => ({ components:[{purpose:patch.description ? 'purchase':'gift_cash',amount_cents:'amount_cents' in patch?patch.amount_cents:5000,basis:patch.basis||'送礼50'}],transaction_id:null, amount_cents:5000, date:'2026-10-09', category_id:expenseCategory,member_id:member,description:'礼金',cashflow:'new',basis:'送礼50',...patch });
+const giftPayments = patch => ({ kind:'gift_given',counterparty:'小美',amount_cents:5000,occasion:'生日',items:[{item_name:'鞋子',quantity:1,unit:'双',estimated_value:200}],payments:[payment({}),payment({amount_cents:20000,description:'买鞋',basis:'买鞋200'})],...patch });
+test('multiple real payments preserve dates and integer totals; approval retry and exact receipt verification are idempotent', {skip:!modulePath}, async t=>{
+ const f=await setup(t);
+ const plan=await f.prepare(giftPayments({payments:[payment({}),payment({amount_cents:20000,date:'2026-09-30',description:'买鞋',basis:'买鞋200'})]}));
+ assert.equal(plan.approval.preview.metrics[0].value,'¥250.00');
+ assert.match(plan.reply,/2026-09-30/);
+ const receipt=await f.approve(plan);
+ await f.decideAssistantAction('owner',plan.approval.id,'approve');
+ const flows=(await f.db.query('SELECT amount,transaction_date FROM transactions ORDER BY amount')).rows;
+ assert.deepEqual(flows.map(row=>Number(row.amount)),[50,200]);
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM given_gifts')).rows[0].count),1);
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM transaction_links')).rows[0].count),2);
+ assert.equal((await f.readAssistantAgentTargets('owner',receipt.targets,receipt.id)).verified,true);
+ await f.db.query('UPDATE transactions SET amount=201 WHERE amount=200');
+ assert.equal((await f.readAssistantAgentTargets('owner',receipt.targets,receipt.id)).verified,false);
+});
+test('a referenced purchase is reused: 20 meal plus 200 purchase plus 50 gift totals 270; undo preserves prior payments', {skip:!modulePath}, async t=>{
+ const f=await setup(t), meal=randomUUID(), shoes=randomUUID();
+ await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date,category_id,member_id,description) VALUES($1,'owner','expense',20,'2026-10-09',$3,$4,'吃饭'),($2,'owner','expense',200,'2026-10-09',$3,$4,'买鞋')",[meal,shoes,expenseCategory,member]);
+ const receipt=await f.approve(await f.prepare(giftPayments({payments:[payment({}),payment({transaction_id:shoes,amount_cents:20000,cashflow:'existing',description:'买鞋',basis:'给小美买鞋子200'})]})));
+ const summary=(await f.db.query('SELECT count(*) AS count,sum(amount) AS amount FROM transactions')).rows[0];
+ assert.equal(Number(summary.count),3);assert.equal(Number(summary.amount),270);
+ assert.equal((await f.readAssistantAgentTargets('owner',receipt.targets,receipt.id)).verified,true);
+ const undo=await f.approve(await f.prepare({operation:'undo',event_id:receipt.event_context.event_id,kind:null,counterparty:null,amount_cents:null,date:null}));
+ assert.equal((await f.readAssistantAgentTargets('owner',undo.targets,undo.id)).verified,true);
+ assert.deepEqual((await f.db.query('SELECT id FROM transactions ORDER BY id')).rows.map(row=>row.id).sort(),[meal,shoes].sort());
+});
+test('payment updates retain stable IDs; removal restores existing flow and additions are atomic', {skip:!modulePath}, async t=>{
+ const f=await setup(t), original=randomUUID();
+ await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date,category_id,member_id,flow_kind) VALUES($1,'owner','expense',200,'2026-10-09',$2,$3,'loan')",[original,expenseCategory,member]);
+ const saved=await f.approve(await f.prepare(giftPayments({payments:[payment({}),payment({transaction_id:original,amount_cents:20000,cashflow:'existing',description:'购买',basis:'购买200'})]})));
+ const inputs=saved.event_context.input.payments, owned=inputs.find(p=>p.transaction_id!==original);
+ const update={operation:'update',event_id:saved.event_context.event_id,kind:null,counterparty:null,date:null,amount_cents:null};
+ await assert.rejects(()=>f.prepare({...update,payments:inputs.map(p=>p.transaction_id===original?{...p,amount_cents:19000,components:[{purpose:'purchase',amount_cents:19000,basis:'购买190'}]}:p)}),/原有流水/);
+ const edited=await f.approve(await f.prepare({...update,payments:[{...owned,amount_cents:6000,components:[{purpose:'gift_cash',amount_cents:5000,basis:'送礼50'},{purpose:'other',amount_cents:1000,basis:'费用10'}]},payment({amount_cents:3000,description:'追加付款',basis:'追加30'})]}));
+ assert.equal(Number((await f.db.query('SELECT amount FROM transactions WHERE id=$1',[owned.transaction_id])).rows[0].amount),60);
+ assert.equal((await f.db.query('SELECT flow_kind FROM transactions WHERE id=$1',[original])).rows[0].flow_kind,'loan');
+ assert.equal((await f.readAssistantAgentTargets('owner',edited.targets,edited.id)).verified,true);
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM transaction_links')).rows[0].count),2);
+});
+test('unknown actual price asks before approval, valuation never supplies it; duplicate IDs and foreign flows are rejected', {skip:!modulePath}, async t=>{
+ const f=await setup(t);
+ const question=await f.prepare(giftPayments({payments:[payment({}),payment({amount_cents:null,description:'新买的礼物',basis:'价值200，新买的要入账'})]}));
+ assert.equal(question.approval,undefined);assert.match(question.reply,/实际支付/);
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count),0);
+ const id=randomUUID();
+ await assert.rejects(()=>f.prepare(giftPayments({payments:[payment({transaction_id:id,cashflow:'existing'}),payment({transaction_id:id,cashflow:'existing'})]})),/重复关联/);
+ await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date) VALUES($1,'foreign','expense',50,'2026-10-09')",[id]);
+ await assert.rejects(()=>f.prepare(giftPayments({payments:[payment({transaction_id:id,cashflow:'existing'})]})),/不匹配/);
+});
+test('stale second payment rolls back the whole multi-payment event', {skip:!modulePath}, async t=>{
+ const f=await setup(t),a=randomUUID(),b=randomUUID();
+ await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date) VALUES($1,'owner','expense',50,'2026-10-09'),($2,'owner','expense',200,'2026-10-09')",[a,b]);
+ const plan=await f.prepare(giftPayments({payments:[payment({transaction_id:a,cashflow:'existing'}),payment({transaction_id:b,cashflow:'existing',amount_cents:20000,description:'购买'})]}));
+ await f.db.query("UPDATE transactions SET description='改动' WHERE id=$1",[b]);
+ const result=await f.decideAssistantAction('owner',plan.approval.id,'approve');
+ assert.equal(result.status,'failed');
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM given_gifts')).rows[0].count),0);
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM transaction_links')).rows[0].count),0);
+});
+
+test('legacy schema upgrade preserves original IDs, amount and approval; unrelated ledger sources stay one-to-one', {skip:!modulePath}, async t=>{
+ const f=await setup(t),saved=await f.approve(await f.prepare({kind:'gift_given'}));
+ const before=(await f.db.query('SELECT id,amount FROM transactions')).rows;
+ await f.db.exec("ALTER TABLE transaction_links DROP CONSTRAINT transaction_links_pkey, ADD PRIMARY KEY(user_id,source_type,source_id); DROP INDEX transaction_links_single_source; ALTER TABLE ledger_events DROP COLUMN payments;");
+ const ensure=f.load('lib/ledger-event-schema.ts').ensureLedgerEventsSchema;
+ await ensure();await ensure();
+ assert.deepEqual((await f.db.query('SELECT id,amount FROM transactions')).rows,before);
+ assert.equal((await f.readAssistantAgentTargets('owner',saved.targets,saved.id)).verified,true);
+ const undone=await f.approve(await f.prepare({operation:'undo',event_id:saved.event_context.event_id,kind:null,counterparty:null,date:null,amount_cents:null}));
+ assert.equal(undone.status,'succeeded');
+});
+test('link API lists all gift payments, appends independently and unlinks only the requested payment', {skip:!modulePath}, async t=>{
+ const f=await setup(t),gift=randomUUID(),a=randomUUID(),b=randomUUID();
+ const {NextRequest}=require('next/server'),api=f.load('app/api/transaction-links/route.ts');
+ await f.db.query("INSERT INTO given_gifts(id,user_id,recipient_name,gift_date,cash_amount) VALUES($1,'owner','朋友','2026-10-09',50)",[gift]);
+ await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date) VALUES($1,'owner','expense',50,'2026-10-09'),($2,'owner','expense',200,'2026-09-30')",[a,b]);
+ const request=(method,transactionId)=>new NextRequest('http://test/api/transaction-links',{method,headers:{'content-type':'application/json'},body:JSON.stringify({sourceType:'given_gift',sourceId:gift,transactionId})});
+ assert.equal((await api.PUT(request('PUT',a))).status,200);assert.equal((await api.PUT(request('PUT',b))).status,200);
+ const get=()=>api.GET(new NextRequest(`http://test/api/transaction-links?sourceType=given_gift&sourceId=${gift}`));
+ assert.equal((await (await get()).json()).data.length,2);
+ assert.equal((await api.DELETE(request('DELETE',a))).status,200);
+ assert.deepEqual((await (await get()).json()).data.map(row=>row.id),[b]);
+ assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count),2);
+});
+
+test('payment components distinguish one combined payment from omitted cash and calculate totals independently of model arithmetic', {skip:!modulePath}, async t=>{
+ const f=await setup(t);
+ await assert.rejects(()=>f.prepare(giftPayments({payments:[payment({amount_cents:20000,description:'买礼品',basis:'买礼品200'})]})),/没有完整覆盖礼金/);
+ const plan=await f.prepare(giftPayments({payments:[payment({amount_cents:1,description:'一次代办付款',basis:'代办250',components:[{purpose:'gift_cash',amount_cents:5000,basis:'礼金50'},{purpose:'purchase',amount_cents:20000,basis:'购买实付200'}]})]}));
+ assert.equal(plan.approval.preview.metrics[0].value,'¥250.00');
+ await f.approve(plan);
+ const rows=(await f.db.query('SELECT amount FROM transactions')).rows;
+ assert.equal(rows.length,1);assert.equal(Number(rows[0].amount),250);
+});

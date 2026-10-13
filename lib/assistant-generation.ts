@@ -59,6 +59,10 @@ export async function prepareAssistantGeneration(userId: string, raw: unknown, o
   bailianConfig();
   options.execution?.start("context", "读取记账上下文", "tool", [`读取分类、成员与最近 ${history.length} 条对话`]);
   const { categories, members } = await assistantOptions(userId);
+  const conversationId = body.conversation_id || telemetryId;
+  const controlContexts = options.agentEnabled && !images.length && (!body.event_selection || options.agentCheckpoint)
+    ? [...await (await import("@/lib/assistant-control-server")).loadAssistantControlContexts(userId, conversationId, options.runtimeId || telemetryId), ...(body.control_contexts || [])]
+    : [];
   options.execution?.finish("context", [`可用分类 ${categories.length} 个、成员 ${members.length} 位`, `参考最近 ${history.length} 条对话${draftBatch ? `；当前草稿 ${draftBatch.drafts.length} 笔` : ""}`]);
   const imageRecognition = images.length ? buildAssistantImageRecognition({ today: body.today, message: body.message, images, categories, members }) : null;
   const messages: ModelMessage[] = imageRecognition?.messages ?? [
@@ -86,9 +90,6 @@ export async function prepareAssistantGeneration(userId: string, raw: unknown, o
         const { ASSISTANT_NATIVE_AGENT_PROMPT, assistantNativeDecision, assistantNativeMessages, assistantNativeToolsForState, assistantNativeRecordIds, assistantReadSummaryMessages } = await import("@/lib/assistant-native-tools");
         const { loadAssistantAgentContext } = await import("@/lib/assistant-agent-context");
         const { assistantAgentDomainInstructions } = await import("@/lib/assistant-agent-instructions");
-        const conversationId = body.conversation_id || telemetryId;
-        const { loadAssistantControlContexts } = await import("@/lib/assistant-control-server");
-        const controlContexts = [...await loadAssistantControlContexts(userId, conversationId, options.runtimeId || telemetryId), ...(body.control_contexts || [])];
         const model = process.env.BAILIAN_ASSISTANT_MODEL?.trim() || BAILIAN_ASSISTANT_MODEL;
         const thinking = options.thinking ?? process.env.BAILIAN_ASSISTANT_THINKING === "true";
         const trustedRecordIds = new Set<string>();
