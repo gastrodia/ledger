@@ -49,7 +49,7 @@ const plannedOperation = z.union([
 export const assistantNativeSchemas = {
   set_workflow: z.object({ operations: z.array(plannedOperation).min(1).max(32), revision_answers: z.record(operationId, z.string().max(4000)).nullable().optional(),
     reads: z.array(z.discriminatedUnion("tool", [
-      z.object({ operation_id: operationId, tool: z.literal("query"), parameters: query }).strict(),
+      z.object({ operation_id: operationId, tool: z.literal("query").describe("完整统计汇总，附带按金额排序的最多20笔示例；查询全部明细或按日期列出记录用records及transactions/list/order，不能用query代替。"), parameters: query }).strict(),
       z.object({ operation_id: operationId, tool: z.literal("records"), parameters: records }).strict(),
     ])).max(32).describe("一次提供所有条件明确、无依赖的query/manage只读事项参数，程序执行查询、分页与排序，再由respond一次汇总。同一事项可有多个资源查询，例如送礼和收礼；统计用query，明细用records。写事项、待澄清或依赖前置结果的事项不放入reads，没有就填[]。") }).strict(),
   revise_workflow: z.object({ changes: z.array(operation.partial().required({ id: true })).min(1).max(32),
@@ -74,8 +74,8 @@ export const assistantNativeSchemas = {
 const descriptions: Record<keyof typeof assistantNativeSchemas, string> = {
   set_workflow: "一次理解完整目标，建立清单并提供所有独立只读查询的reads参数，程序直接执行，不逐项回到模型。只读事项effect=read且省略action，程序从reads.tool确定query/manage；草稿核对才填chat。sources逐字覆盖当前目标及已接受回答。写事项保留action，仍走预览和确认；纯聊天和单一control不建立清单。",
   revise_workflow: "只修改当前未完成事项的必要条件或错误类型，保留事项ID；只传变动字段，已完成事项和凭据由程序保留。sources是原目标的授权证据，普通回答是追加条件，不能替换原目标或重写sources；只有重新拆分原目标才修订来源。事实回答可直接继续时无需修订，不能为继续任务重建清单。需要新增原目标中的事项可用additions；写变只读必须给出revision_answers。完整目标覆盖、不可变事项和依赖仍校验。",
-  query_statistics: "读取普通收支完整SQL汇总，daily排除借还本金，cashflow包含；只指定条件，不提供结果金额。",
-  read_records: "查询真实记录、重复候选或导出；所有资源均可查询。不修改数据；values为空对象。",
+  query_statistics: "读取普通收支完整SQL汇总，daily排除借还本金，cashflow包含；只指定条件，不提供结果金额。附带明细仅为金额最大的20笔示例；用户要完整明细或按日期列出记录时使用read_records的transactions/list和order。",
+  read_records: "查询真实记录、重复候选或导出；所有资源均可查询。收支明细用transactions/list，程序读取全部记录；日期排序使用order=desc/asc。不修改数据；values为空对象。",
   match_drafts: "逐笔核对当前草稿与真实账本，只返回候选；不会删除、跳过或确认。对应事项action=chat、effect=read，不是query统计或record记账。核对结果本身已完成查询，respond needs_input=false展示卡片，不要求用户先决定候选是否重复。",
   prepare_command: "准备已保存记录/资源的影响预览，修改已保存金额用transactions/update（元）。values只传明确修订字段；有确定ID或可唯一定位的名称/日期可直接准备，服务端重新读取并校验范围，不必为取得ID先额外list；只有需要未知现有字段或关联信息时先查询。link仅transaction_id，unlink/delete/reorder为空对象。新普通收支用prepare_records，钱款关联事件用prepare_event；全部写入等待新预览批准。",
   prepare_event: "准备涉及钱款或现金流水的借还、归还、送收礼整件方案，不执行付款或写入。纯实物且没有现金付款/收入的送礼或借还用manage清单与prepare_command台账，估值不产生流水。",

@@ -1,3 +1,4 @@
+import { withAssistantReadResults } from "@/lib/assistant-read-results";
 import { assistantControlTaskStatus, validateAssistantControl, type AssistantControl, type AssistantControlContext } from "@/lib/assistant-control";
 import { sameEventOccurrence, type AssistantEventResolution } from "@/lib/assistant-event-clarification";
 import { createHash } from "node:crypto";
@@ -159,8 +160,8 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       && (!c.operations || c.operations.some(operation => operation.id === r.operation_id && operation.effect === "read")));
     const latestQuery = latestRead && ["query", "draft_matches"].includes(latestRead.name) ? latestRead.result as { reply_view?: AssistantPlan["reply_view"] } : undefined;
     const latestRecords = latestRead?.name === "records" ? latestRead.result as { record_context?: AssistantPlan["record_context"] } : undefined;
-    const result = { ...plan, ...(plan.action === "chat" && !c.awaiting_answer && latestQuery?.reply_view ? { reply_view: latestQuery.reply_view } : {}),
-      ...(plan.action === "chat" && !c.awaiting_answer && latestRecords?.record_context ? { record_context: latestRecords.record_context } : {}), agent: assistantAgentMetadata(c) };
+    const result = withAssistantReadResults({ ...plan, ...(plan.action === "chat" && !c.awaiting_answer && latestQuery?.reply_view ? { reply_view: latestQuery.reply_view } : {}),
+      ...(plan.action === "chat" && !c.awaiting_answer && latestRecords?.record_context ? { record_context: latestRecords.record_context } : {}), agent: assistantAgentMetadata(c) }, c);
     if (status !== "running" && (c.operations || c.workflow_required) && c.output_id) {
       const output = { id: c.output_id, user_message_id: c.turn_message_id || o.userMessageId || c.goal_id,
         input: c.turn_input || { message: c.goal, display_text: c.goal, display_images: [] as [] }, plan: structuredClone(result), attempt: o.attempt || 1,

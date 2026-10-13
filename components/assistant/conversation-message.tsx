@@ -4,6 +4,7 @@ import { AssistantActionCard, AssistantActionControls } from "@/components/assis
 import { AssistantAgentTaskStatus } from "@/components/assistant/agent-task-status";
 import { AssistantDraftCard, AssistantDraftRow } from "@/components/assistant/draft-card";
 import { AssistantDraftMatchCard } from "@/components/assistant/draft-match-card";
+import { AssistantReadResultCards } from "@/components/assistant/read-result-cards";
 import { AssistantMemberPicker } from "@/components/assistant/member-picker";
 import { AssistantProcessingDetails } from "@/components/assistant/processing-details";
 import { assistantChoiceClass, AssistantReplyCard, AssistantReplyNotice, AssistantReplyShell } from "@/components/assistant/reply-primitives";
@@ -61,7 +62,7 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
   const actionControls = (hasAction || pendingPhase) ? <AssistantActionControls pending={pendingPhase} executing={message.actionResult?.status === "executing"} disabled={composerDisabled || messages.some(m => m.cardUpdatedLink === message.id && m.supersededApproval && !m.supersededApproval.settled)}
     approveLabel={message.undoChoice ? `确认撤销 ${message.undoChoice.draft_ids.length} 笔` : message.approval?.preview?.approveLabel} canRead={!!message.approval} onDecide={phase => void decideConversationAction(message, phase === "cancel" ? "cancel" : "approve", phase === "read")}
     error={message.error} resultText={message.actionResult?.status === "pending" ? "尚未执行，等待你的确认。" : message.actionResult?.status === "executing" ? message.actionResult.text : undefined} /> : null;
-  const replyView = !actionPreview ? message.replyView || (message.ledgerContext ? recordReplyView(message.ledgerContext.resource, message.ledgerContext.rows, undefined, members, categories)
+  const replyView = !actionPreview && (!message.readResults?.length || message.replyView?.kind === "draft_matches") ? message.replyView || (message.ledgerContext ? recordReplyView(message.ledgerContext.resource, message.ledgerContext.rows, undefined, members, categories)
     : message.replyKind ? resultReplyView(message.text)
       : message.navigateTo ? resultReplyView(message.text, "页面入口")
         : message.exportFile ? resultReplyView(message.text, "导出已准备好") : undefined) : undefined;
@@ -78,8 +79,8 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
     hasPreview={!!actionPreview || !!message.drafts?.length || !!message.eventChoices?.length}
     disabled={!!actionPending || sending || savingId !== null} onStop={() => void stopTask(message.taskId || message.id)}
     onContinue={() => void retryTask(message)} onEdit={() => { setInput(message.agent!.goal); composerRef.current?.focus(); }} />;
-  return <div key={message.id} tabIndex={message.drafts?.length || actionPreview || replyView || message.eventContext ? -1 : undefined} className={cn("mb-5 flex outline-none", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
-    <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]", highlightedCard === message.id && "rounded-2xl ring-2 ring-primary/40 ring-offset-2 ring-offset-background")}>
+  return <div key={message.id} tabIndex={message.drafts?.length || actionPreview || replyView || message.readResults?.length || message.eventContext ? -1 : undefined} className={cn("mb-5 flex outline-none", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
+    <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!message.readResults?.length || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]", highlightedCard === message.id && "rounded-2xl ring-2 ring-primary/40 ring-offset-2 ring-offset-background")}>
       {message.role === "assistant" && agentRunning && agentStatus}
       {message.role === "assistant" && message.process && !message.agent && <AssistantProcessingDetails process={message.process}
         disconnected={!!taskConnectionError && (message === streamingMessage || message.taskId === activeTaskId)} />}
@@ -94,14 +95,14 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
         }
           : output.ledgerContext ? recordReplyView(output.ledgerContext.resource, output.ledgerContext.rows, undefined, members, categories) : undefined);
         return <div key={`${output.attempt}:${output.actionResult?.id || output.approval?.id || "reply"}`}>{preview ? <AssistantActionCard preview={preview} status={output.actionResult?.status || "executing"} resultText={output.actionResult?.text.split("\n")[0]} />
-          : view ? <AssistantReplyCard preview={view}>{output.analysis && <details><summary className="cursor-pointer text-xs text-primary">查看分析说明</summary><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{output.analysis}</ReactMarkdown></details>}</AssistantReplyCard> : <p className="text-[13px] leading-6 text-muted-foreground whitespace-pre-wrap wrap-anywhere">{withoutApprovalExpiry(output.text)}</p>}
+          : output.readResults?.length ? <AssistantReadResultCards results={output.readResults} members={members} categories={categories} /> : view ? <AssistantReplyCard preview={view}>{output.analysis && <details><summary className="cursor-pointer text-xs text-primary">查看分析说明</summary><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{output.analysis}</ReactMarkdown></details>}</AssistantReplyCard> : <p className="text-[13px] leading-6 text-muted-foreground whitespace-pre-wrap wrap-anywhere">{withoutApprovalExpiry(output.text)}</p>}
           {output.exportFile && <Button type="button" variant="outline" size="sm" className="mt-2" onClick={() => downloadExport({ ...message, exportFile: output.exportFile })}>下载 {output.exportFile.name}</Button>}
         </div>;
       })}</div>}
 
       <div className={cn(bubbleClass, message.role === "user" ? "rounded-[17px_17px_5px_17px] bg-[color-mix(in_srgb,var(--color-primary)_9%,var(--color-background))] px-[15px] py-[11px] text-foreground" : "text-foreground")}>
         {!!message.images?.length && <div className={cn("mb-2 grid gap-2", message.images.length > 1 && "grid-cols-2")} aria-label="已发送的截图">{message.images.map((image, index) => <Button key={index} type="button" variant="ghost" className={cn(buttonClass, "relative block max-w-full overflow-hidden rounded-[10px] hover:bg-transparent")} aria-label={`查看第 ${index + 1} 张图片：${image.name}`} onClick={() => setPreviewImage(image)}><NextImage src={image.data} alt={image.name} width={240} height={240} unoptimized className="h-auto max-h-[260px] w-auto max-w-full object-contain" /></Button>)}</div>}
-        {!actionPreview && !replyView && (!message.eventChoices?.length || eventMembers) && <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{question ? `${imageReply ? `${message.text}\n\n` : ""}${memberBatchQuestionText(unassigned)}` : withoutApprovalExpiry(message.text)}</ReactMarkdown>}
+        {!actionPreview && !replyView && (!message.readResults?.length || message.agent?.status !== "completed" || message.agent.operations?.some(operation => operation.effect !== "read")) && (!message.eventChoices?.length || eventMembers) && <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{question ? `${imageReply ? `${message.text}\n\n` : ""}${memberBatchQuestionText(unassigned)}` : withoutApprovalExpiry(message.text)}</ReactMarkdown>}
       </div>
       {message.incomplete && ((message.role === "assistant") || (!message.taskId && message.role === "user") || message.taskStatus === "missing") && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
         <AssistantReplyNotice tone={message.incomplete === "stopped" ? "info" : "error"}>{message.error || (message.incomplete === "stopped" ? "已停止生成" : "上次处理未完成")}</AssistantReplyNotice>
@@ -127,6 +128,7 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
             if (busy || saveLockRef.current || sendLockRef.current || actionPendingRef.current) return;
             setMessages(current => toggleAssistantDraftRemoval(current, message.id, record.id!));
           }}>{record.excluded ? "恢复" : "不移除"}</Button> : undefined}>{actionControls}</AssistantActionCard> : actionControls}
+      {!!message.readResults?.length && <AssistantReadResultCards results={message.readResults} members={members} categories={categories} />}
       {replyView?.kind === "draft_matches" && !replyView.draftComparison ? <AssistantReplyShell label="历史核对结果" title="核对规则已更新">
         <div className="space-y-3 p-4"><AssistantReplyNotice>旧结果仅按金额和日期召回，可能包含无关记录。请按当前草稿重新核对。</AssistantReplyNotice>
           <Button type="button" size="sm" variant="outline" disabled={composerDisabled} onClick={() => void send("重新核对当前草稿是否已经入账，排除仅金额相同的无关记录")}>重新核对</Button></div>

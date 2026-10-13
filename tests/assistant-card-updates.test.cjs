@@ -5,6 +5,15 @@ function load(file){if(cache.has(file))return cache.get(file);const exports={};c
 const {reconcileAssistantCardUpdate,reconcileAssistantCardHistory,relocateAssistantCard,linkAssistantEventCards}=load('lib/assistant-card-updates.ts');
 const id=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`, plain=x=>JSON.parse(JSON.stringify(x));
 const event=(n,kind='gift_given',counterparty='小李')=>({id:id(n),role:'assistant',text:'预览',taskApplied:true,approval:{id:id(n+100),summary:'preview'},eventContext:{status:'pending',event_id:null,input:{kind,operation:'create',counterparty,amount_cents:n*100,date:'2026-10-10'}},actionPreview:{title:'记录',metrics:[],sections:[],notices:[]}});
+test('explicit multi-query corrections replace the intended result group and keep its stable identity',()=>{
+ const group=n=>({id:id(n),role:'assistant',text:'组合查询',readResults:[{id:`read-${n}`,operation_id:'notes',reply:'结果',record_context:{resource:'notes',rows:[]}}]});
+ const old=group(1),latest=group(2),unrelated=group(3);
+ const updated=reconcileAssistantCardUpdate([old,unrelated,latest],latest.id,old.id);
+ assert.equal(updated[0].cardUpdatedLink,latest.id);assert.equal(updated[0].readResults,undefined);
+ assert.equal(updated[1],unrelated);assert.equal(updated[2],latest);
+ const moved=relocateAssistantCard([old,{id:id(4),role:'user',text:'调整日期'},latest],old.id,latest.id);
+ assert.equal(moved.at(-1).id,old.id);assert.equal(moved.at(-1).readResults,old.readResults);
+});
 test('gift and loan corrections replace old controls, chain all markers to the newest card and survive reload',()=>{
  for(const kind of ['gift_given','gift_received','loan_lent','loan_borrowed','repayment_received','repayment_paid']){
   const a=event(1,kind),b=event(2,kind),c=event(3,kind);

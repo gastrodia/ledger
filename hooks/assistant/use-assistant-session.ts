@@ -94,7 +94,7 @@ export function useAssistantSession(onReset: (kind: "clear" | "logout") => void)
     const old = current.find(m => m.id === id);
     if (old && assistantCardTarget(old)) return current;
     const next = current.map(m => m.id === id ? { ...m, ...update } : m);
-    const changed = ["status", "approval", "eventContext", "actionPreview", "replyView", "actionResult"].some(key => key in update && JSON.stringify(old?.[key as keyof Message]) !== JSON.stringify(update[key as keyof Message]));
+    const changed = ["status", "approval", "eventContext", "actionPreview", "replyView", "readResults", "actionResult"].some(key => key in update && JSON.stringify(old?.[key as keyof Message]) !== JSON.stringify(update[key as keyof Message]));
     return changed && old ? relocateAssistantCard(next, id, next.at(-1)!.id) : next;
   });
   function clearConversation() {

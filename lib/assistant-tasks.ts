@@ -1,3 +1,4 @@
+import { withAssistantReadResults } from "@/lib/assistant-read-results";
 import { assistantControlTaskStatus } from "@/lib/assistant-control";
 import { resolveAssistantEventChoice } from "@/lib/assistant-event-clarification";
 import { AssistantAgentStepError } from "@/lib/assistant-agent-step";
@@ -43,8 +44,9 @@ function snapshot(row: TaskRow, includeInput = false): AssistantTask {
       : row.status === "queued" || row.status === "running" ? "running" as const
       : !checkpoint && storedAgent.status === "waiting_approval" ? "stopped" as const : storedAgent.status } : undefined;
   const stoppedOutput = checkpoint && ["stopped", "interrupted"].includes(checkpoint.status) ? checkpoint.outputs?.find(output => output.id === checkpoint.output_id) : undefined;
-  const result = stoppedOutput && agent ? { ...stoppedOutput.plan, reply: checkpoint?.status === "interrupted" ? stoppedOutput.plan.reply : row.result?.reply || stoppedOutput.plan.reply, agent }
+  const storedResult = stoppedOutput && agent ? { ...stoppedOutput.plan, reply: checkpoint?.status === "interrupted" ? stoppedOutput.plan.reply : row.result?.reply || stoppedOutput.plan.reply, agent }
     : row.result && agent ? { ...row.result, agent } : row.result;
+  const result = storedResult ? withAssistantReadResults(storedResult, checkpoint) : storedResult;
   return { id: row.id, conversation_id: row.conversation_id, user_message_id: row.user_message_id,
     status: row.status, phase: row.phase, approval_history: assistantAgentApprovalHistory(checkpoint), agent, image_progress: row.image_progress, execution_steps: restoreAssistantExecution(row.execution_steps), text: row.partial_text, result, error: row.error,
     attempt: row.attempt, created_at: new Date(row.created_at).toISOString(), updated_at: new Date(row.updated_at).toISOString(),

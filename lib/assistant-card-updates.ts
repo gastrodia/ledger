@@ -13,7 +13,7 @@ export function relocateAssistantCard(messages: Message[], cardId: string, after
   const source = messages.find(m => m.id === cardId);
   const sourceIndex = messages.findIndex(m => m.id === cardId), afterIndex = messages.findIndex(m => m.id === afterId);
   if (!source || source.role !== "assistant" || assistantCardTarget(source) || source.commit || !UUID_PATTERN.test(afterId)
-    || (!source.drafts?.length && !source.actionPreview && !source.approval && !source.replyView && !source.eventContext)
+    || (!source.drafts?.length && !source.actionPreview && !source.approval && !source.replyView && !source.readResults?.length && !source.eventContext)
     || afterIndex < 0 || sourceIndex === afterIndex || sourceIndex === afterIndex + 1) return messages;
   const ids = new Set(messages.map(m => m.id));
   let prefix = (parseInt(afterId.slice(0, 8), 16) ^ 0x80000000) >>> 0;
@@ -25,12 +25,12 @@ export function relocateAssistantCard(messages: Message[], cardId: string, after
 }
 function pending(message: Message) {
   return !assistantCardTarget(message) && message.role === "assistant" && (!message.actionResult || message.actionResult.status === "pending")
-    && (message.approval || message.eventContext?.status === "pending" || message.replyView?.analysis || message.ledgerContext);
+    && (message.approval || message.eventContext?.status === "pending" || message.replyView?.analysis || message.readResults?.length || message.ledgerContext);
 }
 /** Supersession requires a declared output ID; text and similarity never select a card. */
 export function reconcileAssistantCardUpdate(messages: Message[], newId: string, explicitPreviousId?: string): Message[] {
   const index = messages.findIndex(m => m.id === newId), current = messages[index];
-  if (!current || !pending(current) || (!current.approval && !current.eventChoices?.length && !current.replyView?.analysis && !current.ledgerContext)) return messages;
+  if (!current || !pending(current) || (!current.approval && !current.eventChoices?.length && !current.replyView?.analysis && !current.readResults?.length && !current.ledgerContext)) return messages;
   if (!explicitPreviousId) return messages;
   const candidates = messages.slice(0, index).filter(message => pending(message) && message.id === explicitPreviousId);
   if (candidates.length !== 1) return messages;

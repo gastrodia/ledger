@@ -39,6 +39,29 @@ function loadClient(globals = {}) {
 }
 
 const client = loadClient();
+
+test('multi-query cards restore on reopen and replace a previously cached final-only card without duplication', () => {
+  const readResults = ['loans', 'gifts_given', 'gift_records', 'notes', 'transactions'].map((resource, index) => ({
+    id: `read-${index}`, operation_id: `q${index}`, reply: resource, record_context: { resource, rows: [] },
+  }));
+  const agent = { goal_id: uuid(30), goal: '查询账本', status: 'completed', steps: 2, tool_calls: 5 };
+  const completed = task({ result: plan({ action: 'chat', drafts: [], agent, read_results: readResults, reply_view: undefined }) });
+  const restored = client.mergeAssistantTasks([user()], [completed], conversationId, members);
+  const reply = restored.find(message => message.role === 'assistant');
+  assert.ok(reply, JSON.stringify({ completed, restored }));
+  assert.deepEqual(plain(reply.readResults), readResults);
+  const cached = restored.map(message => message.id === reply.id ? { ...message, readResults: undefined, replyView: { title: '资金流水统计' } } : message);
+  const upgraded = client.mergeAssistantTasks(cached, [completed], conversationId, members);
+  assert.equal(upgraded.filter(message => message.role === 'assistant').length, 1);
+  assert.equal(upgraded.find(message => message.role === 'assistant').replyView, undefined);
+  assert.deepEqual(plain(upgraded.find(message => message.role === 'assistant').readResults), readResults);
+  assert.deepEqual(plain(client.mergeAssistantTasks(upgraded, [completed, completed], conversationId, members)), plain(upgraded));
+  const newResults = readResults.map(result => ({ ...result, id: `${result.id}-next`, reply: `${result.reply} updated` }));
+  const advanced = client.mergeAssistantTasks(upgraded, [{ ...completed, attempt: 2, result: { ...completed.result, read_results: newResults } }], conversationId, members);
+  const latest = advanced.find(message => message.role === 'assistant');
+  assert.deepEqual(plain(latest.readResults), newResults);
+  assert.deepEqual(plain(latest.taskHistory[0].readResults), readResults, 'advancing a task keeps the previous query results intact');
+});
 function row(id = 10, extra = {}) {
   return { id: uuid(id), type: 'expense', amount_cents: 697, category_id: uuid(1), member_id: uuid(2),
     transaction_date: '2026-09-30', description: '深圳通乘车', payment_method: '微信', note: '', ...extra };

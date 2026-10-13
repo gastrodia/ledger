@@ -46,7 +46,13 @@ test('the reported four-part request completes in two decisions with correct com
     const pages = f.sqlCalls.filter(call => call.text.includes('FROM transactions r'));
     assert.equal(pages.length, 2, '84 rows are read in pages of 50 and 34');
     assert.ok(pages.every(call => call.text.includes('LIMIT 50')));
-    assert.deepEqual(Array.from(plan.record_context.rows, row => row.id), Array.from(checkpoint.tool_results.find(r => r.name === 'records' && r.result.record_context.resource === 'transactions').result.record_context.rows, row => row.id));
+    assert.deepEqual(Array.from(plan.read_results.find(result => result.record_context?.resource === 'transactions').record_context.rows, row => row.id), Array.from(checkpoint.tool_results.find(r => r.name === 'records' && r.result.record_context.resource === 'transactions').result.record_context.rows, row => row.id));
+    assert.equal(plan.read_results.length, 5);
+    assert.equal(plan.reply_view, undefined);
+    assert.equal(plan.record_context, undefined);
+    assert.deepEqual(Array.from(plan.read_results, result => result.record_context.resource), ['loans', 'gifts_given', 'gift_records', 'notes', 'transactions']);
+    assert.equal(plan.read_results[2].record_context.rows.length, 0);
+    assert.equal(checkpoint.outputs[0].plan.read_results.length, 5);
     assert.equal(plan.agent.operations.length, 4);
     assert.ok(!checkpoint.pending_reads?.length);
     assert.ok(!checkpoint.tool_results.some(r => r.name === 'validation_error'));

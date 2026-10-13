@@ -56,7 +56,7 @@ export function useAssistantSend(session: Pick<AssistantSession, "messages" | "s
         record_contexts: messages.flatMap(m => [...(m.taskHistory || []).flatMap(output => output.ledgerContext ? [output.ledgerContext] : []), ...(m.ledgerContext ? [m.ledgerContext] : [])]).slice(-3),
         control_contexts: await assistantCardControlContexts(messages),
         card_contexts: messages.filter(message => message.role === "assistant" && !assistantCardTarget(message)
-          && (message.approval || message.eventChoices?.length || message.replyView || message.ledgerContext)).slice(-10)
+          && (message.approval || message.eventChoices?.length || message.replyView || message.readResults?.length || message.ledgerContext)).slice(-10)
           .map(message => ({ id: message.id, summary: (message.approval?.summary || message.text).slice(0, 4000) })),
         history: messages.filter(m => !m.incomplete && !assistantCardTarget(m)).slice(-8).map(m => ({
           role: m.role, content: m.drafts

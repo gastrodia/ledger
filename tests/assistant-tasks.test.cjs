@@ -134,6 +134,27 @@ function fixture({ sql, session = { userId: 'owner' }, provider = {}, extraDepen
 
 // Opt in to execute the exact schema and CAS statements against disposable
 // PostgreSQL. This never connects to DATABASE_URL or touches account data.
+test('task snapshots restore every old query card from the server checkpoint without replaying tools', async () => {
+  const resources = ['loans', 'notes', 'transactions'];
+  const oldResult = { ...chat, reply_view: { title: '资金流水统计' } };
+  const checkpoint = { version: 2, goal_id: taskId, goal: '查询借还。查询便利贴。统计本月收支。', status: 'completed', steps: 2,
+    messages: [], pending_approval: null, preview_fingerprints: [],
+    operations: resources.map((resource, index) => ({ id: resource, label: resource, action: index === 2 ? 'query' : 'manage', effect: 'read', status: 'completed', depends_on: [], sources: [resource] })),
+    tool_results: resources.map((resource, index) => ({ call_id: `read-${index}`, operation_id: resource, name: index === 2 ? 'query' : 'records',
+      result: index === 2 ? { reply: '统计结果', reply_view: oldResult.reply_view } : { reply: resource, record_context: { resource, rows: [] } } })),
+  };
+  const row = { id: taskId, conversation_id: conversationId, user_message_id: messageId, status: 'succeeded', phase: 'thinking', partial_text: '', result: oldResult,
+    agent_checkpoint: checkpoint, attempt: 1, created_at: '2026-10-13T08:37:47.119Z', updated_at: '2026-10-13T08:38:00.000Z' };
+  const sql = { query: async text => text.includes('FROM assistant_tasks WHERE') ? [row] : [] };
+  const f = fixture({ sql });
+  const recovered = await f.tasks.getAssistantTask('owner', taskId);
+  assert.equal(recovered.result.read_results.length, 3);
+  assert.deepEqual(plain(recovered.result.read_results.map(result => result.id)), ['read-0', 'read-1', 'read-2']);
+  assert.equal(recovered.result.reply_view, undefined);
+  assert.equal(oldResult.reply_view.title, '资金流水统计');
+  assert.equal(f.paidCalls.length, 0);
+});
+
 const PGlite = process.env.LEDGER_TASKS_PGLITE_MODULE
   ? require(process.env.LEDGER_TASKS_PGLITE_MODULE).PGlite : null;
 

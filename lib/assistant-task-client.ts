@@ -40,6 +40,7 @@ export type AssistantConversationMessage = {
   actionResult?: AssistantActionResult;
   actionPreview?: AssistantActionPreview;
   replyView?: AssistantReplyView;
+  readResults?: AssistantPlan["read_results"];
   draftMatchDecisions?: Record<string, "kept" | "removed">;
   replyKind?: "result";
   /** Historical location of a card; always points to its unchanged batch ID. */
@@ -108,7 +109,7 @@ export function completeAssistantMemberSelection(messages: AssistantConversation
     : message.memberChoice?.batch_id === messageId ? { ...message, memberChoice: undefined } : message), review];
 }
 
-export type AssistantTaskOutput = Pick<AssistantConversationMessage, "text" | "analysis" | "replyView" | "ledgerContext" | "exportFile" | "actionPreview" | "actionResult" | "approval" | "eventContext" | "drafts" | "savedDrafts" | "status"> & { attempt: number };
+export type AssistantTaskOutput = Pick<AssistantConversationMessage, "text" | "analysis" | "readResults" | "replyView" | "ledgerContext" | "exportFile" | "actionPreview" | "actionResult" | "approval" | "eventContext" | "drafts" | "savedDrafts" | "status"> & { attempt: number };
 
 export function restoreAssistantAgent(value: unknown): NonNullable<AssistantPlan["agent"]> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
@@ -183,8 +184,8 @@ function checkpointHistory(message: AssistantConversationMessage): AssistantTask
   const previous = message.taskHistory || [];
   const actionId = message.actionResult?.id || message.approval?.id;
   if (previous.some(output => output.attempt === message.taskAttempt && (output.actionResult?.id || output.approval?.id) === actionId)) return previous;
-  const { text, analysis, replyView, ledgerContext, exportFile, actionPreview, actionResult, approval, eventContext, drafts, savedDrafts, status } = message;
-  return [...previous, { attempt: message.taskAttempt || 1, text, analysis, replyView, ledgerContext, exportFile, actionPreview, actionResult, drafts, savedDrafts, status,
+  const { text, analysis, readResults, replyView, ledgerContext, exportFile, actionPreview, actionResult, approval, eventContext, drafts, savedDrafts, status } = message;
+  return [...previous, { attempt: message.taskAttempt || 1, text, analysis, readResults, replyView, ledgerContext, exportFile, actionPreview, actionResult, drafts, savedDrafts, status,
     // Pending approvals stay on the current checkpoint only. History is read-only.
     ...(actionResult ? {} : approval ? { approval } : {}), eventContext }].slice(-20);
 }
@@ -432,7 +433,12 @@ function mergeAssistantTaskOutputs(
     }
     // This flag is persisted on the stable reply, even when its drafts were moved
     // into a later member-selection card or removed by the user.
-    const previousReply = next.find(message => message.id === task.id);
+    let previousReply = next.find(message => message.id === task.id);
+    if (previousReply?.taskApplied && !assistantCardTarget(previousReply) && task.attempt === previousReply.taskAttempt
+      && task.result?.read_results && !sameTaskValue(previousReply.readResults, task.result.read_results)) {
+      next = next.map(message => message.id === task.id ? { ...message, readResults: task.result!.read_results, replyView: task.result!.reply_view, ledgerContext: undefined } : message);
+      previousReply = next.find(message => message.id === task.id);
+    }
     if (previousReply && assistantCardTarget(previousReply)) {
       // Earlier versions replaced the whole message with an update marker.
       // Restore the server-owned question in place without restoring its controls.
@@ -510,7 +516,7 @@ function mergeAssistantTaskOutputs(
         && sameTaskValue(previousReply.image_progress || null, reply.image_progress || null)) continue;
     } else {
       const result = task.result;
-      reply = { ...reply, text: result.reply, updatesCardId: result.replaces_output_id, analysis: result.analysis, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
+      reply = { ...reply, text: result.reply, updatesCardId: result.replaces_output_id, analysis: result.analysis, readResults: result.read_results, replyView: result.reply_view, taskApplied: true, importSummary: restoreAssistantImportSummary(result.import_summary) };
       if (["edit", "update", "remove", "navigate", "undo"].includes(result.action))
         reply.delivery = { action: result.action as NonNullable<AssistantConversationMessage["delivery"]>["action"], status: "failed" };
       if (result.action === "control" && result.control) {
