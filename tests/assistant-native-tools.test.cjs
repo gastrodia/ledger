@@ -116,7 +116,7 @@ test('a saved-record amount revision prepares a new preview in two decisions wit
     filter: { ...command.filter, keyword: '早餐' } };
   const result = await runAssistantAgent({ goalId: id(1), goal, messages: [], requireWorkflow: true, signal: AbortSignal.timeout(1000),
     adapters: { protocol: 'native', controlContexts: [pending],
-      chooseStep: async () => ++calls === 1 ? call('set_workflow', { operations: [{ id: 'revision', label: '准备新修改方案', action: 'manage', effect: 'write', depends_on: [], sources: [goal] }] })
+      chooseStep: async () => ++calls === 1 ? call('set_workflow', { reads: [], operations: [{ id: 'revision', label: '准备新修改方案', action: 'manage', effect: 'write', depends_on: [], sources: [goal] }] })
         : call('prepare_command', { operation_id: 'revision', command: editCommand }, 2),
       validatePlan: p => p, validateCommand: load('lib/assistant-commands.ts').validateLedgerCommand,
       command: async c => { preparations++; assert.equal(JSON.parse(c.values_json).amount, 100); return { reply: '100元新预览待确认', approval: { id: id(8), summary: '100元', count: 1, expires_at: null } }; },

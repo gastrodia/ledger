@@ -180,7 +180,7 @@ async function resolveParent(userId: string, command: LedgerCommand) {
   if (command.operation === "create") throw new Error("请指定所属借还记录或礼簿。");
   return null;
 }
-export function buildCommandSelection(userId: string, c: LedgerCommand) {
+export function buildCommandSelection(userId: string, c: LedgerCommand, page?: { after?: LedgerRow }) {
   const config = resources[c.resource];
   const params: unknown[] = [userId];
   const where = ["r.user_id=$1"];
@@ -212,7 +212,20 @@ export function buildCommandSelection(userId: string, c: LedgerCommand) {
   // Calendar dates are not instants: preserve the database day before JSON serialization.
   // Transaction write snapshots use the same calendar representation as byId for fingerprint checks.
   if (config.date && (c.resource === "transactions" || (c.resource !== "notes" && ["list", "export", "duplicates"].includes(c.operation)))) extra += `,TO_CHAR(r.${config.date},'YYYY-MM-DD') AS ${config.date}`;
-  return { text: `SELECT r.*${extra},COUNT(*) OVER()::int AS match_count FROM ${config.table} r WHERE ${where.join(" AND ")} ORDER BY ${config.date ? `r.${config.date} DESC,` : ""}r.id LIMIT 51`, params };
+  const order = c.order === "asc" ? "ASC" : "DESC";
+  if (page?.after) {
+    const comparison = order === "ASC" ? ">" : "<";
+    if (config.date) {
+      // Optional dates (for example a giftbook's event_date) sort last.
+      // A NULL tuple cannot be compared with SQL < or >, so its ID is the cursor.
+      if (page.after[config.date] == null) add(`r.${config.date} IS NULL AND r.id${comparison}?`, page.after.id);
+      else {
+        params.push(page.after[config.date], page.after.id);
+        where.push(`((r.${config.date},r.id)${comparison}($${params.length - 1},$${params.length}) OR r.${config.date} IS NULL)`);
+      }
+    } else add(`r.id${comparison}?`, page.after.id);
+  }
+  return { text: `SELECT r.*${extra}${page ? "" : ",COUNT(*) OVER()::int AS match_count"} FROM ${config.table} r WHERE ${where.join(" AND ")} ORDER BY ${config.date ? `r.${config.date} ${order}${page ? " NULLS LAST" : ""},` : ""}r.id${page ? ` ${order}` : ""} LIMIT ${page ? 50 : 51}`, params };
 }
 function originalRow(row: LedgerRow) {
   const copy = { ...row }; delete copy.match_count; delete copy.repaid_total; return copy;
@@ -271,14 +284,27 @@ async function dependenciesFor(userId: string, c: LedgerCommand, items: CommandI
   }
   return dependencies;
 }
-export async function prepareLedgerCommand(userId: string, conversationId: string, raw: unknown): Promise<{ reply: string; event_context?: LedgerEventContext; approval?: AssistantApproval; export_file?: { name: string; csv: string }; record_context?: { resource: string; rows: Record<string, unknown>[] } }> {
+export async function prepareLedgerCommand(userId: string, conversationId: string, raw: unknown, options: { signal?: AbortSignal } = {}): Promise<{ reply: string; event_context?: LedgerEventContext; approval?: AssistantApproval; export_file?: { name: string; csv: string }; record_context?: { resource: string; rows: Record<string, unknown>[] } }> {
   const command = validateLedgerCommand(raw);
   await ensureResource(command.resource);
   const parent = await resolveParent(userId, command);
-  const selection = buildCommandSelection(userId, command);
-  const rows = command.operation === "create" ? [] : await sql.query(selection.text, selection.params) as LedgerRow[];
-  const count = Number(rows[0]?.match_count || 0);
-  if (count > 50) throw new Error(`匹配到 ${count} 条记录。请补充日期、名称或其他条件，将单次范围缩小至 50 条以内；本次尚未执行。`);
+  const read = ["list", "export", "duplicates"].includes(command.operation);
+  const rows: LedgerRow[] = [];
+  if (read) {
+    let page: LedgerRow[];
+    do {
+      options.signal?.throwIfAborted();
+      const selection = buildCommandSelection(userId, command, { after: rows.at(-1) });
+      page = await sql.query(selection.text, selection.params) as LedgerRow[];
+      rows.push(...page);
+    } while (page.length === 50);
+  } else if (command.operation !== "create") {
+    const selection = buildCommandSelection(userId, command);
+    rows.push(...await sql.query(selection.text, selection.params) as LedgerRow[]);
+    if (Number(rows[0]?.match_count || 0) > 50) throw new Error(`匹配到 ${rows[0].match_count} 条记录。请补充日期、名称或其他条件，将单次范围缩小至 50 条以内；本次尚未执行。`);
+  }
+  options.signal?.throwIfAborted();
+  const count = rows.length;
   if (command.ids.length && rows.length !== command.ids.length) throw new Error("部分目标记录不存在或已变化，请重新查询。");
   if (["list", "export", "duplicates"].includes(command.operation)) {
     let listed = rows;
@@ -289,7 +315,7 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
       listed = [...groups.values()].filter(group => group.length > 1).flat();
     }
     const fields = ["id", ...new Set(rows.flatMap(row => Object.keys(row)).filter(key => key !== "id" && key !== "attachment_key" && key in fieldNames))];
-    const reply = listed.length ? `${command.operation === "duplicates" ? "以下是相同类型、日期、金额和用途的疑似重复候选，尚未删除" : `找到 ${count} 条${resourceNames[command.resource]}`}：\n${listed.map((row, i) => `${i + 1}. ${describe(row)}${row.repaid_total != null ? `，已还 ${row.repaid_total}，未还 ${Math.max(0, Number(row.amount ?? row.item_quantity) - Number(row.repaid_total))}` : ""}${command.resource === "notes" ? `\n   ${String(row.content).slice(0, 2000)}` : ""}`).join("\n")}` : "没有找到符合条件的记录。";
+    const reply = listed.length ? `${command.operation === "duplicates" ? "以下是相同类型、日期、金额和用途的疑似重复候选，尚未删除" : `找到 ${count} 条${resourceNames[command.resource]}`}：\n${listed.map((row, i) => `${i + 1}. ${describe(row)}${row.repaid_total != null ? `，已还 ${row.repaid_total}，未还 ${Math.max(0, Number(row.amount ?? row.item_quantity) - Number(row.repaid_total))}` : ""}${command.resource === "notes" ? `\n   ${String(row.content).slice(0, 2000)}` : ""}`).join("\n")}` : `没有找到符合条件的${command.operation === "duplicates" ? "疑似重复" : ""}${resourceNames[command.resource]}。`;
     return { reply: reply + (listed.length && command.operation !== "duplicates" ? totals(command.resource, listed) : ""), record_context: { resource: command.resource, rows: listed.map(row => Object.fromEntries(Object.entries(row).filter(([key]) => key !== "attachment_key" && (key === "id" || key in fieldNames || ["loan_id", "giftbook_id", "group_id", "repaid_total", "archived_at", "pinned_at"].includes(key))))) }, ...(command.operation === "export" ? { export_file: { name: `${resourceNames[command.resource]}.csv`, csv: "\uFEFF" + fields.map(key => csvCell(fieldNames[key] || key)).join(",") + "\r\n" + rows.map(row => fields.map(key => csvCell(row[key])).join(",")).join("\r\n") } } : {}) };
   }
   // An event-owned source/flow must be changed as a unit, even when found through a normal ledger query.

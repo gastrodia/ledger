@@ -2,6 +2,8 @@ import { validateLedgerEvent } from "@/lib/ledger-event";
 import { validateWorkflow, reconcileRecordWorkflowReceipts } from "@/lib/assistant-workflow";
 import type { AssistantAgentCheckpoint, AssistantAgentMetadata } from "@/lib/assistant-agent-runtime";
 import type { AssistantApproval, AssistantActionResult } from "@/lib/assistant-commands";
+import { validateLedgerCommand } from "@/lib/assistant-commands";
+import { parseAssistantAgentStep } from "@/lib/assistant-agent-step";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const statuses = ["running", "waiting_approval", "completed", "needs_input", "interrupted", "stopped"];
@@ -33,6 +35,20 @@ export function restoreAssistantAgentCheckpoint(value: unknown): AssistantAgentC
   try {
     if (value.workflow_required !== undefined && typeof value.workflow_required !== "boolean") return null;
     if (value.operations !== undefined) validateWorkflow(value.operations, true);
+    if (value.pending_reads !== undefined) {
+      if (!Array.isArray(value.pending_reads) || value.pending_reads.length > 32) return null;
+      for (const read of value.pending_reads) {
+        if (!object(read) || !object(read.plan) || !["result", "analysis"].includes(String(read.mode))) return null;
+        const step = parseAssistantAgentStep(read.step, true);
+        const op = Array.isArray(value.operations) && value.operations.find(item => object(item) && item.id === step.operation_id);
+        if (!object(op) || op.effect !== "read" || !["pending", "running"].includes(String(op.status)) || step.kind !== "read") return null;
+        if (step.tool === "query") {
+          if (op.action !== "query" || read.plan.action !== "query" || !object(read.plan.query)) return null;
+        } else if (step.tool === "records") {
+          if (op.action !== "manage" || read.plan.action !== "manage" || !["list", "duplicates", "export"].includes(validateLedgerCommand(read.plan.command).operation)) return null;
+        } else return null;
+      }
+    }
     if (value.pending_operation_ids !== undefined && (!Array.isArray(value.pending_operation_ids) || !value.pending_operation_ids.length || value.pending_operation_ids.length > 32 || new Set(value.pending_operation_ids).size !== value.pending_operation_ids.length || value.pending_operation_ids.some(id => !Array.isArray(value.operations) || !value.operations.some(item => object(item) && item.id === id)))) return null;
     if (value.duplicate_review !== undefined && (!object(value.duplicate_review) || !text(value.duplicate_review.operation_id, 64) || !text(value.duplicate_review.source_output_id, 36) || !UUID.test(value.duplicate_review.source_output_id) || !text(value.duplicate_review.fingerprint, 64) || typeof value.duplicate_review.answered !== "boolean" || typeof value.duplicate_review.all_matched !== "boolean")) return null;
     if (value.event_resolutions !== undefined && (!Array.isArray(value.event_resolutions) || value.event_resolutions.length > 32 || new Set(value.event_resolutions.map(item => object(item) ? item.operation_id : null)).size !== value.event_resolutions.length

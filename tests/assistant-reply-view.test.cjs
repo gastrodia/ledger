@@ -25,6 +25,13 @@ test('duplicate and empty query states stay read-only; item loans are not format
   const item=recordReplyView('loans',[{counterparty_name:'朋友',subject_type:'item',item_quantity:3,item_unit:'本',repaid_total:1}]);
   assert.equal(item.records[0].amount,'3本');assert.equal(item.records[0].rows.at(-1).value,'2本');
 });
+test('empty result notices identify every record resource and distinguish duplicate candidates',()=>{
+  const {resourceNames}=require('./helpers/assistant-contracts.cjs')('@/lib/assistant-commands');
+  for(const [resource,name] of Object.entries(resourceNames)){
+    assert.equal(recordReplyView(resource,[]).notices[0].text,`没有找到符合条件的${name}，可以调整日期、名称或筛选条件。`);
+  }
+  assert.match(recordReplyView('transactions',[],{operation:'duplicates'}).notices[0].text,/没有找到符合条件的疑似重复收支记录/);
+});
 test('draft approval shows the reviewed snapshot even when the live draft has changed',()=>{
   const draft={id:'d',type:'expense',amount:'12.50',description:'早餐',transaction_date:'2026-10-09'};
   const message={confirmChoice:{batch_id:'b',draft_ids:['d'],snapshot:JSON.stringify([draft])}};

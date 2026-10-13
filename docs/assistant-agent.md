@@ -30,7 +30,9 @@ Agent负责理解本轮完整意图和明确指代，使用Ledger工具处理任
 
 `read/query`读取完整普通收支汇总；daily排除借还本金，cashflow包含其资金流。`read/records`读取现有台账，`read/draft_matches`核对当前草稿。疑似重复只提供证据，不自动删除、合并或跳过；相同字段不能证明同一次发生。金额差额由整数分计算，有限明细不能替代完整汇总。
 
-无歧义、无依赖的独立只读新目标可以用initial_reads逐项执行读取；直接展示真实结果使用result，解释或比较使用analysis。混合写任务、澄清、依赖及已有清单修订走正常循环。优化参数不适用不丢弃任务清单；已完成查询不重放。
+新目标通过set_workflow一次提交完整清单与reads：所有条件明确、无依赖的数据库只读事项必须提供参数，同一事项可以对应多个同类读取。程序从实际查询工具确定query/manage，不要求模型重复分类。参数经过现有清单覆盖、依赖和业务校验后保存为pending_reads，程序逐项执行；只有该事项全部读取成功才标记completed。恢复先执行剩余队列，已完成读取不重放；SQL失败保留原条件并暴露执行失败，不让模型重新规划。
+
+记录读取按日期与ID稳定排序，使用50条一页的游标分页，保留完整日期范围，程序读取全部页。写预览仍保留50条范围限制及原有身份、快照、版本、批准、幂等和执行校验。完整只读结果保存在checkpoint并由程序展示；模型汇总只接收完整统计与记录计数、真实卡片指标，不重写全部明细。所有只读事项完成后调用一次无工具的文字汇总，解释与实际结果分别保存为analysis/reply，完成状态由程序决定。混合写任务、澄清和依赖读取继续使用原有流程。v1历史initial_read/initial_reads仍可恢复进入同一执行队列。
 
 `preview/command`和`preview/event`只生成影响预览。钱款借还及送收礼统一核对台账、资金流水和关联；实物估值不形成付款，也不能取消独立明确的礼金流水。cashflow=none须当前事项明确不计流水的cashflow_basis或已核实的结构化条件。实际付款与礼品价值分别保存，差异不能自动变成额外交易。
 
@@ -67,6 +69,8 @@ npm run build
 node scripts/evaluate-assistant-semantics.mjs --live --repeat 2
 node scripts/evaluate-assistant-workflow.mjs --live
 node scripts/evaluate-assistant-native-tools.mjs --live
+LEDGER_TASKS_PGLITE_MODULE=/tmp/ledger-agent-sql-fixture/node_modules/@electric-sql/pglite \
+node scripts/evaluate-assistant-query-batch.mjs --live --repeat 2
 ```
 
 确定性测试验证实际调度、校验和回放；PGlite集成测试执行隔离的真实PostgreSQL语句，不连接账户DATABASE_URL。真实模型脚本拒绝导入账户数据库，使用合成上下文、工具和凭据，会产生模型调用费用；报告保存在output/，不能提交。`--scenario`可单独选择场景，`--output`可指定报告路径。

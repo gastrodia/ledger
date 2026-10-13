@@ -179,6 +179,38 @@ test('parent deletion previews child records and refuses newly added cascade tar
   assert.equal(result.status, 'failed'); assert.equal(f.writes.length, 0);
 });
 
+test('empty reads identify the queried resource for lists and exports', async () => {
+  const f = fixture({ notes: [] });
+  for (const [resource, name] of Object.entries(commands.resourceNames)) {
+    for (const operation of ['list', 'export']) {
+      const result = await f.server.prepareLedgerCommand('owner', uuid(30), command({ resource, operation, ids: [], values_json: '{}' }));
+      assert.equal(result.reply, `没有找到符合条件的${name}。`);
+      assert.equal(result.record_context.resource, resource);
+      assert.equal(result.record_context.rows.length, 0);
+    }
+  }
+  assert.equal(f.writes.length, 0);
+  assert.equal(f.actions.size, 0);
+});
+
+test('mixed gift query results identify which direction has no records', async () => {
+  const f = fixture({ given_gifts: [{ id: uuid(1), user_id: 'owner', recipient_name: '大伯', gift_date: '2026-10-07', cash_amount: '500' }] });
+  const read = resource => f.server.prepareLedgerCommand('owner', uuid(30), command({ resource, operation: 'list', ids: [], values_json: '{}', filter: { ...emptyFilter, start_date: '2026-10-01', end_date: '2026-10-31' } }));
+  const given = await read('gifts_given');
+  const received = await read('gift_records');
+  assert.match(given.reply, /找到 1 条送礼记录/);
+  assert.equal(received.reply, '没有找到符合条件的收礼记录。');
+  assert.equal(f.writes.length, 0);
+});
+
+test('no duplicate candidates does not claim that the underlying records are absent', async () => {
+  const f = fixture({ transactions: [{ id: uuid(1), user_id: 'owner', type: 'expense', transaction_date: '2026-10-07', amount: '20', description: '午餐' }] });
+  const result = await f.server.prepareLedgerCommand('owner', uuid(30), command({ resource: 'transactions', operation: 'duplicates', ids: [], values_json: '{}' }));
+  assert.equal(result.reply, '没有找到符合条件的疑似重复收支记录。');
+  assert.equal(f.tables.transactions.length, 1);
+  assert.equal(f.writes.length, 0);
+});
+
 test('export is read-only and neutralizes spreadsheet formulas', async () => {
   const f = fixture({ notes: [{ id: uuid(1), user_id: 'owner', title: '=HYPERLINK("evil")', content: '+cmd' }] });
   const result = await f.server.prepareLedgerCommand('owner', uuid(30), command({ operation: 'export', values_json: '{}' }));

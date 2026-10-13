@@ -21,10 +21,11 @@ export const commandSchema = z.object({
   ids: z.array(id).max(50), parent_id: id.nullable(), parent_name: z.string().max(128).nullable(),
   filter: z.object({ keyword: z.string().max(200).nullable(), start_date: date.nullable(), end_date: date.nullable(),
     type: z.string().max(30).nullable(), category_id: id.nullable(), member_id: id.nullable(),
-    status: z.enum(["unpaid", "partial", "outstanding", "settled", "archived", "active", "pinned"]).nullable(),
+    status: z.enum(["unpaid", "partial", "outstanding", "settled", "archived", "active", "pinned"]).nullable().describe("loans: unpaid未归还，partial部分归还，outstanding未结清（未归还及部分归还），settled已结清；notes: active未归档，archived已归档，pinned已置顶。归档和置顶是独立属性。"),
     amount_min: z.number().nonnegative().nullable(), amount_max: z.number().nonnegative().nullable(),
   }).strict(),
   values_json: z.string().max(16000),
+  order: z.enum(["asc", "desc"]).optional().describe("只读记录按日期排序，asc从远到近，desc从近到远；省略为desc。程序自动分页，不拆日期范围。"),
 }).strict();
 export type LedgerCommand = z.infer<typeof commandSchema>;
 export type LedgerRow = Record<string, unknown> & { id: string };
@@ -58,6 +59,7 @@ export function validateLedgerCommand(raw: unknown): LedgerCommand {
     throw new Error(`操作条件不完整：工具参数格式无效，请按command schema修正这些字段：${fields}。无用筛选值填写null，不新增用户未授权的目标。`);
   }
   const c = parsed.data;
+  if (c.order && !["list", "export", "duplicates"].includes(c.operation)) throw new Error("日期排序仅用于只读记录查询。");
   if (new Set(c.ids).size !== c.ids.length || (c.filter.start_date && c.filter.end_date && c.filter.start_date > c.filter.end_date)) throw new Error("操作范围无效。");
   if (c.operation === "reorder" && c.resource !== "categories") throw new Error("当前只有分类支持自定义排序。");
   if (c.operation === "create" && c.resource === "transactions") throw new Error("新收支请先生成待确认草稿，再确认入账。");

@@ -8,6 +8,7 @@ import { draftEditSchema, draftConfirmSchema, navigationSchema } from "@/lib/ass
 import { WORKFLOW_ACTIONS, WORKFLOW_MAX_QUESTIONS, WORKFLOW_MAX_QUESTION_LENGTH, type WorkflowOperation } from "@/lib/assistant-workflow";
 import { ASSISTANT_AGENT_DOMAIN_PROMPT } from "@/lib/assistant-agent-instructions";
 import { assistantQuerySchema } from "@/lib/assistant-output";
+import { recordReplyView } from "@/lib/assistant-reply-view";
 import type { AssistantAgentCheckpoint, AssistantAgentMessage, AssistantAgentStep } from "@/lib/assistant-agent-runtime";
 
 export type AssistantNativeCall = { id: string; name: string; input: unknown };
@@ -39,12 +40,18 @@ const editableDraftActions = [
 const undoSavedBatch = z.object({ action: z.literal("undo"), scope: draftScope }).strict();
 const editableDraftAction = z.discriminatedUnion("action", editableDraftActions);
 const draftAction = z.discriminatedUnion("action", [...editableDraftActions, undoSavedBatch]);
+// For reads the typed tool already determines the domain action. Asking the
+// model to classify it again creates contradictory query/manage proposals.
+const plannedOperation = z.union([
+  operation.extend({ effect: z.enum(["write", "local"]) }),
+  operation.omit({ action: true }).extend({ effect: z.literal("read"), action: z.enum(["query", "manage", "chat"]).optional().describe("已有reads时省略action，由reads.tool确定；草稿核对填chat；依赖前置结果或待澄清且暂无reads的事项填写query/manage。") }),
+]);
 export const assistantNativeSchemas = {
-  set_workflow: z.object({ operations: z.array(operation).min(1).max(32), revision_answers: z.record(operationId, z.string().max(4000)).nullable().optional(),
-    initial_reads: z.array(z.discriminatedUnion("tool", [
-      z.object({ operation_id: operationId, tool: z.literal("query"), parameters: query, reply_mode: z.enum(["result", "analysis"]) }).strict(),
-      z.object({ operation_id: operationId, tool: z.literal("records"), parameters: records.omit({ operation: true }).extend({ operation: z.enum(["list", "duplicates"]) }), reply_mode: z.enum(["result", "analysis"]) }).strict(),
-    ])).max(32).optional() }).strict(),
+  set_workflow: z.object({ operations: z.array(plannedOperation).min(1).max(32), revision_answers: z.record(operationId, z.string().max(4000)).nullable().optional(),
+    reads: z.array(z.discriminatedUnion("tool", [
+      z.object({ operation_id: operationId, tool: z.literal("query"), parameters: query }).strict(),
+      z.object({ operation_id: operationId, tool: z.literal("records"), parameters: records }).strict(),
+    ])).max(32).describe("一次提供所有条件明确、无依赖的query/manage只读事项参数，程序执行查询、分页与排序，再由respond一次汇总。同一事项可有多个资源查询，例如送礼和收礼；统计用query，明细用records。写事项、待澄清或依赖前置结果的事项不放入reads，没有就填[]。") }).strict(),
   revise_workflow: z.object({ changes: z.array(operation.partial().required({ id: true })).min(1).max(32),
     additions: z.array(operation).max(32).optional(), revision_answers: z.record(operationId, z.string().max(4000)).nullable().optional() }).strict(),
   query_statistics: z.object({ ...meta, query }).strict(),
@@ -62,10 +69,10 @@ export const assistantNativeSchemas = {
     changes: z.record(z.string().max(64), z.unknown()).describe("本轮要求修订的字段对象，没修订为{}；有修订不能批准旧方案。"),
   }) }).strict(),
   reuse_result: z.object({ operation_id: operationId, source_output_id: z.string().uuid(), decision: z.literal("same_occurrence"), answer_quote: z.string().max(4000) }).strict(),
-  respond: z.object({ operation_id: optionalOperationReference, reply: z.string().max(24000), needs_input: z.boolean().describe("仅当前业务目标缺少必要事实、需要具体业务澄清时true。查询成功（包括返回疑似重复候选）时false；可选的下一步建议或礼貌问句不应把已完成查询变成等待输入。") }).strict(),
+  respond: z.object({ operation_id: optionalOperationReference, reply: z.string().max(4000).describe("解释或汇总，不逐条重写全部记录；完整明细由程序展示。"), needs_input: z.boolean().describe("仅当前业务目标缺少必要事实、需要具体业务澄清时true。查询成功（包括返回疑似重复候选）时false；可选的下一步建议或礼貌问句不应把已完成查询变成等待输入。") }).strict(),
 };
 const descriptions: Record<keyof typeof assistantNativeSchemas, string> = {
-  set_workflow: "建立完整业务清单，任何业务调用前先保存；纯解释、能力询问、普通回应和单一control直接用respond/control，不建立清单。sources逐字覆盖当前目标及已接受回答。已完成身份和凭据由系统保留。",
+  set_workflow: "一次理解完整目标，建立清单并提供所有独立只读查询的reads参数，程序直接执行，不逐项回到模型。只读事项effect=read且省略action，程序从reads.tool确定query/manage；草稿核对才填chat。sources逐字覆盖当前目标及已接受回答。写事项保留action，仍走预览和确认；纯聊天和单一control不建立清单。",
   revise_workflow: "只修改当前未完成事项的必要条件或错误类型，保留事项ID；只传变动字段，已完成事项和凭据由程序保留。sources是原目标的授权证据，普通回答是追加条件，不能替换原目标或重写sources；只有重新拆分原目标才修订来源。事实回答可直接继续时无需修订，不能为继续任务重建清单。需要新增原目标中的事项可用additions；写变只读必须给出revision_answers。完整目标覆盖、不可变事项和依赖仍校验。",
   query_statistics: "读取普通收支完整SQL汇总，daily排除借还本金，cashflow包含；只指定条件，不提供结果金额。",
   read_records: "查询真实记录、重复候选或导出；所有资源均可查询。不修改数据；values为空对象。",
@@ -104,7 +111,7 @@ export function assistantNativeRecordIds(results: AssistantAgentCheckpoint["tool
 /** Restrict transport to the workflow frontier. Domain validation still checks
  * dependencies, ownership and effects before dispatch. */
 export function assistantNativeToolsForState(operations?: WorkflowOperation[], controlContexts: AssistantControlContext[] = [], resources: AssistantNativeResources = { draft_batch: false, saved_batch: false }) {
-  if (operations?.length && operations.every(op => op.status === "completed")) return { respond: ASSISTANT_NATIVE_TOOLS.respond };
+  if (operations?.length && operations.every(op => op.status === "completed")) return { respond: nativeTool("respond", assistantNativeSchemas.respond.omit({ operation_id: true }).extend({ needs_input: z.literal(false) })) };
   const names = new Set([operations ? "revise_workflow" : "set_workflow", "respond"]);
   if (controlContexts.length) names.add("control");
   if (operations) {
@@ -168,9 +175,17 @@ export function assistantNativeDecision(call: AssistantNativeCall, controlContex
   switch (call.name) {
     case "set_workflow": {
       step.kind = "plan";
-      step.arguments_json = JSON.stringify({ ...p, ...(Array.isArray(p.initial_reads) ? { initial_reads: p.initial_reads.map(read => {
-        const { parameters, ...fields } = read; return { ...fields, arguments_json: JSON.stringify(read.tool === "records" ? toCommand(parameters) : parameters) };
-      }) } : {}) }); break;
+      const reads = p.reads as Array<Record<string, unknown>>;
+      const operations = (p.operations as Array<Record<string, unknown>>).map(op => {
+        if (op.effect !== "read" || op.action === "chat") return op;
+        const tools = new Set(reads.filter(read => read.operation_id === op.id).map(read => read.tool));
+        if (!tools.size && ((op.depends_on as unknown[]).length || (op.questions as unknown[] | undefined)?.length) && op.action) return op;
+        if (tools.size !== 1) throw new AssistantAgentStepError("reads", "每个数据库只读事项须提供同类查询参数，统计和明细应分开列项");
+        return { ...op, action: tools.has("query") ? "query" : "manage" };
+      });
+      step.arguments_json = JSON.stringify({ ...p, operations, reads: reads.map(read => {
+        const { parameters, ...fields } = read; return { ...fields, arguments_json: JSON.stringify(read.tool === "records" ? toCommand(parameters as Record<string, unknown>) : parameters) };
+      }) }); break;
     }
     case "revise_workflow": {
       if (!operations) throw new AssistantAgentStepError("workflow", "尚未建立任务清单");
@@ -253,13 +268,27 @@ export function assistantNativeMessages(messages: AssistantAgentMessage[]): Mode
   return result;
 }
 
-export const ASSISTANT_NATIVE_AGENT_PROMPT = `${ASSISTANT_AGENT_DOMAIN_PROMPT}\n${ASSISTANT_CONTROL_AUTHORIZATION_PROMPT.replaceAll("respond/chat", "respond").replaceAll("plan准备", "set_workflow准备")}\n当前使用Ledger原生工具协议。每轮只调用一个所提供工具；参数是对象，不输出自定义步骤JSON、arguments_json或plan_json。普通回复和澄清使用respond提交reply与needs_input，不直接输出无状态正文。只填写本轮工具schema实际提供的字段；schema没有operation_id/target_reference/user_quote时不填写这些字段，服务端会绑定它们，不用生成空字符串或null占位。
-业务目标先set_workflow保存完整清单，sources逐字覆盖原目标；保留稳定事项ID、完整原文和已接受条件，最多32项。未完成且依赖满足的步骤引用operation_id；纯聊天、完整只读总结及单一control省略operation_id。不修改已完成状态或凭据。
+/** The final read phase interprets facts. It has no tools or authority to change
+ * the agenda, ask for approvals, or fabricate completion status. */
+export function assistantReadSummaryMessages(goal: string, results: AssistantAgentCheckpoint["tool_results"]): ModelMessage[] {
+  return [
+    { role: "system", content: `${ASSISTANT_AGENT_DOMAIN_PROMPT}\n本次只读查询已由程序全部执行完成。用300字以内汇总用户关心的结论、分组和限制；完整记录由程序按原顺序展示，不逐条重写明细，不要求用户回答或确认。不生成工具调用、步骤JSON、任务状态或新业务操作。借还以真实方向和未还金额分组，实物数量不当成金额，空结果据实说明。只解释本次数据，不宣称修改账本。` },
+    { role: "user", content: JSON.stringify({ goal, results: results.filter(item => ["query", "records", "query_comparison", "draft_matches"].includes(item.name)).map(item => ({ name: item.name, operation_id: item.operation_id,
+      result: item.name === "records" ? (() => {
+        const result = item.result as { command: z.infer<typeof commandSchema>; record_context: { resource: string; rows: Record<string, unknown>[] } };
+        return { command: result.command, count: result.record_context.rows.length,
+          metrics: recordReplyView(result.record_context.resource, result.record_context.rows, result.command).metrics };
+      })() : Object.fromEntries(Object.entries(item.result as Record<string, unknown>).filter(([key]) => !["reply", "reply_view"].includes(key))) })) }) },
+  ];
+}
+
+export const ASSISTANT_NATIVE_AGENT_PROMPT = `${ASSISTANT_AGENT_DOMAIN_PROMPT}\n${ASSISTANT_CONTROL_AUTHORIZATION_PROMPT.replaceAll("respond/chat", "respond").replaceAll("plan准备", "set_workflow准备")}\n当前使用Ledger原生工具协议。日期以today为基准；本月或这个月未限定截至今日时使用整月首尾日。每轮提交一个决定；set_workflow中的reads一次提供多个独立查询，由程序执行后再调用模型汇总。参数是对象，不输出自定义步骤JSON、arguments_json或plan_json。普通回复和澄清使用respond提交reply与needs_input，不直接输出无状态正文。只填写本轮工具schema实际提供的字段；schema没有operation_id/target_reference/user_quote时不填写这些字段，服务端会绑定它们，不用生成空字符串或null占位。
+业务目标先set_workflow保存完整清单与全部独立查询参数reads，sources逐字覆盖原目标；保留稳定事项ID、完整原文和已接受条件，最多32项。未完成且依赖满足的步骤引用operation_id；纯聊天、完整只读总结及单一control省略operation_id。不修改已完成状态或凭据。
 sources分别引用各事项对应的原文片段，合起来覆盖全部目标。多个同类action可共享原句；不同action不能把同一完整目标重复当作各自来源。明确事实有多次发生时保留独立身份，不重复同一次发生。保存原文及已接受回答，不增删目标或靠改sources绕过校验。已有清单不再重建；事实回答能继续就执行下一步。确需修订时revise_workflow只传未完成事项的改动，程序组装完整清单并执行原有全部校验，已完成事项无需也不能让模型重写。
-纯解释/能力询问/普通回应直接respond({reply:具体回答,needs_input:false})；没有业务调用不建立清单。可选标识无对应对象时省略或填null，不填空字符串。查当前草稿是否已录入属于chat/read事项，随后match_drafts；不建立record或query事项，不用initial_reads替代草稿逐笔核对。核对成功后respond needs_input=false完成原只读任务；用户没要求处置候选时不追问删除/跳过/批准。
+纯解释/能力询问/普通回应直接respond({reply:具体回答,needs_input:false})；没有业务调用不建立清单。可选标识无对应对象时省略或填null，不填空字符串。查当前草稿是否已录入属于chat/read事项，随后match_drafts；不建立record或query事项，不用reads替代草稿逐笔核对。核对成功后respond needs_input=false完成原只读任务；用户没要求处置候选时不追问删除/跳过/批准。
 effect：query/chat及manage只读为read；record/event/confirm/undo及manage写为write；edit/update/remove/navigate/control为local。未解决questions先读取或澄清，不能准备有歧义审批。分类和成员可由卡片选择，不单独造成业务问题。
 实物的金额、估值与本次实际购买付款分别核对。原文只提供实物及金额、但没有明确是否本次付款时，把这一资金流歧义保留在该事项questions并具体澄清；不能把金额默认当估值而漏掉本次付款，也不能把估值默认当现金支出。澄清只处理这项条件，保留其他已明确的礼金和普通收支。
-新清单只有独立无歧义只读事项时，可用initial_reads直接展示真实结果(reply_mode=result)或等待解释(reply_mode=analysis)；参数直接填写parameters对象。写任务、依赖或清单修订走正常单步调用，不丢弃清单。写变只读必须在revision_answers引用本轮已接受回答。
+set_workflow必须一次填写所有条件明确、无依赖的query/manage只读事项的reads，不能留到逐项read_records/query_statistics调用。每个read引用对应事项ID，同一事项可有多个资源查询。程序按原范围自动分页与排序，不能为记录数量把月份拆成日期段；数据库明细使用records，不用统计query代替明细。借还未结清为outstanding，包含部分归还；notes未归档为active，置顶为pinned，两者独立。日期排序用command.order=desc/asc。参数填写parameters对象，values={}。成功读取直接完成对应事项；全部事项完成后只respond一次解释汇总，needs_input=false，不需control查询任务状态。写事项、待澄清和依赖前置结果的查询不放入reads，仍按既有单步流程处理。写变只读必须在revision_answers引用本轮已接受回答。
 prepare_records由系统从全部covered_operation_ids的sources及已接受回答提取事实，当前operation_id必须包含其中。日期按初始today；回答明确修订相对日期才用answer_today。不重建旧草稿或重复已处理事项。
 草稿与已保存记录是不同对象。edit只编辑未入账草稿字段，update只修改草稿成员；数据库中的金额修改必须用manage/prepare_command。审批ID不是记录ID，也不是草稿批次ID。对象不存在时不能使用对应工具；读取后发现自己的清单类型不符，修订同一事项再继续，不据清单猜对象类型。
 prepare_command/read_records.command.values是对象，按resource和operation的schema填写，不使用values_json。未改字段省略。已有确定ID或唯一名称/日期时直接prepare_command，服务端重新读取范围及快照；不要仅为取得ID额外list。需要未知的现有字段或关联信息时才先读。日期用YYYY-MM-DD，金额按工具单位，图标头像仅使用可用值。钱款借还及送收礼统一prepare_event；实物估值不形成流水，cashflow=none需完整事项明确不计流水的依据。
