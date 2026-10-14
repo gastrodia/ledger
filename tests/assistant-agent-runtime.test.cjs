@@ -972,6 +972,23 @@ test('an auxiliary read cannot hide a write clarification behind a completed que
 
 const controlContext = extra => ({target_type:'action',target_id:ACTION,operation:'update',revision:'v1',summary:'早餐20改22',status:'pending',...extra});
 const controlStep = (message,extra={})=>({...choose('control',null,{target_type:'action',target_id:ACTION,operation:'update',revision:'v1',decision:'approve',target_reference:null,requested_operation:null,changes_json:'{}',user_quote:message,...extra}),operation_id:null});
+test('self status is an observation and does not change pending work into a question across worker waves', async () => {
+  const goal = '查询当前账本明细';
+  const checkpoint = { version: 2, workflow_required: true, goal_id: ID, goal, status: 'running', steps: 1,
+    messages: [], tool_results: [], pending_approval: null, preview_fingerprints: [],
+    operations: [{ id: 'records', label: goal, action: 'manage', effect: 'read', depends_on: [], sources: [goal], status: 'pending' }] };
+  const observed = fixture([controlStep(goal, { target_type: 'task', target_id: ID, operation: 'task', revision: '1', decision: 'status' })]);
+  const first = await observed.run({ goal, checkpoint, maxSteps: 1 });
+  assert.equal(first.agent.status, 'running'); assert.equal(first.agent.awaiting_answer, undefined);
+  assert.equal(first.agent.operations[0].status, 'pending');
+  const saved = observed.checkpoints.at(-1);
+  assert.equal(saved.outputs, undefined);
+  assert.equal(saved.tool_results.at(-1).name, 'task_status');
+  const resumed = fixture([{ ...choose('read', 'records', command()), operation_id: 'records' }, { ...respond('完成'), operation_id: null }]);
+  const result = await resumed.run({ goal, checkpoint: saved });
+  assert.equal(result.agent.status, 'completed'); assert.equal(result.agent.awaiting_answer, undefined);
+  assert.equal(resumed.calls.filter(call => call[0] === 'command').length, 1);
+});
 test('semantic control journals identity, delegates one persisted decision, and resumes without replaying the original goal',async()=>{
  const goal='按这个方案执行';let delegated=0;
  const f=fixture([controlStep(goal)],{adapters:{controlContexts:[controlContext()],control:async control=>{delegated++;assert.ok(f.checkpoints.at(-1).tool_results.some(r=>r.name==='control_request'));return {action:'control',control,reply:'准备处理',drafts:[],query:null};}}});

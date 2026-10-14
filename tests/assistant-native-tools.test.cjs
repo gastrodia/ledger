@@ -24,6 +24,21 @@ const query = { start_date: '2026-10-01', end_date: '2026-10-31', type: 'expense
 const command = { resource: 'notes', operation: 'create', scope: 'one', ids: [], parent_id: null, parent_name: null,
   filter: { keyword: null, start_date: null, end_date: null, type: null, category_id: null, member_id: null, status: null, amount_min: null, amount_max: null }, values: { content: '2026-10-14 下午三点取快递' } };
 
+test('read tools determine agenda actions even when the model repeats a conflicting classification', () => {
+  const input = { operations: [
+    { ...operation, action: 'chat' },
+    { ...operation, id: 'matches', action: 'manage' },
+  ].map(({ status, ...op }) => { void status; return op; }), reads: [
+    { operation_id: 'query', tool: 'records', parameters: { ...command, operation: 'list', values: {} } },
+    { operation_id: 'matches', tool: 'draft_matches' },
+  ] };
+  assert.ok(native.assistantNativeSchemas.set_workflow.safeParse(input).success);
+  const step = call('set_workflow', input).step;
+  const args = JSON.parse(step.arguments_json);
+  assert.deepEqual(args.operations.map(op => op.action), ['manage', 'chat']);
+  assert.equal(args.reads[1].arguments_json, '{}');
+});
+
 test('typed command/control parameters reach existing domain contracts without JSON strings in transport', () => {
   const prepared = call('prepare_command', { operation_id: 'note', command });
   assert.equal(prepared.step.kind, 'preview');

@@ -230,6 +230,11 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
   let lastValidation = "", repeatedValidation = 0;
   const prepareReadPlan = async (step: AssistantAgentStep): Promise<AssistantPlan> => {
     const args = json(step.arguments_json);
+    if (step.tool === "draft_matches") {
+      if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length) throw new Error("草稿核对参数必须为{}，仅核对本次上下文中的草稿。");
+      if (!o.adapters.draftMatches) throw new Error("当前无法核对草稿，请补充具体账目。");
+      return safePlan("正在逐笔核对草稿是否已录入");
+    }
     if (step.tool === "query") {
       if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).some(key => !["scope", "start_date", "end_date", "type", "category_id", "member_id", "keyword"].includes(key))) throw new Error("查询参数格式无效，仅可填写账本日期和筛选条件。");
       return o.adapters.validatePlan({ action: "query", reply: "正在查询", drafts: [], query: args });
@@ -278,6 +283,12 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
     if (verificationRequired) throw new Error("上一操作已执行，请先读取实际记录核对，不能仅凭模型回复宣布完成。");
     return plan;
   };
+  const runReadPlan = async (step: AssistantAgentStep, plan: AssistantPlan): Promise<AssistantPlan | null> => {
+    if (step.tool !== "draft_matches") return runPlan(plan);
+    const matches = await o.adapters.draftMatches!(signal);
+    signal.throwIfAborted(); append("draft_matches", matches);
+    return null;
+  };
   const runPendingReads = async () => {
     const replies: string[] = [];
     const singleResult = c.pending_reads?.length === 1 && c.operations?.length === 1;
@@ -287,15 +298,18 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       const operation = workflowOperation(c.operations!, read.step.operation_id);
       c.current_operation_id = operation.id; operation.status = "running";
       const toolId = `agent_read_${c.steps}_${c.tool_results.length}`;
-      o.execution?.start(toolId, assistantToolExecutionLabel(read.plan), "tool", o.adapters.toolDetails?.(read.plan) || []);
+      const draftMatching = read.step.tool === "draft_matches";
+      o.execution?.start(toolId, draftMatching ? "逐笔核对草稿是否已录入" : assistantToolExecutionLabel(read.plan), "tool",
+        draftMatching ? ["按类型与金额检查邻近日期的已保存流水，核对商户及日期偏差"] : o.adapters.toolDetails?.(read.plan) || []);
       let delivery: AssistantPlan | null;
-      try { delivery = await runPlan(read.plan); signal.throwIfAborted(); }
+      try { delivery = await runReadPlan(read.step, read.plan); signal.throwIfAborted(); }
       catch (error) { o.execution?.finish(toolId, ["查询未完成，原条件和已完成结果已保留"], "failed"); await save(); throw error; }
       const observed = c.tool_results.at(-1)?.result as { reply?: string; limited?: boolean; record_context?: AssistantPlan["record_context"]; facts?: { summary?: { count?: unknown } } };
       if (observed.limited) throw new Error("查询结果不完整，不能完成对应事项。");
       const rawCount = observed.record_context?.rows.length ?? observed.facts?.summary?.count;
       const count = rawCount == null ? NaN : Number(rawCount);
-      o.execution?.finish(toolId, [...(o.adapters.toolDetails?.(read.plan) || []), Number.isSafeInteger(count) && count >= 0 ? `找到 ${count} ${read.plan.command ? "条" : "笔"}记录` : "查询完成"]);
+      o.execution?.finish(toolId, draftMatching ? ["逐笔核对完成；相似记录仅为候选，尚未执行更改"]
+        : [...(o.adapters.toolDetails?.(read.plan) || []), Number.isSafeInteger(count) && count >= 0 ? `找到 ${count} ${read.plan.command ? "条" : "笔"}记录` : "查询完成"]);
       c.pending_reads.shift();
       if (!c.pending_reads.some(next => next.step.operation_id === operation.id)
         && (c.version === 2 || typeof observed.reply === "string" && observed.reply.trim())) operation.status = "completed";
@@ -404,8 +418,12 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
               c.awaiting_answer = false; c.awaiting_delivery = false; delete c.pending_plan;
               return finish(safePlan("已取消原任务的未完成事项，已完成账目保留。"), "stopped");
             }
-            c.awaiting_answer = !c.operations || c.operations.some(item => item.status !== "completed");
-            return finish(safePlan(`当前任务：${assistantControlTaskStatus(c.status, c.operations)}。`), c.awaiting_answer ? "needs_input" : "completed");
+            // Observing progress does not create a question or settle work.
+            append("task_status", { status: c.status, operations: c.operations || [], awaiting_answer: !!c.awaiting_answer,
+              reply: `当前任务：${assistantControlTaskStatus(c.status, c.operations)}。` });
+            o.execution?.finish(id, ["已读取任务状态，继续原任务"], "done", "读取任务状态");
+            await save();
+            continue;
           }
           const operation = s.operation_id != null ? workflowOperation(c.operations || [], s.operation_id) : undefined;
           if (operation && (operation.action !== "control" || operation.status !== "pending" || operation.questions?.length)) throw new Error("控制步骤必须绑定未完成且无歧义的control事项。");
@@ -451,7 +469,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
               const operation = operations.find(op => op.id === operationId);
               if (!operation || args.reads === undefined && preparedReads.some(read => read.step.operation_id === operationId)
                 || operation.effect !== "read" || operation.depends_on.length || operation.questions?.length
-                || !(hint.tool === "query" && operation.action === "query" || hint.tool === "records" && operation.action === "manage")) throw new Error("快捷查询必须对应清单中不同的只读事项ID。");
+                || !(hint.tool === "query" && operation.action === "query" || hint.tool === "records" && operation.action === "manage" || hint.tool === "draft_matches" && operation.action === "chat")) throw new Error("读取工具必须与无依赖、无待澄清问题的只读事项类型一致。");
               const step = parseAssistantAgentStep({ kind: "read", tool: hint.tool, arguments_json: hint.arguments_json,
                 operation_id: operation.id, plan_json: null, needs_input: false }, true);
               const readPlan = await prepareReadPlan(step);
@@ -585,12 +603,10 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
         else {
           const args = json(s.arguments_json);
           if (s.tool === "draft_matches") {
-            if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length) throw new Error("草稿核对参数必须为{}，仅核对本次上下文中的草稿。");
-            if (!o.adapters.draftMatches) throw new Error("当前无法核对草稿，请补充具体账目。");
+            const readPlan = await prepareReadPlan(s);
             activeToolId = toolId;
             o.execution?.start(toolId, "逐笔核对草稿是否已录入", "tool", ["按类型与金额检查邻近日期的已保存流水，核对商户及日期偏差"]);
-            const matches = await o.adapters.draftMatches(signal);
-            signal.throwIfAborted(); append("draft_matches", matches);
+            await runReadPlan(s, readPlan);
             o.execution?.finish(toolId, ["逐笔核对完成；相似记录仅为候选，尚未执行更改"]);
             await save();
             continue;

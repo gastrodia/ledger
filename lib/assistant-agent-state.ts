@@ -46,6 +46,8 @@ export function restoreAssistantAgentCheckpoint(value: unknown): AssistantAgentC
           if (op.action !== "query" || read.plan.action !== "query" || !object(read.plan.query)) return null;
         } else if (step.tool === "records") {
           if (op.action !== "manage" || read.plan.action !== "manage" || !["list", "duplicates", "export"].includes(validateLedgerCommand(read.plan.command).operation)) return null;
+        } else if (step.tool === "draft_matches") {
+          if (op.action !== "chat" || read.plan.action !== "chat" || step.arguments_json !== "{}") return null;
         } else return null;
       }
     }

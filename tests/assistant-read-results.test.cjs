@@ -50,6 +50,20 @@ test('single query presentation stays intact and repeated query filters retain o
   assert.equal(result.read_results[1].id, 'newer');
 });
 
+test('draft comparison controls and database results both survive regardless of read order', () => {
+  const c = checkpoint(), comparison = { ...view, kind: 'draft_matches', title: '草稿核对' };
+  c.operations.push({ id: 'drafts', effect: 'read' });
+  const match = { call_id: 'draft-match', name: 'draft_matches', operation_id: 'drafts', result: { reply: '逐笔结果', reply_view: comparison } };
+  const records = c.tool_results[0];
+  for (const order of [[match, records], [records, match]]) {
+    c.tool_results = order;
+    const result = withAssistantReadResults(plan, c);
+    assert.equal(result.reply_view, comparison);
+    assert.equal(result.read_results.length, 1);
+    assert.equal(result.read_results[0].id, records.call_id);
+  }
+});
+
 function loadComponent(file, cache = new Map()) {
   if (cache.has(file)) return cache.get(file);
   const exports = {}; cache.set(file, exports);
