@@ -1,0 +1,26 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "app/api/assistant/route.ts": {
+      "regions": ["sin1"]
+    },
+    "app/api/assistant/tasks/route.ts": {
+      "regions": ["sin1"]
+    },
+    "app/api/assistant/tasks/[id]/route.ts": {
+      "regions": ["sin1"]
+    },
+    "app/api/assistant/tasks/continue/route.ts": {
+      "regions": ["sin1"]
+    },
+    "app/api/assistant/transcribe/route.ts": {
+      "regions": ["sin1"]
+    },
+    "app/api/assistant/transcribe/realtime/route.ts": {
+      "regions": ["sin1"]
+    },
+    "app/api/stats/ai-summary/route.ts": {
+      "regions": ["sin1"]
+    }
+  }
+}

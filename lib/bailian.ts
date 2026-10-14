@@ -162,6 +162,31 @@ function requireCompletedTransport(body: ReadableStream<Uint8Array>) {
 
 type BailianOperation = "text" | "object" | "stream" | "object-stream" | "tool";
 
+// These are transport diagnostics, never provider messages, bodies or URLs.
+const NETWORK_ERROR_CODES = new Set([
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_ABORTED",
+  "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENETUNREACH", "EHOSTUNREACH", "EPIPE",
+  "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+]);
+const NETWORK_ERROR_NAMES = new Set([
+  "Error", "TypeError", "AggregateError", "ConnectTimeoutError", "HeadersTimeoutError", "BodyTimeoutError", "SocketError", "AbortError", "TimeoutError",
+]);
+
+function networkFailureDetails(error: unknown) {
+  const codes = new Set<string>(), names = new Set<string>();
+  const pending: unknown[] = [error];
+  // SDK wrappers and Node AggregateError may both contain the original failure.
+  for (let index = 0; index < pending.length && index < 12; index++) {
+    const value = pending[index];
+    if (!value || typeof value !== "object") continue;
+    const current = value as { code?: unknown; name?: unknown; cause?: unknown; lastError?: unknown; errors?: unknown[] };
+    if (typeof current.code === "string" && NETWORK_ERROR_CODES.has(current.code)) codes.add(current.code);
+    if (typeof current.name === "string" && NETWORK_ERROR_NAMES.has(current.name)) names.add(current.name);
+    pending.push(current.cause, current.lastError, ...(Array.isArray(current.errors) ? current.errors.slice(0, 4) : []));
+  }
+  return { codes: [...codes], names: [...names] };
+}
+
 function failureClassification(error: BailianError) {
   if (["timeout", "cancelled", "invalid_output", "truncated", "empty", "incomplete", "incomplete_stream"].includes(error.code)) return error.code;
   if (error.status === 402 || /Arrearage|InsufficientBalance/i.test(error.code)) return "billing";
@@ -178,16 +203,21 @@ function requestSettings(request: BailianRequest, operation: BailianOperation, e
   const config = bailianConfig();
   const controller = new AbortController();
   const signal = AbortSignal.any([...(externalSignal ? [externalSignal] : []), AbortSignal.timeout(timeoutMs), controller.signal]);
+  const startedAt = Date.now();
+  let transportError: unknown, upstreamStatus: number | undefined, responseHeadersMs: number | undefined;
   const provider = createOpenAICompatible({
     name: "bailian", ...config, supportsStructuredOutputs: false, includeUsage: true,
     transformRequestBody: transformBailianBody,
     fetch: async (input, init) => {
-      const response = await fetch(input, { ...init, cache: "no-store" });
+      let response: Response;
+      try { response = await fetch(input, { ...init, cache: "no-store" }); }
+      catch (error) { transportError = error; throw error; }
+      upstreamStatus = response.status;
+      responseHeadersMs = Date.now() - startedAt;
       if (!response.ok || !response.body || !response.headers.get("content-type")?.includes("text/event-stream")) return response;
       return new Response(requireCompletedTransport(response.body), { status: response.status, statusText: response.statusText, headers: response.headers });
     },
   });
-  const startedAt = Date.now();
   const telemetryId = typeof request.telemetryId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(request.telemetryId)
     ? request.telemetryId : undefined;
   let firstOutputMs: number | undefined;
@@ -212,9 +242,13 @@ function requestSettings(request: BailianRequest, operation: BailianOperation, e
     const failure = requestFailure(error, signal);
     if (!terminalRecorded) {
       terminalRecorded = true;
-      // Provider codes, payloads and error messages can contain sensitive data.
-      // Record only our allowlisted classification and public HTTP status.
-      console.info("AI request failed", { ...metadata(), failure: failureClassification(failure), status: bailianFailure(failure).status });
+      // The public status is our classification, not necessarily an upstream
+      // HTTP response. Retain allowlisted causes before SDK normalization.
+      console.info("AI request failed", { ...metadata(), failure: failureClassification(failure), status: bailianFailure(failure).status,
+        endpointHost: new URL(config.baseURL).hostname, region: process.env.VERCEL_REGION,
+        responseReceived: upstreamStatus !== undefined, upstreamStatus, responseHeadersMs,
+        network: networkFailureDetails(transportError ?? error),
+      });
     }
     return failure;
   };

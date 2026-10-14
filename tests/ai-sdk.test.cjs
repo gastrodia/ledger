@@ -570,6 +570,40 @@ test('SDK failure telemetry records one allowlisted terminal classification with
   assert.equal(rawLogs.length, 0, 'SDK default logging must not expose raw provider errors');
 });
 
+test('network telemetry retains nested connection errors without exposing credentials or error messages', async () => {
+  const secret = 'private-response-secret secret-fixture https://private.example';
+  const cause = Object.assign(new Error(secret), { name: 'ConnectTimeoutError', code: 'UND_ERR_CONNECT_TIMEOUT' });
+  const transport = new TypeError(secret, { cause });
+  const f = fixture(() => { throw transport; }, { VERCEL_REGION: 'hkg1' });
+  await assert.rejects(f.adapter.bailianText({ model: 'fixture-model', messages: prompt }));
+  const failures = f.logs.filter(([event]) => event === 'AI request failed');
+  assert.equal(failures.length, 1);
+  const details = failures[0][1];
+  assert.equal(details.responseReceived, false);
+  assert.equal(details.upstreamStatus, undefined);
+  assert.equal(details.endpointHost, 'dashscope.aliyuncs.com');
+  assert.equal(details.region, 'hkg1');
+  assert.deepEqual([...details.network.codes], ['UND_ERR_CONNECT_TIMEOUT']);
+  assert.ok(details.network.names.includes('ConnectTimeoutError'));
+  assert.ok(!JSON.stringify(f.logs).includes(secret));
+});
+
+test('network telemetry distinguishes aggregate DNS/TCP errors from an upstream HTTP failure', async () => {
+  const errors = ['ENOTFOUND', 'ECONNREFUSED', 'private-response-secret'].map(code => Object.assign(new Error('secret-fixture'), { code }));
+  const aggregate = Object.assign(new Error('secret-fixture'), { name: 'AggregateError', errors });
+  const network = fixture(() => { throw new TypeError('secret-fixture', { cause: aggregate }); });
+  await assert.rejects(network.adapter.bailianText({ model: 'fixture-model', messages: prompt }));
+  assert.deepEqual([...network.logs.at(-1)[1].network.codes], ['ENOTFOUND', 'ECONNREFUSED']);
+  assert.ok(!JSON.stringify(network.logs).includes('private-response-secret'));
+  assert.ok(!JSON.stringify(network.logs).includes('secret-fixture'));
+  const http = fixture(Response.json({ error: { code: 'private-response-secret', message: 'secret-fixture' } }, { status: 500 }));
+  await assert.rejects(http.adapter.bailianText({ model: 'fixture-model', messages: prompt }));
+  assert.equal(http.logs.at(-1)[1].responseReceived, true);
+  assert.equal(http.logs.at(-1)[1].upstreamStatus, 500);
+  assert.ok(http.logs.at(-1)[1].responseHeadersMs >= 0);
+  assert.deepEqual([...http.logs.at(-1)[1].network.codes], []);
+});
+
 test('unsupported workspace models surface a deployment-range error without exposing provider details', async () => {
   const f = fixture(() => Response.json({ error: { code: 'Model.Unsupported', message: 'private-response-secret secret-fixture' } }, { status: 400 }));
   await assert.rejects(f.adapter.bailianObjectStream({ model: 'fixture-model', messages: prompt, schema: assistantOutput.ASSISTANT_OUTPUT_SCHEMA }, () => {}), error => {
