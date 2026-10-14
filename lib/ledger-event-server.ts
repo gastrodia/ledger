@@ -25,6 +25,21 @@ const normalizedItems = (items: unknown) => JSON.stringify((Array.isArray(items)
   item_name: item.item_name, quantity: Number(item.quantity), unit: item.unit || null,
   estimated_value: item.estimated_value == null ? null : Number(item.estimated_value),
 })));
+/** Preview and commit must use the same live-ledger facts, regardless of how a record was entered. */
+function duplicateLedgerCandidates(userId: string, input: LedgerEventInput) {
+  const kind = input.kind!, source = eventSource(kind), repayment = eventIsRepayment(kind);
+  const amountColumn = kind === "gift_given" ? "cash_amount" : repayment ? "repaid_amount" : "amount";
+  const dateColumn = kind.startsWith("gift_") ? "gift_date" : repayment ? "repaid_at" : "occurred_at";
+  const counterpartyColumn = kind === "gift_given" ? "s.recipient_name" : repayment ? "loan.counterparty_name" : "s.counterparty_name";
+  return { text: `SELECT s.id,s.created_at,to_jsonb(s) AS current,
+      ${kind === "gift_received" ? "COALESCE(s.group_id,s.id)" : "s.id"} AS source_id,
+      TO_CHAR(s.${dateColumn},'YYYY-MM-DD') AS source_date,${counterpartyColumn} AS counterparty
+    FROM ${source.table} s ${repayment ? "JOIN loans loan ON loan.id=s.loan_id AND loan.user_id=s.user_id" : ""}
+    WHERE s.user_id=$1 AND ${counterpartyColumn}=$2 AND COALESCE(s.${amountColumn},0)=$3::numeric/100 AND s.${dateColumn}::date=$4::date
+      ${kind === "gift_received" ? "AND s.direction='received' AND s.gift_type='cash'" : ""}
+      ${eventIsLoan(kind) ? `AND ${repayment ? "loan" : "s"}.subject_type='money' AND ${repayment ? "loan" : "s"}.direction='${kind === "loan_lent" || kind === "repayment_received" ? "lent" : "owed"}'` : ""}`,
+    values: [userId, input.counterparty, input.amount_cents, input.date] };
+}
 function giftSummary(input: LedgerEventInput, hasFlow: boolean, saved = false) {
   if (input.kind !== "gift_given") return "";
   const known = (input.items || []).every(item => item.estimated_value !== null);
@@ -230,35 +245,23 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
     input.book_id = parentBook?.id || bookCreate!.id;
   }
   if (input.operation === "create" && !input.allow_duplicate) {
-    const source = eventSource(kind), repayment = eventIsRepayment(kind);
-    const amountColumn = kind === "gift_given" ? "cash_amount" : repayment ? "repaid_amount" : "amount";
-    const dateColumn = kind.startsWith("gift_") ? "gift_date" : repayment ? "repaid_at" : "occurred_at";
-    const counterpartyColumn = kind === "gift_given" ? "s.recipient_name" : repayment ? "loan.counterparty_name" : "s.counterparty_name";
-    // Event inputs are audit snapshots. Only the live ledger determines duplicate candidates,
-    // including filtering before the count/limit and rendering from that same source snapshot.
-    const existing = await sql.query(`SELECT e.id,e.created_at,e.input,e.source_id,to_jsonb(s) AS current,
-        TO_CHAR(s.${dateColumn},'YYYY-MM-DD') AS source_date,${counterpartyColumn} AS counterparty,COUNT(*) OVER() AS total
-      FROM ledger_events e JOIN ${source.table} s ON s.id=e.source_id AND s.user_id=e.user_id
-      ${repayment ? "JOIN loans loan ON loan.id=s.loan_id AND loan.user_id=s.user_id" : ""}
-      WHERE e.user_id=$1 AND e.state='saved' AND e.kind=$2 AND e.source_type=$6
-        AND ${counterpartyColumn}=$3 AND COALESCE(s.${amountColumn},0)=$4::numeric/100 AND s.${dateColumn}::date=$5::date
-        ${kind === "gift_received" ? "AND s.direction='received' AND s.gift_type='cash'" : ""}
-        ${eventIsLoan(kind) ? `AND ${repayment ? "loan" : "s"}.subject_type='money' AND ${repayment ? "loan" : "s"}.direction='${kind === "loan_lent" || kind === "repayment_received" ? "lent" : "owed"}'` : ""}
-      ORDER BY e.created_at DESC,e.id LIMIT 5`, [userId, kind, input.counterparty, input.amount_cents, input.date, source.type]);
+    const source = eventSource(kind), candidates = duplicateLedgerCandidates(userId, input);
+    const existing = await sql.query(`SELECT candidates.*,COUNT(*) OVER() AS total FROM (${candidates.text}) candidates
+      ORDER BY created_at DESC,id LIMIT 5`, candidates.values);
     if (existing.length) {
       const records = await Promise.all(existing.map(async row => {
-        const registered = validateLedgerEvent(row.input);
         const current = row.current as Row;
         const flows = await sql.query(`SELECT t.*,TO_CHAR(t.transaction_date,'YYYY-MM-DD') AS date,m.name AS member_name,c.name AS category_name
           FROM transaction_links l JOIN transactions t ON t.id=l.transaction_id AND t.user_id=l.user_id
           LEFT JOIN members m ON m.id=t.member_id AND m.user_id=t.user_id
           LEFT JOIN categories c ON c.id=t.category_id AND c.user_id=t.user_id
           WHERE l.user_id=$1 AND l.source_type=$2 AND l.source_id=$3 ORDER BY t.transaction_date DESC,t.created_at,t.id`, [userId, source.type, row.source_id]);
-        const detail = { ...registered, amount_cents: sourceAmount(current, kind),
+        const detail = { ...input, amount_cents: sourceAmount(current, kind),
           counterparty: String(row.counterparty), date: String(row.source_date), note: current.notes as string | null,
-          ...(kind === "gift_given" ? { items: current.items as LedgerEventInput["items"], occasion: current.occasion as string | null } : {}) };
+          items: kind === "gift_given" ? current.items as LedgerEventInput["items"] : null,
+          occasion: kind === "gift_given" ? current.occasion as string | null : null };
         const preview = eventActionPreview(detail, "", { rows: [] });
-        return { id: String(row.id), title: `${eventKinds[registered.kind!]} · ${detail.counterparty}`,
+        return { id: String(row.id), title: `${eventKinds[kind]} · ${detail.counterparty}`,
           subtitle: [detail.date, detail.occasion].filter(Boolean).join(" · "),
           amount: money(detail.amount_cents!), rows: [
             { label: "登记时间", value: new Date(String(row.created_at)).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) },
@@ -379,7 +382,10 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
     guard("(SELECT md5(COALESCE(jsonb_agg(to_jsonb(r) ORDER BY id),'[]'::jsonb)::text) FROM loan_repayments r WHERE user_id=$1 AND loan_id=$2)=$3", [userId, p.loanState.id, p.loanState.revision]);
     if (input.operation === "undo" && !eventIsRepayment(kind)) guard("NOT EXISTS(SELECT 1 FROM loan_repayments WHERE user_id=$1 AND loan_id=$2)", [userId, p.sourceId]);
   }
-  if (input.operation === "create" && !input.allow_duplicate) guard("NOT EXISTS(SELECT 1 FROM ledger_events WHERE user_id=$1 AND state='saved' AND kind=$2 AND input->>'counterparty'=$3 AND (input->>'amount_cents')::bigint=$4 AND input->>'date'=$5)", [userId, kind, input.counterparty, input.amount_cents, input.date]);
+  if (input.operation === "create" && !input.allow_duplicate) {
+    const candidates = duplicateLedgerCandidates(userId, input);
+    guard(`NOT EXISTS(${candidates.text})`, candidates.values);
+  }
   const previousIds = p.eventBefore ? p.eventBefore.payments ? (p.eventBefore.payments as PreparedEventPayment[]).map(payment => payment.transactionId) : p.eventBefore.transaction_id ? [String(p.eventBefore.transaction_id)] : [] : [];
   guard("(SELECT COUNT(*) FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3)=$4 AND NOT EXISTS(SELECT 1 FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3 AND NOT(transaction_id=ANY($5::varchar[])))", [userId, source.type, p.sourceId, previousIds.length, previousIds]);
   for (const payment of payments) {

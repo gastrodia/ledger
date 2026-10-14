@@ -420,7 +420,7 @@ test('duplicate event review displays actual saved gift and each live linked pay
   const skip = review.event_choices.find(c=>c.decision==='skip_creation');
   assert.equal(skip.input.allow_duplicate,false);
   const record = skip.preview.records[0];
-  assert.equal(record.id,saved.event_context.event_id);
+  assert.equal(record.id,(await f.db.query('SELECT source_id FROM ledger_events WHERE id=$1',[saved.event_context.event_id])).rows[0].source_id);
   const detail = JSON.stringify(record);
   for(const expected of ['生日','围巾','¥50.00','¥200.00','2026-10-08','买围巾','本人','明确支出','2 笔']) assert.ok(detail.includes(expected),expected);
   const positive = await f.prepare(review.event_choices.find(c=>!c.decision).input);
@@ -439,10 +439,10 @@ test('duplicate review excludes deleted ledger sources for all six kinds while r
     const saved = await f.approve(await f.prepare(input));
     const event = (await f.db.query('SELECT * FROM ledger_events WHERE id=$1', [saved.event_context.event_id])).rows[0];
     const review = await f.prepare(input);
-    assert.equal(review.event_choices[0].preview.records[0].id, event.id, `${kind}: live ledger-only records still count`);
+    assert.equal(review.event_choices[0].preview.records[0].id, event.source_id, `${kind}: live ledger-only records still count`);
     const table = f.load('lib/ledger-event.ts').eventSource(kind).table;
     await f.db.query(`DELETE FROM ${table} WHERE id=$1`, [event.source_id]);
-    assert.ok((await f.prepare(input)).approval, `${kind}: deleted source must not block a new preview`);
+    await f.approve(await f.prepare(input));
     assert.equal((await f.db.query('SELECT state FROM ledger_events WHERE id=$1', [event.id])).rows[0].state, 'saved', 'audit history is retained');
   }
 });
@@ -458,7 +458,7 @@ test('deleting a gift through its API removes it from duplicate candidates witho
   assert.ok(review.event_choices.some(choice => choice.input.transaction_id === event.transaction_id), 'surviving payment still requires reconciliation');
   assert.ok(review.event_choices.every(choice => !choice.decision), 'deleted gift is not offered as an existing event');
   await f.db.query('DELETE FROM transactions WHERE id=$1', [event.transaction_id]);
-  assert.ok((await f.prepare({ kind: 'gift_given', cashflow: 'auto' })).approval, 'with ledger and payment deleted, proceed to ordinary approval');
+  await f.approve(await f.prepare({ kind: 'gift_given', cashflow: 'auto' }));
 });
 
 test('duplicate matching and displayed details use current ledger fields after independent edits', { skip: !modulePath }, async t => {
@@ -488,6 +488,37 @@ test('orphan audit events cannot crowd out live duplicate candidates or inflate 
     [randomUUID(), randomUUID(), JSON.stringify(original.input)]);
   }
   const preview = (await f.prepare({ kind: 'gift_given', cashflow: 'none' })).event_choices[0].preview;
-  assert.deepEqual(Array.from(preview.records, record => record.id), [live.event_context.event_id]);
+  assert.deepEqual(Array.from(preview.records, record => record.id), [original.source_id]);
   assert.equal(preview.notices.length, 0);
+});
+
+test('ordinary ledger records without event history are duplicate candidates, including parent changes', { skip: !modulePath }, async t => {
+  const f = await setup(t);
+  for (const kind of ['gift_given', 'gift_received', 'loan_lent', 'loan_borrowed', 'repayment_received', 'repayment_paid']) {
+    const input = { kind, counterparty: kind, amount_cents: 5000, cashflow: 'none',
+      ...(kind === 'gift_received' ? { book_name: '礼簿', create_book: true } : {}) };
+    if (kind.startsWith('repayment')) {
+      await f.approve(await f.prepare({ kind: kind === 'repayment_received' ? 'loan_lent' : 'loan_borrowed', counterparty: kind, cashflow: 'none' }));
+    }
+    const saved = await f.approve(await f.prepare(input));
+    const event = (await f.db.query('DELETE FROM ledger_events WHERE id=$1 RETURNING source_id', [saved.event_context.event_id])).rows[0];
+    const review = await f.prepare(input);
+    assert.equal(review.event_choices[0].preview.records[0].id, event.source_id, kind);
+    if (kind.startsWith('repayment')) {
+      await f.db.query('UPDATE loans SET counterparty_name=$1 WHERE counterparty_name=$2', [`${kind}修改`, kind]);
+      const edited = await f.prepare({ ...input, counterparty: `${kind}修改` });
+      assert.equal(edited.event_choices[0].preview.records[0].title, `${kind === 'repayment_received' ? '收到还款' : '归还借款'} · ${kind}修改`);
+    }
+  }
+});
+
+test('a matching ordinary ledger record arriving after preview blocks commit atomically', { skip: !modulePath }, async t => {
+  const f = await setup(t), id = randomUUID();
+  const plan = await f.prepare({ kind: 'gift_given' });
+  await f.db.query("INSERT INTO given_gifts(id,user_id,recipient_name,gift_date,cash_amount) VALUES($1,'owner','小王','2026-10-09',500)", [id]);
+  const result = await f.decideAssistantAction('owner', plan.approval.id, 'approve');
+  assert.equal(result.status, 'failed');
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 0);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM ledger_events')).rows[0].count), 0);
+  assert.deepEqual((await f.db.query('SELECT id FROM given_gifts')).rows.map(row => row.id), [id]);
 });
