@@ -230,22 +230,33 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
     input.book_id = parentBook?.id || bookCreate!.id;
   }
   if (input.operation === "create" && !input.allow_duplicate) {
-    const existing = await sql.query(`SELECT *,COUNT(*) OVER() AS total FROM ledger_events WHERE user_id=$1 AND state='saved' AND kind=$2
-      AND input->>'counterparty'=$3 AND (input->>'amount_cents')::bigint=$4 AND input->>'date'=$5 ORDER BY created_at DESC,id LIMIT 5`, [userId, kind, input.counterparty, input.amount_cents, input.date]);
+    const source = eventSource(kind), repayment = eventIsRepayment(kind);
+    const amountColumn = kind === "gift_given" ? "cash_amount" : repayment ? "repaid_amount" : "amount";
+    const dateColumn = kind.startsWith("gift_") ? "gift_date" : repayment ? "repaid_at" : "occurred_at";
+    const counterpartyColumn = kind === "gift_given" ? "s.recipient_name" : repayment ? "loan.counterparty_name" : "s.counterparty_name";
+    // Event inputs are audit snapshots. Only the live ledger determines duplicate candidates,
+    // including filtering before the count/limit and rendering from that same source snapshot.
+    const existing = await sql.query(`SELECT e.id,e.created_at,e.input,e.source_id,to_jsonb(s) AS current,
+        TO_CHAR(s.${dateColumn},'YYYY-MM-DD') AS source_date,${counterpartyColumn} AS counterparty,COUNT(*) OVER() AS total
+      FROM ledger_events e JOIN ${source.table} s ON s.id=e.source_id AND s.user_id=e.user_id
+      ${repayment ? "JOIN loans loan ON loan.id=s.loan_id AND loan.user_id=s.user_id" : ""}
+      WHERE e.user_id=$1 AND e.state='saved' AND e.kind=$2 AND e.source_type=$6
+        AND ${counterpartyColumn}=$3 AND COALESCE(s.${amountColumn},0)=$4::numeric/100 AND s.${dateColumn}::date=$5::date
+        ${kind === "gift_received" ? "AND s.direction='received' AND s.gift_type='cash'" : ""}
+        ${eventIsLoan(kind) ? `AND ${repayment ? "loan" : "s"}.subject_type='money' AND ${repayment ? "loan" : "s"}.direction='${kind === "loan_lent" || kind === "repayment_received" ? "lent" : "owed"}'` : ""}
+      ORDER BY e.created_at DESC,e.id LIMIT 5`, [userId, kind, input.counterparty, input.amount_cents, input.date, source.type]);
     if (existing.length) {
       const records = await Promise.all(existing.map(async row => {
         const registered = validateLedgerEvent(row.input);
-        const source = eventSource(registered.kind!);
-        const current = await rowById(userId, source.table, String(row.source_id));
+        const current = row.current as Row;
         const flows = await sql.query(`SELECT t.*,TO_CHAR(t.transaction_date,'YYYY-MM-DD') AS date,m.name AS member_name,c.name AS category_name
           FROM transaction_links l JOIN transactions t ON t.id=l.transaction_id AND t.user_id=l.user_id
           LEFT JOIN members m ON m.id=t.member_id AND m.user_id=t.user_id
           LEFT JOIN categories c ON c.id=t.category_id AND c.user_id=t.user_id
           WHERE l.user_id=$1 AND l.source_type=$2 AND l.source_id=$3 ORDER BY t.transaction_date DESC,t.created_at,t.id`, [userId, source.type, row.source_id]);
-        const detail = current ? { ...registered, amount_cents: sourceAmount(current, registered.kind!),
-          counterparty: String(current.recipient_name || current.counterparty_name || registered.counterparty),
-          date: calendar(current.gift_date || current.occurred_at || current.repaid_at),
-          ...(registered.kind === "gift_given" ? { items: current.items as LedgerEventInput["items"], occasion: current.occasion as string | null } : {}) } : registered;
+        const detail = { ...registered, amount_cents: sourceAmount(current, kind),
+          counterparty: String(row.counterparty), date: String(row.source_date), note: current.notes as string | null,
+          ...(kind === "gift_given" ? { items: current.items as LedgerEventInput["items"], occasion: current.occasion as string | null } : {}) };
         const preview = eventActionPreview(detail, "", { rows: [] });
         return { id: String(row.id), title: `${eventKinds[registered.kind!]} · ${detail.counterparty}`,
           subtitle: [detail.date, detail.occasion].filter(Boolean).join(" · "),
@@ -253,7 +264,6 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
             { label: "登记时间", value: new Date(String(row.created_at)).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) },
             ...preview.sections.filter(section => section.title === "送礼明细").flatMap(section => section.rows),
             ...(detail.note ? [{ label: "备注", value: detail.note }] : []),
-            ...(!current ? [{ label: "台账状态", value: "原台账已不存在，以上为登记时信息" }] : []),
             { label: "当前关联流水", value: flows.length ? `${flows.length} 笔` : "无" },
             ...flows.map((flow, index) => ({ label: `流水 ${index + 1}`, value: `${flow.date} · ${flow.type === "income" ? "收入" : "支出"} ${money(cents(flow.amount))} · ${flow.description || "未填写用途"} · ${flow.member_name || "未指定成员"} · ${flow.category_name || "未指定分类"}` })),
           ] };
