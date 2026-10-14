@@ -57,6 +57,7 @@ export type AssistantConversationMessage = {
   exportFile?: AssistantExport;
   eventContext?: AssistantPlan["event_context"];
   eventChoices?: AssistantPlan["event_choices"];
+  eventReviewInput?: import("@/lib/ledger-event").LedgerEventInput;
   ledgerContext?: AssistantPlan["record_context"];
   draftSort?: AssistantDraftSort;
   incomplete?: "stopped" | "interrupted";
@@ -443,7 +444,7 @@ function mergeAssistantTaskOutputs(
       // Earlier versions replaced the whole message with an update marker.
       // Restore the server-owned question in place without restoring its controls.
       const result = task.result;
-      const question = result && assistantHistoryQuestion({ text: result.reply, eventChoices: result.event_choices, agent: result.agent });
+      const question = result && assistantHistoryQuestion({ text: result.reply, eventChoices: result.event_choices, eventContext: result.event_context, agent: result.agent });
       if (question && previousReply.text !== question) {
         next = next.map(message => message.id === previousReply.id ? { ...message, text: question } : message);
       }

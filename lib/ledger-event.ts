@@ -44,20 +44,39 @@ export const ledgerEventSchema = z.object({
   allow_duplicate: z.boolean().default(false),
 }).strict();
 export type LedgerEventInput = z.infer<typeof ledgerEventSchema>;
-export type LedgerEventContext = { status: "pending" | "saved" | "undone"; event_id: string | null; input: LedgerEventInput };
-export const eventContextSchema = z.object({ status: z.enum(["pending", "saved", "undone"]), event_id: id, input: ledgerEventSchema }).strict();
+export type LedgerEventContext = { status: "pending" | "saved" | "undone"; event_id: string | null; input: LedgerEventInput; payment_review?: number[] };
+export const eventContextSchema = z.object({ status: z.enum(["pending", "saved", "undone"]), event_id: id, input: ledgerEventSchema, payment_review: z.array(z.number().int().min(-1)).optional() }).strict();
 export type LedgerEventChoice = { label: string; input: LedgerEventInput };
-/** Detect member-only choices structurally, including conversations saved before this UI was shared. */
-export function ledgerEventMemberChoices(context: LedgerEventContext | undefined, choices: LedgerEventChoice[] | undefined): LedgerEventChoice[] | undefined {
-  if (context?.status !== "pending" || !choices?.length) return;
-  const base = ledgerEventSchema.safeParse(context.input);
-  if (!base.success) return;
-  const memberOnly = choices.every(choice => {
-    const selected = ledgerEventSchema.safeParse(choice.input);
-    if (!selected.success || !selected.data.member_id) return false;
-    return JSON.stringify({ ...selected.data, member_id: null }) === JSON.stringify({ ...base.data, member_id: null });
-  });
-  return memberOnly ? choices : undefined;
+/** Server-owned row indexes identify which payments may edit accounting attribution.
+ * -1 is the single cashflow of an event without a payments collection.
+ * Old persisted field choices carry the same permission through their structured inputs.
+ */
+export function ledgerEventReviewIndexes(context: LedgerEventContext | undefined, choices?: LedgerEventChoice[]): number[] | undefined {
+  if (context?.status !== "pending") return;
+  if (context.payment_review) return context.payment_review;
+  if (!choices?.length) return;
+  const base = ledgerEventSchema.parse(context.input);
+  const strip = (input: LedgerEventInput) => ({ ...input, member_id: null, category_id: null,
+    payments: input.payments?.map(payment => ({ ...payment, member_id: null, category_id: null })) ?? null });
+  const indexes = new Set<number>();
+  for (const choice of choices) {
+    const parsed = ledgerEventSchema.safeParse(choice.input);
+    if (!parsed.success || JSON.stringify(strip(base)) !== JSON.stringify(strip(parsed.data))) return;
+    const next = parsed.data;
+    if (base.member_id !== next.member_id || base.category_id !== next.category_id) indexes.add(-1);
+    base.payments?.forEach((payment, index) => {
+      if (payment.member_id !== next.payments![index].member_id || payment.category_id !== next.payments![index].category_id) indexes.add(index);
+    });
+  }
+  return indexes.size ? [...indexes] : undefined;
+}
+/** Only accounting fields on server-offered rows can change through the review card. */
+export function isLedgerEventReviewSelection(context: LedgerEventContext, indexes: number[], selected: LedgerEventInput) {
+  const base = ledgerEventSchema.parse(context.input);
+  const expected = { ...base, ...(indexes.includes(-1) ? { member_id: selected.member_id, category_id: selected.category_id } : {}),
+    payments: base.payments?.map((payment, index) => indexes.includes(index)
+      ? { ...payment, member_id: selected.payments?.[index]?.member_id ?? null, category_id: selected.payments?.[index]?.category_id ?? null } : payment) ?? null };
+  return JSON.stringify(expected) === JSON.stringify(selected);
 }
 export const eventType = (kind: LedgerEventKind): "income" | "expense" => ["gift_received", "loan_borrowed", "repayment_received"].includes(kind) ? "income" : "expense";
 export const eventIsLoan = (kind: LedgerEventKind) => !kind.startsWith("gift_");
@@ -96,7 +115,7 @@ export const eventCashflowCents = (input: LedgerEventInput) => input.payments !=
 export const LEDGER_EVENT_PROMPT = `event统一处理钱款送礼、收礼、借出、借入、收到归还、付出归还，以及有现金流的现金与实物混合送礼；台账、流水及关联作为一件事预览和确认，不分成manage与record重复执行。纯实物且没有现金付款的送礼或借还物品使用manage台账，估值不产生资金流水。
 event字段：operation=create/update/undo，event_id，kind=gift_given/gift_received/loan_lent/loan_borrowed/repayment_received/repayment_paid，counterparty，amount_cents，date，loan_id，book_id，book_name，create_book，settle，category_id，member_id，note，cashflow=auto/new/existing/none，cashflow_basis，transaction_id，allow_duplicate，items，occasion，transaction_amount_cents，payment_recipient。金额amount_cents、transaction_amount_cents为整数分；items.estimated_value为元且表示该行总估值。
 kind由整件事项的业务性质和资金方向确定，不依关键词或姓名猜测；借还本金只计资金流动，不计日常收入与消费。纯文字转账性质无法确定时先询问业务用途，不能自动当作消费、送礼或借款。图片仅能证明资金方向时提取待确认流水事实，不推断事件性质。
-缺省date按提供的today；明确历史日期和原任务日期必须保留。未知字段为null，create_book/settle/allow_duplicate默认false，cashflow默认auto。成员只使用明确依据和真实ID，不默认唯一成员；成员、礼簿及原借款选择使用服务端已有选择流程。还款loan_id来自查询，姓名可由服务端定位；全额归还使用settle=true、amount_cents=null，由服务端读取余额，不能猜或分摊多笔。
+缺省date按提供的today；明确历史日期和原任务日期必须保留。未知字段为null，create_book/settle/allow_duplicate默认false，cashflow默认auto。成员只使用明确依据和真实ID，不默认唯一成员；成员和分类不明确时保留null，交由现有记账卡片补齐，不为这些字段额外发起问答；礼簿及原借款选择使用服务端已有选择流程。还款loan_id来自查询，姓名可由服务端定位；全额归还使用settle=true、amount_cents=null，由服务端读取余额，不能猜或分摊多笔。
 auto核对已存在流水并提供选择；new仅在用户明确要求独立新增资金流水时使用。existing关联已记流水，transaction_id来自实际查询；没有ID时由服务端按实际条件查找选择，不凭空创建重复流水。none仅在用户明确整件事项不计资金流水时使用，cashflow_basis逐字引用当前事项原文或已接受回答中的依据。只涉及礼品估值的回答不取消独立明确的礼金流水。历史欠款是否伴随本次资金发生不明时先澄清。
 allow_duplicate只有用户明确另一真实发生或确认保留独立记录时为true；相同对象、日期、金额不自动证明重复，也不自动授权重复。未核实不能重复写账。
 送礼amount_cents只表示礼金，不含实物估值；items保留物品原名、quantity、unit、estimated_value，陌生名称不单独构成业务歧义。occasion为事由。transaction_amount_cents保存明确的实际付款，未给总付款为null，不能将礼金与估值相加猜现金支出。payment_recipient为代收或代办付款人，与counterparty分开；关系未确定先澄清，明确无关的支付保留为独立事项。付款与送礼价值差异保留在预览，不自动补手续费、退款或新流水。

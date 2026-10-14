@@ -5,6 +5,7 @@ import { AssistantAgentTaskStatus } from "@/components/assistant/agent-task-stat
 import { AssistantDraftCard, AssistantDraftRow } from "@/components/assistant/draft-card";
 import { AssistantDraftMatchCard } from "@/components/assistant/draft-match-card";
 import { AssistantReadResultCards } from "@/components/assistant/read-result-cards";
+import { AssistantEventPaymentReview } from "@/components/assistant/event-payment-review";
 import { AssistantMemberPicker } from "@/components/assistant/member-picker";
 import { AssistantProcessingDetails } from "@/components/assistant/processing-details";
 import { assistantChoiceClass, AssistantReplyCard, AssistantReplyNotice, AssistantReplyShell } from "@/components/assistant/reply-primitives";
@@ -18,7 +19,7 @@ import { invalidDraftFields, money } from "@/lib/assistant-draft-editor";
 import { assistantDraftSort, sortedAssistantDrafts } from "@/lib/assistant-draft-sort";
 import { draftReplyView, recordReplyView, resultReplyView } from "@/lib/assistant-reply-view";
 import { assistantAgentActionSettled, assistantDraftMatchTarget, assistantImageProgressText, assistantTaskRetryLabel, assistantMemberChoiceTarget as memberChoiceTarget, resolveAssistantDraftMatch, toggleAssistantDraftRemoval, type AssistantConversationMessage as Message } from "@/lib/assistant-task-client";
-import { eventCashflowCents, eventKinds, eventType, ledgerEventMemberChoices } from "@/lib/ledger-event";
+import { ledgerEventReviewIndexes } from "@/lib/ledger-event";
 import { cn } from "@/lib/utils";
 import { ArrowDown, Check, Loader2, Search, Trash2, Undo2 } from "lucide-react";
 import NextImage from "next/image";
@@ -66,8 +67,7 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
     : message.replyKind ? resultReplyView(message.text)
       : message.navigateTo ? resultReplyView(message.text, "页面入口")
         : message.exportFile ? resultReplyView(message.text, "导出已准备好") : undefined) : undefined;
-  const eventMembers = ledgerEventMemberChoices(message.eventContext, message.eventChoices);
-  const memberEvent = eventMembers ? message.eventContext!.input : undefined;
+  const eventReview = !message.approval && !message.actionResult ? ledgerEventReviewIndexes(message.eventContext, message.eventChoices) : undefined;
   const imageReply = question && message.text !== memberBatchQuestionText(unassigned) && messages.some(input => input.role === "user" && input.taskId === message.id && input.images?.length);
   const questionTotal = unassigned.every(d => /^\d{1,10}(\.\d{1,2})?$/.test(d.amount))
     ? money(unassigned.reduce((sum, d) => sum + Math.round(Number(d.amount) * 100), 0)) : "—";
@@ -76,11 +76,11 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
   const agentStatus = message.agent && <AssistantAgentTaskStatus agent={message.agent} process={agentRunning ? message.process : undefined}
     disconnected={!!taskConnectionError && (message === streamingMessage || message.taskId === activeTaskId)}
     error={!hasAction && !message.drafts?.length && !message.incomplete ? message.error : undefined} settled={agentSettled}
-    hasPreview={!!actionPreview || !!message.drafts?.length || !!message.eventChoices?.length}
+    hasPreview={!!actionPreview || !!message.drafts?.length || !!message.eventChoices?.length || !!eventReview}
     disabled={!!actionPending || sending || savingId !== null} onStop={() => void stopTask(message.taskId || message.id)}
     onContinue={() => void retryTask(message)} onEdit={() => { setInput(message.agent!.goal); composerRef.current?.focus(); }} />;
   return <div key={message.id} tabIndex={message.drafts?.length || actionPreview || replyView || message.readResults?.length || message.eventContext ? -1 : undefined} className={cn("mb-5 flex outline-none", message.role === "user" && "justify-end")} data-message-role={message.role} data-message-id={message.id} data-streaming-reply={message === streamingMessage || undefined} aria-busy={message === streamingMessage || undefined}>
-    <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!message.readResults?.length || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]", highlightedCard === message.id && "rounded-2xl ring-2 ring-primary/40 ring-offset-2 ring-offset-background")}>
+    <div className={cn("min-w-0 max-w-full", message.role === "user" && "max-w-[88%]", (question || replacement) && "w-[400px]", (actionPreview || replyView || !!eventReview || !!message.readResults?.length || !!message.eventChoices?.length || (!!message.drafts?.length && !question)) && "w-[520px]", highlightedCard === message.id && "rounded-2xl ring-2 ring-primary/40 ring-offset-2 ring-offset-background")}>
       {message.role === "assistant" && agentRunning && agentStatus}
       {message.role === "assistant" && message.process && !message.agent && <AssistantProcessingDetails process={message.process}
         disconnected={!!taskConnectionError && (message === streamingMessage || message.taskId === activeTaskId)} />}
@@ -102,7 +102,7 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
 
       <div className={cn(bubbleClass, message.role === "user" ? "rounded-[17px_17px_5px_17px] bg-[color-mix(in_srgb,var(--color-primary)_9%,var(--color-background))] px-[15px] py-[11px] text-foreground" : "text-foreground")}>
         {!!message.images?.length && <div className={cn("mb-2 grid gap-2", message.images.length > 1 && "grid-cols-2")} aria-label="已发送的截图">{message.images.map((image, index) => <Button key={index} type="button" variant="ghost" className={cn(buttonClass, "relative block max-w-full overflow-hidden rounded-[10px] hover:bg-transparent")} aria-label={`查看第 ${index + 1} 张图片：${image.name}`} onClick={() => setPreviewImage(image)}><NextImage src={image.data} alt={image.name} width={240} height={240} unoptimized className="h-auto max-h-[260px] w-auto max-w-full object-contain" /></Button>)}</div>}
-        {!actionPreview && !replyView && (!message.readResults?.length || message.agent?.status !== "completed" || message.agent.operations?.some(operation => operation.effect !== "read")) && (!message.eventChoices?.length || eventMembers) && <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{question ? `${imageReply ? `${message.text}\n\n` : ""}${memberBatchQuestionText(unassigned)}` : withoutApprovalExpiry(message.text)}</ReactMarkdown>}
+        {!actionPreview && !replyView && (!message.readResults?.length || message.agent?.status !== "completed" || message.agent.operations?.some(operation => operation.effect !== "read")) && (!message.eventChoices?.length || eventReview) && <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{question ? `${imageReply ? `${message.text}\n\n` : ""}${memberBatchQuestionText(unassigned)}` : withoutApprovalExpiry(message.text)}</ReactMarkdown>}
       </div>
       {message.incomplete && ((message.role === "assistant") || (!message.taskId && message.role === "user") || message.taskStatus === "missing") && <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground" role="status">
         <AssistantReplyNotice tone={message.incomplete === "stopped" ? "info" : "error"}>{message.error || (message.incomplete === "stopped" ? "已停止生成" : "上次处理未完成")}</AssistantReplyNotice>
@@ -113,11 +113,13 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
         <p className="mb-1 text-xs">分析说明</p>
         <ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.analysis}</ReactMarkdown>
       </div>}
-      {eventMembers && memberEvent && <AssistantMemberPicker heading={<p className="mb-3 flex items-baseline gap-2 text-[13px]"><span className="min-w-0 wrap-anywhere">{memberEvent.kind ? eventKinds[memberEvent.kind] : "这笔账"}{memberEvent.counterparty ? ` · ${memberEvent.counterparty}` : ""}</span><strong className="ml-auto whitespace-nowrap text-[16px]">¥{eventCashflowCents(memberEvent) === null ? "—" : money(eventCashflowCents(memberEvent)!)}</strong><span className="shrink-0 text-[11px] text-muted-foreground">{memberEvent.kind && eventType(memberEvent.kind) === "income" ? "收入" : "支出"}</span></p>}
-        members={members} disabled={composerDisabled} loading={isInitializing} loadError={!!loadError} onReload={reloadSetup}
-        onSelect={member => void send(`${memberEvent.kind && eventType(memberEvent.kind) === "income" ? "收入所属人" : "支出人"}是「${member.name}」`, { ...memberEvent, member_id: member.id }, undefined, message.id)}
-        footer={<p className="mt-3 text-[11px] text-muted-foreground">点击名字，自动回复；核对后再确认入账</p>} />}
-      {!eventMembers && !!message.eventChoices?.length && <AssistantReplyShell label="补充事项信息" title="请选择下一步">
+      {eventReview && message.eventContext && <AssistantEventPaymentReview id={message.id} input={message.eventReviewInput || message.eventContext.input} indexes={eventReview}
+        members={members} categories={categories} disabled={composerDisabled} loading={isInitializing} loadError={!!loadError} onReload={reloadSetup}
+        onChange={input => patchMessage(message.id, { eventReviewInput: input })}
+        onSubmit={() => void send("已核对付款的人员和分类，请生成事项确认方案。", message.eventReviewInput || message.eventContext!.input, undefined, message.id)}
+        sortMode={sortMode} onSort={() => cycleDraftSort(message.id)} expanded={expandedDrafts}
+        onToggle={(id, open) => setExpandedDrafts(current => ({ ...current, [id]: open }))} />}
+      {!eventReview && !!message.eventChoices?.length && <AssistantReplyShell label="补充事项信息" title="请选择下一步">
         <div className="space-y-3 p-4"><div className={bubbleClass}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div>
           <div className="flex flex-col gap-2">{message.eventChoices.map((choice, index) => <Button key={index} type="button" variant="ghost" className={assistantChoiceClass} disabled={composerDisabled} onClick={() => void send(choice.label, choice.input, undefined, message.id)}>{choice.label}</Button>)}</div></div>
       </AssistantReplyShell>}

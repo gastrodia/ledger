@@ -290,3 +290,28 @@ test('event choice selection requires an offered structured choice instead of in
   assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', '', choice.input).source_output_id, id(3));
   assert.equal(clarification.resolveAssistantEventChoice(c, 'gift', '', { ...choice.input, amount_cents: 60000 }), undefined);
 });
+
+test('event accounting review is bound to the current output and only edits offered payment attribution', () => {
+  const { validateLedgerEvent } = load('lib/ledger-event.ts');
+  const clarification = load('lib/assistant-event-clarification.ts');
+  const payment = (amount, purpose, patch = {}) => ({ amount_cents: amount, date: '2026-10-14', description: purpose, basis: purpose,
+    components: [{ purpose, amount_cents: amount, basis: purpose }], ...patch });
+  const input = validateLedgerEvent({ operation: 'create', kind: 'gift_given', counterparty: '朋友', date: '2026-10-14', amount_cents: 5000,
+    payments: [payment(5000, 'gift_cash'), payment(20000, 'purchase', { cashflow: 'existing', transaction_id: id(9), member_id: id(10), category_id: id(11) })] });
+  const context = { status: 'pending', event_id: null, input, payment_review: [0] };
+  const c = checkpoint(); c.pending_approval = null;
+  c.operations = [{ id: 'gift', action: 'event', status: 'needs_input' }];
+  c.tool_results = [{ name: 'event_preview', operation_id: 'gift', result: { event_context: context } }];
+  c.outputs = [{ id: id(8), plan: { action: 'event', event_context: context, event_choices: [] } }];
+  const selection = { ...input, payments: input.payments.map((p, i) => i ? p : { ...p, member_id: id(4), category_id: id(5) }) };
+  const resolved = clarification.resolveAssistantEventChoice(c, 'gift', '', selection);
+  assert.equal(resolved.source_output_id, id(8));
+  assert.deepEqual(plain(resolved.input), plain(selection));
+  const resolve = value => clarification.resolveAssistantEventChoice(c, 'gift', '', value);
+  assert.equal(resolve({ ...selection, counterparty: '另一人' }), undefined);
+  assert.equal(resolve({ ...selection, payments: selection.payments.slice(0, 1) }), undefined);
+  assert.equal(resolve({ ...selection, payments: selection.payments.map(p => ({ ...p, member_id: id(4) })) }), undefined);
+  assert.equal(resolve({ ...selection, payments: selection.payments.map((p, i) => i ? p : { ...p, components: [{ ...p.components[0], amount_cents: 6000 }] }) }), undefined);
+  c.outputs[0].receipt = { status: 'succeeded' };
+  assert.equal(resolve(selection), undefined);
+});

@@ -1035,3 +1035,20 @@ test('resuming refreshes server instructions without dropping goal facts or user
  const f=fixture([messages=>{assert.equal(messages.some(m=>m.content==='obsolete routing policy'),false);assert.equal(messages.some(m=>m.role==='system'&&m.content==='current Ledger contracts'),true);assert.equal(messages.some(m=>m.role==='user'&&m.content.includes('是我记录的原文')),true);return {...respond('请补充目标条件'),operation_id:null,needs_input:true};}]);
  const result=await f.run({checkpoint:c,messages:[{role:'system',content:'current Ledger contracts'}]});assert.equal(result.agent.goal,'保留原目标');assert.equal(result.agent.awaiting_answer,true);
 });
+
+test('reviewed payment accounting resumes the original workflow without a model call or replaying completed work', async () => {
+ const {validateLedgerEvent}=require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+ const input=validateLedgerEvent({operation:'create',kind:'gift_given',counterparty:'朋友',amount_cents:5000,date:'2026-10-14',payments:[
+   {description:'礼金付款',date:'2026-10-14',member_id:ID,category_id:ACTION,cashflow:'new',basis:'礼金50',components:[{purpose:'gift_cash',amount_cents:5000,basis:'礼金50'}]},
+   {description:'购买付款',date:'2026-10-13',member_id:ACTION,category_id:ID,cashflow:'new',basis:'购买80',components:[{purpose:'purchase',amount_cents:8000,basis:'购买80'}]},
+ ]});
+ const checkpoint={version:2,goal_id:ID,goal:'记录付款和送礼',status:'running',steps:4,messages:[],tool_results:[],pending_approval:null,preview_fingerprints:[],
+   operations:[{...item('meal','record'),status:'completed',receipt_id:ID},{...item('gift','event'),status:'pending'}],event_resolutions:[{operation_id:'gift',source_output_id:ACTION,input,pending:true}]};
+ const f=fixture([()=>assert.fail('reviewed accounting must not call the model again')]);
+ const result=await f.run({checkpoint});
+ assert.equal(result.agent.status,'waiting_approval');
+ assert.equal(f.calls.filter(call=>call[0]==='event').length,1);
+ assert.equal(JSON.stringify(f.calls.find(call=>call[0]==='event')[1].payments),JSON.stringify(input.payments));
+ assert.equal(result.agent.operations[0].status,'completed');
+ assert.equal(f.checkpoints.at(-1).event_resolutions[0].pending,false);
+});

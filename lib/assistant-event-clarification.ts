@@ -1,4 +1,4 @@
-import { validateLedgerEvent, type LedgerEventInput, type LedgerEventChoice } from "@/lib/ledger-event";
+import { validateLedgerEvent, ledgerEventReviewIndexes, isLedgerEventReviewSelection, type LedgerEventInput, type LedgerEventChoice } from "@/lib/ledger-event";
 import type { AssistantAgentCheckpoint } from "@/lib/assistant-agent-runtime";
 
 export type AssistantEventResolution = { operation_id: string; source_output_id: string; input: LedgerEventInput; pending: boolean };
@@ -15,14 +15,18 @@ export function offeredAssistantEventChoices(c: AssistantAgentCheckpoint, operat
   const preview = [...c.tool_results].reverse().find(tool => tool.name === "event_preview" && tool.operation_id === operationId);
   const result = preview?.result as { event_context?: { input?: unknown } } | undefined;
   if (!result?.event_context?.input) return;
-  const output = [...(c.outputs || [])].reverse().find(item => !item.receipt && item.plan.action === "event" && item.plan.event_choices?.length
+  const output = [...(c.outputs || [])].reverse().find(item => !item.receipt && item.plan.action === "event" && (item.plan.event_choices?.length || item.plan.event_context?.payment_review)
     && equal(item.plan.event_context?.input, result.event_context!.input));
   if (!output) return;
-  return { output_id: output.id, input: normalized(result.event_context.input)!, choices: output.plan.event_choices! };
+  return { output_id: output.id, input: normalized(result.event_context.input)!, choices: output.plan.event_choices || [], context: output.plan.event_context! };
 }
 export function resolveAssistantEventChoice(c: AssistantAgentCheckpoint, operationId: string, _answer: string, selection?: LedgerEventInput): AssistantEventResolution | undefined {
   const offered = offeredAssistantEventChoices(c, operationId);
   if (!offered) return;
+  const indexes = ledgerEventReviewIndexes(offered.context, offered.choices);
+  const selected = selection && normalized(selection);
+  if (indexes && selected && isLedgerEventReviewSelection(offered.context, indexes, selected))
+    return { operation_id: operationId, source_output_id: offered.output_id, input: selected, pending: true };
   let choice: LedgerEventChoice | undefined;
   if (selection) choice = offered.choices.find(item => equal(item.input, selection));
   if (!choice) return;

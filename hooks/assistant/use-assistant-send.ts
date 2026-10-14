@@ -48,15 +48,16 @@ export function useAssistantSend(session: Pick<AssistantSession, "messages" | "s
         id: crypto.randomUUID(), role: "user", incomplete: "interrupted", taskId: id, taskStatus: "submitting",
         ...(eventCardId ? { updatesCardId: eventCardId } : {}), text: originalInput.trim() ? text : sentImages.length ? `识别这 ${sentImages.length} 张截图` : text, images: previews
       };
+      const eventContext = (eventCardId ? messages.find(message => message.id === eventCardId) : [...messages].reverse().find(message => message.eventContext))?.eventContext;
       const request: AssistantTaskRequest = {
         id, ...(answering ? { continuation: { attempt: answering.attempt, output_id: restoreAssistantAgent(answering.agent || answering.result?.agent)!.output_id!, kind: "answer" as const } } : {}), conversation_id: conversationId, user_message_id: userMessage.id, message: text,
         display_text: userMessage.text, display_images: previews, ...(sentImages.length ? { images: sentImages.map(image => image.data) } : {}), today: localCalendarDate(), draft_batch: draftBatch, saved_batch: savedBatch,
         ...(eventSelection ? { event_selection: eventSelection } : {}),
-        ...([...messages].reverse().find(m => m.eventContext)?.eventContext ? { event_context: [...messages].reverse().find(m => m.eventContext)!.eventContext } : {}),
+        ...(eventContext ? { event_context: eventContext } : {}),
         record_contexts: messages.flatMap(m => [...(m.taskHistory || []).flatMap(output => output.ledgerContext ? [output.ledgerContext] : []), ...(m.ledgerContext ? [m.ledgerContext] : [])]).slice(-3),
         control_contexts: await assistantCardControlContexts(messages),
         card_contexts: messages.filter(message => message.role === "assistant" && !assistantCardTarget(message)
-          && (message.approval || message.eventChoices?.length || message.replyView || message.readResults?.length || message.ledgerContext)).slice(-10)
+          && (message.approval || message.eventChoices?.length || message.eventContext?.payment_review || message.replyView || message.readResults?.length || message.ledgerContext)).slice(-10)
           .map(message => ({ id: message.id, summary: (message.approval?.summary || message.text).slice(0, 4000) })),
         history: messages.filter(m => !m.incomplete && !assistantCardTarget(m)).slice(-8).map(m => ({
           role: m.role, content: m.drafts

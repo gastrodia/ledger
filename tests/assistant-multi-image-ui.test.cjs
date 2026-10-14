@@ -18,7 +18,7 @@ const response = (value, status = 200) => Response.json(value, { status });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 function nodes(tree) {
   if (!tree || typeof tree !== 'object') return [];
-  if (typeof tree?.type === 'function' && ['AssistantConversationFeed', 'AssistantConversationMessage', 'AssistantComposer', 'AssistantDraftEditor', 'AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return [tree, ...nodes(tree.type(tree.props))];
+  if (typeof tree?.type === 'function' && ['AssistantConversationFeed', 'AssistantConversationMessage', 'AssistantComposer', 'AssistantDraftEditor', 'AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantEventPaymentReview', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return [tree, ...nodes(tree.type(tree.props))];
   return Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
 }
 function text(tree) {
@@ -27,7 +27,7 @@ function text(tree) {
   if (tree?.props?.['aria-hidden'] === 'true' || tree?.props?.['aria-hidden'] === true) return '';
   // The page's pure member label is a real child component rather than an icon
   // fixture; render it so assertions still exercise the displayed member name.
-  if (typeof tree?.type === 'function' && ['AssistantConversationFeed', 'AssistantConversationMessage', 'AssistantComposer', 'AssistantDraftEditor', 'AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberLabel', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantProcessingDetails', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return text(tree.type(tree.props));
+  if (typeof tree?.type === 'function' && ['AssistantConversationFeed', 'AssistantConversationMessage', 'AssistantComposer', 'AssistantDraftEditor', 'AssistantDraftCard', 'AssistantDraftRow', 'AssistantReplyBadge', 'AssistantReplyShell', 'AssistantReplyCard', 'AssistantReplyBody', 'AssistantReplyMetrics', 'AssistantReplyNotice', 'AssistantReplyFields', 'AssistantReplyRecords', 'AssistantMemberLabel', 'AssistantEventPaymentReview', 'AssistantMemberPicker', 'AssistantActionCard', 'AssistantActionControls', 'AssistantProcessingDetails', 'AssistantAgentTaskStatus'].includes(tree.type.name)) return text(tree.type(tree.props));
   return typeof tree === 'object' ? text(tree.props?.children) : String(tree);
 }
 
@@ -205,6 +205,8 @@ function harness({ post, decode, taskStore = new Map(), persist = () => true, sp
   modules['@/components/assistant/draft-card'] = load('components/assistant/draft-card.tsx');
   modules['@/components/assistant/action-card'] = load('components/assistant/action-card.tsx');
   modules['@/components/assistant/page-styles'] = load('components/assistant/page-styles.ts');
+  modules['@/components/assistant/draft-editor'] = load('components/assistant/draft-editor.tsx');
+  modules['@/components/assistant/event-payment-review'] = load('components/assistant/event-payment-review.tsx');
   for (const filename of ['composer', 'conversation-message', 'conversation-feed', 'draft-editor']) modules[`@/components/assistant/${filename}`] = load(`components/assistant/${filename}.tsx`);
   const Page = load('app/dashboard/assistant/page.tsx').default;
   const h = {
@@ -1247,7 +1249,7 @@ test('changing a draft after preview invalidates conversational approval; no pos
 });
 
 test('event choices preserve context, a single approval completes both ledgers, and refresh keeps the saved event for correction', async () => {
-  const eventInput = require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event').validateLedgerEvent({ operation:'create',kind:'loan_lent',counterparty:'小王',amount_cents:50000,date:'2026-10-09' });
+  const eventInput = require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event').validateLedgerEvent({ operation:'create',kind:'loan_lent',counterparty:'小王',amount_cents:50000,date:'2026-10-09',category_id:category.id });
   const choice = { label:'本人', input:{...eventInput,member_id:member.id} };
   const approval = { id:uuid(710),summary:'准备记录借出500元；台账与流水一起保存。\n尚未执行。',count:1,expires_at:'2099-10-09T00:00:00Z' };
   const storage=memoryStorage(),taskStore=new Map();
@@ -1259,6 +1261,7 @@ test('event choices preserve context, a single approval completes both ledgers, 
   const h=await ready(options);
   writeComposer(h,'借给小王500元');h.click('发送');await settleDraft(h);
   clickTextButton(h,'本人');await settleDraft(h);
+  clickTextButton(h,'核对事项');await settleDraft(h);
   const selected=h.calls.filter(c=>c.url==='/api/assistant/tasks').at(-1).body;
   assert.equal(selected.event_selection.member_id,member.id);
   assert.equal(selected.event_context.input.amount_cents,50000);
@@ -1421,9 +1424,14 @@ test('restored event member choices reuse the draft member card, actual payment 
     const label=option.props.children;
     assert.ok(nodes(label.type(label.props)).some(n=>n.type==='MemberAvatar'&&n.props.memberId===member.id));
     option.props.onClick(); h.render(); await h.flush();
+    assert.equal(h.calls.filter(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').length,0,'member selection edits the review locally');
+    assert.ok(h.text.includes('核对账目'));
+    const categorySelect = h.all(n=>n.type==='Select'&&n.props.value==='')[0];
+    categorySelect.props.onValueChange(category.id);h.render();await h.flush();
+    h.restore(h.value);
+    clickTextButton(h,'核对事项');await settleDraft(h);
     const sent=h.calls.find(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').body;
-    assert.deepEqual(sent.event_selection,{...input,member_id:member.id});
-    assert.equal(sent.message,`支出人是「${member.name}」`);
+    assert.deepEqual(sent.event_selection,{...input,member_id:member.id,category_id:category.id});
     assert.equal(h.value.messages.some(m=>m.eventChoices?.length),false);
     assert.equal(h.calls.some(c=>c.url==='/api/assistant/confirm'||c.url.startsWith('/api/assistant/actions/')),false,'choosing a member never approves saving');
   } finally {h.unmount();}
@@ -1953,4 +1961,41 @@ test('stale double confirmation clicks and chat clears keep one financial reques
     assert.equal(h.value.messages.length, 0, 'a late acknowledgement cannot restore the cleared conversation');
     assert.equal(h.calls.filter(call => call.url === '/api/assistant/confirm').length, 1);
   } finally { h.unmount(); }
+});
+
+test('payment review reuses bookkeeping components, supports per-row attribution and retains edits after refresh', async () => {
+  const { validateLedgerEvent } = require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+  const makePayment = (amount, purpose, patch = {}) => ({ date:'2026-10-14', description:purpose, cashflow:'new', basis:purpose,
+    components:[{purpose,amount_cents:amount,basis:purpose}], ...patch });
+  const input = validateLedgerEvent({operation:'create',kind:'gift_given',counterparty:'朋友',amount_cents:5000,date:'2026-10-14',payments:[
+    makePayment(5000,'gift_cash'), makePayment(3000,'purchase'),
+    makePayment(20000,'purchase',{cashflow:'existing',transaction_id:uuid(990),member_id:member.id,category_id:category.id,date:'2026-09-30'})]});
+  const original = {id:uuid(991),role:'assistant',text:'核对付款',eventContext:{status:'pending',event_id:null,input,payment_review:[0,1]}};
+  const h=await ready({post:async(_url,body)=>response({action:'event',reply:'待确认',drafts:[],query:null,event_context:{status:'pending',event_id:null,input:body.event_selection}})});
+  try {
+    h.restore({messages:[original],input:''});
+    assert.ok(text(h.control('选择记账成员')).includes('2 笔待选成员'));
+    clickTextButton(h,'本人');await settleDraft(h);
+    assert.equal(h.calls.filter(c=>c.options.method==='POST').length,0);
+    assert.ok(h.text.includes('核对账目'));
+    const editors=h.all(n=>typeof n.type==='function'&&n.type.name==='AssistantDraftEditor');
+    assert.equal(editors.length,3);
+    assert.equal(editors[2].props.locked,true,'existing transaction is not editable');
+    for(let index=0;index<2;index++) {
+      h.all(n=>typeof n.type==='function'&&n.type.name==='AssistantDraftEditor')[index].props.onUpdate({category_id:category.id});
+      h.render();await h.flush();
+    }
+    const snapshot=h.value;h.restore(snapshot);await h.poll();
+    const reviewed=h.value.messages.find(m=>m.id===original.id).eventReviewInput;
+    assert.equal(reviewed.payments[0].category_id,category.id);
+    assert.equal(reviewed.payments[1].category_id,category.id);
+    assert.equal(reviewed.payments[2].transaction_id,uuid(990));
+    const sharedEditors=h.all(n=>typeof n.type==='function'&&n.type.name==='AssistantDraftEditor');
+    assert.equal(new Set(sharedEditors.map(e=>e.props.draft.id)).size,3);
+    clickTextButton(h,'核对事项');await settleDraft(h);
+    const request=h.calls.find(c=>c.url==='/api/assistant/tasks'&&c.options.method==='POST').body;
+    assert.deepEqual(request.event_selection,reviewed);
+    assert.equal(h.calls.some(c=>c.url==='/api/assistant/confirm'||c.url.startsWith('/api/assistant/actions/')),false);
+    assert.equal(h.all(n=>n.props?.['aria-label']==='选择记账成员').length,0);
+  } finally {h.unmount();}
 });

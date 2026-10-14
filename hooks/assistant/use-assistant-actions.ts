@@ -379,7 +379,7 @@ export function useAssistantActions(session: Pick<AssistantSession, "messages" |
 
   function cycleDraftSort(messageId: string) {
     if (activity().busy || sendLockRef.current) return;
-    setMessages(current => current.map(message => message.id === messageId && message.drafts?.length
+    setMessages(current => current.map(message => message.id === messageId && (message.drafts?.length || message.eventContext)
       ? { ...message, draftSort: nextAssistantDraftSort(message.draftSort) } : message));
   }
 

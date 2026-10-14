@@ -3,10 +3,10 @@ import { UUID_PATTERN } from "@/lib/assistant";
 
 export function assistantCardTarget(message: Message) { return message.cardUpdatedLink || message.draftCardLink; }
 /** A superseded card loses its controls, while the question stays in the timeline. */
-export function assistantHistoryQuestion(message: Pick<Message, "text" | "agent" | "memberChoice" | "eventChoices" | "memberFlow" | "drafts">): string | undefined {
+export function assistantHistoryQuestion(message: Pick<Message, "text" | "agent" | "memberChoice" | "eventChoices" | "eventContext" | "memberFlow" | "drafts">): string | undefined {
   const text = message.text?.trim();
   if (!text) return;
-  return message.agent?.awaiting_answer || message.memberChoice || message.eventChoices?.length
+  return message.agent?.awaiting_answer || message.memberChoice || message.eventChoices?.length || message.eventContext?.payment_review
     || message.memberFlow && message.drafts?.some(draft => draft.member_id === null) ? text : undefined;
 }
 export function relocateAssistantCard(messages: Message[], cardId: string, afterId: string): Message[] {
@@ -30,7 +30,7 @@ function pending(message: Message) {
 /** Supersession requires a declared output ID; text and similarity never select a card. */
 export function reconcileAssistantCardUpdate(messages: Message[], newId: string, explicitPreviousId?: string): Message[] {
   const index = messages.findIndex(m => m.id === newId), current = messages[index];
-  if (!current || !pending(current) || (!current.approval && !current.eventChoices?.length && !current.replyView?.analysis && !current.readResults?.length && !current.ledgerContext)) return messages;
+  if (!current || !pending(current) || (!current.approval && !current.eventChoices?.length && !current.eventContext?.payment_review && !current.replyView?.analysis && !current.readResults?.length && !current.ledgerContext)) return messages;
   if (!explicitPreviousId) return messages;
   const candidates = messages.slice(0, index).filter(message => pending(message) && message.id === explicitPreviousId);
   if (candidates.length !== 1) return messages;

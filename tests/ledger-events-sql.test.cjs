@@ -114,9 +114,9 @@ test('new book selection survives member clarification, and correction context n
   const f = await setup(t);
   await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','家人')", [randomUUID()]);
   const pick = await f.prepare({ kind: 'gift_received', book_name: '婚礼', create_book: true, member_id: null });
-  assert.equal(pick.event_choices.length, 2);
+  assert.deepEqual(Array.from(pick.event_context.payment_review), [-1]);
   assert.equal(pick.event_context.input.book_id, null);
-  const preview = await f.prepare(pick.event_choices[0].input);
+  const preview = await f.prepare({ ...pick.event_context.input, member_id: member });
   assert.equal(preview.event_context.input.category_id, incomeCategory);
   const corrected = await f.prepare({ ...preview.event_context.input, amount_cents: 60000 });
   await f.approve(corrected);
@@ -255,19 +255,16 @@ test('already-recorded payment without an ID finds candidates or asks for detail
   assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count),1);
 });
 
-test('missing event member and category remain explicit choices even when each has a single option', { skip: !modulePath }, async t => {
+test('missing accounting fields use one review without selecting defaults even when each has a single option', { skip: !modulePath }, async t => {
   const f = await setup(t);
   const memberQuestion = await f.prepare({ kind: 'gift_given', member_id: null, category_id: null });
   assert.equal(memberQuestion.approval, undefined);
   assert.equal(memberQuestion.event_context.input.member_id, null);
-  assert.equal(memberQuestion.event_choices.length, 1);
-  const categoryQuestion = await f.prepare(memberQuestion.event_choices[0].input);
-  assert.equal(categoryQuestion.approval, undefined);
-  assert.equal(categoryQuestion.event_context.input.category_id, null);
-  assert.equal(categoryQuestion.event_choices.length, 1);
-  assert.equal(Number((await f.db.query('SELECT count(*) FROM categories')).rows[0].count), 2);
+  assert.deepEqual(Array.from(memberQuestion.event_context.payment_review), [-1]);
+  assert.equal(memberQuestion.event_choices.length, 0);
+  assert.equal(memberQuestion.event_context.input.category_id, null);
   assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 0);
-  const reviewed = await f.prepare(categoryQuestion.event_choices[0].input);
+  const reviewed = await f.prepare({ ...memberQuestion.event_context.input, member_id: member, category_id: expenseCategory });
   assert.ok(reviewed.approval);
   assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 0);
   await f.approve(reviewed);
@@ -383,4 +380,29 @@ test('payment components distinguish one combined payment from omitted cash and 
  await f.approve(plan);
  const rows=(await f.db.query('SELECT amount FROM transactions')).rows;
  assert.equal(rows.length,1);assert.equal(Number(rows[0].amount),250);
+});
+
+test('multi-payment review collects accounting fields together, preserves existing payment and commits atomically once', { skip: !modulePath }, async t => {
+  const f = await setup(t), original = randomUUID(), secondMember = randomUUID();
+  await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','家人')", [secondMember]);
+  await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date,category_id,member_id,description) VALUES($1,'owner','expense',200,'2026-09-30',$2,$3,'原付款')", [original, expenseCategory, member]);
+  const review = await f.prepare({ kind: 'gift_given', amount_cents: 5000, payments: [
+    payment({ member_id: null, category_id: null }),
+    payment({ description: '另一笔实付', amount_cents: 3000, member_id: null, category_id: null }),
+    payment({ description: '原付款', amount_cents: 20000, date: '2026-09-30', cashflow: 'existing', transaction_id: original }),
+  ] });
+  assert.equal(review.approval, undefined);
+  assert.deepEqual(Array.from(review.event_context.payment_review), [0, 1]);
+  assert.equal(review.event_choices.length, 0);
+  assert.equal(review.event_context.input.payments[2].transaction_id, original);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 1);
+  const input = review.event_context.input;
+  input.payments[0].member_id = member; input.payments[0].category_id = expenseCategory;
+  input.payments[1].member_id = secondMember; input.payments[1].category_id = expenseCategory;
+  const plan = await f.prepare(input);
+  assert.ok(plan.approval);
+  await f.approve(plan); await f.approve(plan);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 3);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transaction_links')).rows[0].count), 3);
+  assert.equal(Number((await f.db.query('SELECT sum(amount) AS total FROM transactions')).rows[0].total), 280);
 });

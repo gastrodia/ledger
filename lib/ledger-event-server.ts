@@ -82,6 +82,7 @@ async function prepareGiftPayments(userId: string, input: LedgerEventInput, even
     return { payments: prior, removedPayments: [] as PreparedEventPayment[] };
   }
   const payments: PreparedEventPayment[] = [];
+  let needsReview = false;
   const choices = (index: number, patch: Partial<LedgerEventPayment>) => ({ ...input, payments: input.payments!.map((payment, i) => i === index ? { ...payment, ...patch } : payment) });
   for (const [index, payment] of input.payments!.entries()) {
     if (payment.amount_cents === null) return { question: clarify(`“${payment.description}”实际支付了多少？物品估值不会作为付款金额。`) };
@@ -113,21 +114,20 @@ async function prepareGiftPayments(userId: string, input: LedgerEventInput, even
     if (owns) {
       const members = await sql.query("SELECT r.*,md5(to_jsonb(r)::text) AS _revision FROM members r WHERE user_id=$1 ORDER BY created_at,id", [userId]) as Row[];
       const member = members.find(row => row.id === payment.member_id);
-      if (!member) return { question: clarify(`“${payment.description}”归属哪个成员？`, members.map(row => ({ label: String(row.name), input: choices(index, { member_id: row.id }) }))) };
-      remember("members", member);
-      if (!payment.category_id) {
-        const categories = await sql.query("SELECT id,name FROM categories WHERE user_id=$1 AND type='expense' ORDER BY sort_order,created_at,id", [userId]);
-        return { question: clarify(`“${payment.description}”使用哪个支出分类？`, categories.map(row => ({ label: String(row.name), input: choices(index, { category_id: String(row.id) }) }))) };
+      if (!member || !payment.category_id) needsReview = true;
+      if (member) remember("members", member);
+      if (payment.category_id) {
+        const category = await rowById(userId, "categories", payment.category_id);
+        if (!category || category.type !== "expense") throw new Error("所选分类不存在或收支方向不匹配。");
+        remember("categories", category);
       }
-      const category = await rowById(userId, "categories", payment.category_id);
-      if (!category || category.type !== "expense") throw new Error("所选分类不存在或收支方向不匹配。");
-      remember("categories", category);
     }
     payments.push({ input: { ...payment }, transactionId: previous?.transactionId || before?.id || randomUUID(), ownsTransaction: owns,
       previousFlowKind: previous?.previousFlowKind ?? (before ? String(before.flow_kind) : null), transactionBefore: before });
   }
   const removedPayments = prior.filter(payment => !payments.some(next => next.transactionId === payment.transactionId));
   if (removedPayments.some(payment => payment.ownsTransaction && payment.transactionBefore?.attachment_key)) throw new Error("要移除的付款含有附件，请先核对并移除附件。");
+  if (needsReview) return { question: { ...clarify("请核对付款账目，补齐人员和分类后继续。"), event_context: { status: "pending" as const, event_id: input.event_id, input, payment_review: payments.flatMap((payment, index) => payment.ownsTransaction ? [index] : []) } } };
   return { payments, removedPayments };
 }
 
@@ -267,17 +267,11 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
   if (!multi && transactionId && ownsTransaction && input.operation !== "undo") {
     const members = await sql.query("SELECT r.*,md5(to_jsonb(r)::text) AS _revision FROM members r WHERE user_id=$1 ORDER BY created_at,id", [userId]) as Row[];
     const member = members.find(row => row.id === input.member_id);
-    if (!member) return clarify(members.length ? "这笔资金流水归属哪个成员？" : "还没有家庭成员，请先添加一个成员后继续。", members.slice(0, 20).map(row => choose(String(row.name), { member_id: row.id })));
+    if (!member || !input.category_id) return { ...clarify("请核对账目，补齐人员和分类后继续。"), event_context: { ...context(), payment_review: [-1] } };
     remember("members", member);
-    if (input.category_id) {
-      const category = await rowById(userId, "categories", input.category_id);
-      if (!category || category.type !== type) throw new Error("所选分类不存在或收支方向不匹配。");
-      remember("categories", category);
-    } else {
-      const categories = await sql.query("SELECT r.*,md5(to_jsonb(r)::text) AS _revision FROM categories r WHERE user_id=$1 AND type=$2 ORDER BY sort_order,created_at,id", [userId, type]) as Row[];
-      return clarify(categories.length ? "这笔资金流水使用哪个分类？" : "还没有适用分类，请先添加分类后继续。",
-        categories.slice(0, 20).map(row => choose(String(row.name), { category_id: row.id })));
-    }
+    const category = await rowById(userId, "categories", input.category_id);
+    if (!category || category.type !== type) throw new Error("所选分类不存在或收支方向不匹配。");
+    remember("categories", category);
   }
   if (multi) transactionId = multi.payments[0]?.transactionId || null;
   const paymentRows = multi ? [...multi.payments.flatMap(payment => [{ label: `${payment.input.description} · ${payment.input.date}`,

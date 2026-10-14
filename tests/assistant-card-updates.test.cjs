@@ -80,3 +80,17 @@ test('moving a question card leaves its question at the original location and on
  assert.equal(moved[0].approval,undefined);
  assert.equal(moved.filter(m=>m.approval).length,1);
 });
+
+test('payment review and approval use the same explicit card replacement and refresh contract',()=>{
+ const a={...event(1),approval:undefined,text:'核对付款',eventContext:{...event(1).eventContext,payment_review:[0,1]}};
+ const b={...event(2),approval:undefined,text:'更新付款',eventContext:{...event(2).eventContext,payment_review:[0]}};
+ const answer={id:id(9),role:'user',text:'已核对',updatesCardId:a.id};
+ const updated=reconcileAssistantCardHistory([a,answer,b]);
+ assert.equal(updated[0].cardUpdatedLink,b.id);
+ assert.equal(updated[0].eventContext,undefined);
+ assert.equal(updated[0].text,'核对付款');
+ const c=event(3);
+ const approved=reconcileAssistantCardUpdate([...updated,c],c.id,b.id);
+ assert.equal(approved.filter(m=>m.eventContext).length,1);
+ assert.deepEqual(plain(reconcileAssistantCardHistory(plain(approved))),plain(approved));
+});
