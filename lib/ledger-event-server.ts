@@ -8,10 +8,15 @@ import { eventCashflowCents, eventKinds, eventType, eventIsLoan, eventIsRepaymen
 
 type Row = Record<string, unknown> & { id: string; _revision: string };
 type Snapshot = { table: string; row: Row };
+type EventReceipt = {
+  id: string; actionId: string; revision: number; state: "saved" | "undone"; input: LedgerEventInput;
+  source_id: string; transaction_id: string | null; owns_transaction: boolean;
+  payments: PreparedEventPayment[] | null; original_flow_kind: string | null;
+};
 export type PreparedLedgerEvent = {
   payments?: PreparedEventPayment[]; removedPayments?: PreparedEventPayment[];
   preview?: AssistantActionPreview; event: true; input: LedgerEventInput; eventId: string; sourceId: string; transactionId: string | null;
-  ownsTransaction: boolean; snapshots: Snapshot[]; sourceBefore?: Row; eventBefore?: Row; transactionBefore?: Row;
+  eventRevision: number; ownsTransaction: boolean; snapshots: Snapshot[]; sourceBefore?: Row; receiptBefore?: EventReceipt; transactionBefore?: Row;
   categoryCreate?: { id: string; name: string; type: string }; bookCreate?: { id: string; name: string };
   loanState?: { id: string; revision: string; repaid: number; principal: number }; remaining?: number;
   summary: string; previousFlowKind: string | null;
@@ -77,7 +82,18 @@ function legacyPayment(input: LedgerEventInput, transactionId: string, ownsTrans
 export function preparedEventPayments(p: PreparedLedgerEvent): PreparedEventPayment[] {
   return p.payments ?? (p.transactionId ? [legacyPayment(p.input, p.transactionId, p.ownsTransaction, p.previousFlowKind)] : []);
 }
-async function prepareGiftPayments(userId: string, input: LedgerEventInput, eventBefore: Row | undefined,
+async function readEventReceipt(userId: string, eventId: string): Promise<EventReceipt | undefined> {
+  const rows = await sql.query(`SELECT * FROM assistant_actions WHERE user_id=$1 AND event_id=$2 AND status='succeeded'
+    ORDER BY event_revision DESC LIMIT 1`, [userId, eventId]);
+  if (!rows.length) return;
+  const row = rows[0], payload = row.payload as PreparedLedgerEvent;
+  const context = (row.result as AssistantActionResult).event_context!;
+  return { id: eventId, actionId: String(row.id), revision: Number(row.event_revision), state: context.status as "saved" | "undone",
+    input: context.input, source_id: payload.sourceId, transaction_id: payload.transactionId,
+    owns_transaction: payload.ownsTransaction, payments: payload.payments ? preparedEventPayments(payload) : null,
+    original_flow_kind: payload.previousFlowKind };
+}
+async function prepareGiftPayments(userId: string, input: LedgerEventInput, eventBefore: EventReceipt | undefined,
   remember: (table: string, row: Row) => Row,
   clarify: (reply: string, choices?: LedgerEventChoice[]) => { reply: string; event_context: LedgerEventContext; event_choices: LedgerEventChoice[] }) {
   const original = eventBefore ? validateLedgerEvent(eventBefore.input) : null;
@@ -154,12 +170,11 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
   const context = (): LedgerEventContext => ({ status: "pending", event_id: input.event_id, input: { ...input, ...(input.create_book ? { book_id: null } : {}) } });
   const clarify = (reply: string, choices: LedgerEventChoice[] = []) => ({ reply, event_context: context(), event_choices: choices });
   const choose = (label: string, patch: Partial<LedgerEventInput>): LedgerEventChoice => ({ label, input: { ...context().input, ...patch } });
-  let eventBefore: Row | undefined, sourceBefore: Row | undefined, transactionBefore: Row | undefined;
+  let eventBefore: EventReceipt | undefined, sourceBefore: Row | undefined, transactionBefore: Row | undefined;
   let eventId: string = randomUUID(), sourceId: string = randomUUID(), ownsTransaction = true;
   if (input.operation !== "create") {
-    eventBefore = await rowById(userId, "ledger_events", input.event_id!);
+    eventBefore = await readEventReceipt(userId, input.event_id!);
     if (!eventBefore || eventBefore.state !== "saved") throw new Error("这件事不存在、已撤销，或不属于当前账号。请重新查询。");
-    remember("ledger_events", eventBefore);
     const original = validateLedgerEvent(eventBefore.input);
     if (original.payments !== null && input.operation === "update" && input.payments === null
       && (input.transaction_amount_cents !== null || input.member_id !== null || input.category_id !== null))
@@ -337,7 +352,8 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
     (input.member_id ? `- 成员：${snapshots.find(s => s.table === "members" && s.row.id === input.member_id)?.row.name || "沿用原流水成员"}\n` : "") +
     (input.note ? `- 备注：${input.note}\n` : "") +
     "\n尚未执行。回复“确认执行”一次完成全部操作，或回复“取消”。也可以直接说明要修改的内容。";
-  const payload: PreparedLedgerEvent = { ...(multi || {}), event: true, input, eventId, sourceId, transactionId, ownsTransaction, snapshots, sourceBefore, eventBefore, transactionBefore,
+  const payload: PreparedLedgerEvent = { ...(multi || {}), event: true, input, eventId, eventRevision: (eventBefore?.revision || 0) + 1,
+    sourceId, transactionId, ownsTransaction, snapshots, sourceBefore, receiptBefore: eventBefore, transactionBefore,
     bookCreate, loanState: state, remaining, summary, previousFlowKind: eventBefore ? eventBefore.original_flow_kind as string | null : transactionBefore ? String(transactionBefore.flow_kind || "daily") : null };
   const plan = await saveAssistantApproval(userId, conversationId, payload, summary, 1, eventActionPreview(input, summary, { rows: [
     { label: "台账", value: input.operation === "undo" ? "撤销原事项" : input.operation === "update" ? "同步修改原记录" : "新增一条记录" },
@@ -362,6 +378,12 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
   const guard = (condition: string, values: unknown[]) => query(`SELECT 1 / (CASE WHEN (${condition}) THEN 1 ELSE 0 END) AS valid`, values);
   query("SELECT id FROM assistant_actions WHERE user_id=$1 AND id=$2 FOR UPDATE", [userId, actionId]);
   guard("EXISTS(SELECT 1 FROM assistant_actions WHERE user_id=$1 AND id=$2 AND status='pending')", [userId, actionId]);
+  if (p.receiptBefore) {
+    query("SELECT id FROM assistant_actions WHERE user_id=$1 AND id=$2 FOR UPDATE", [userId, p.receiptBefore.actionId]);
+    guard(`EXISTS(SELECT 1 FROM assistant_actions WHERE user_id=$1 AND id=$2 AND status='succeeded' AND event_id=$3 AND event_revision=$4)
+      AND NOT EXISTS(SELECT 1 FROM assistant_actions WHERE user_id=$1 AND event_id=$3 AND status='succeeded' AND event_revision>$4)`,
+    [userId, p.receiptBefore.actionId, p.eventId, p.receiptBefore.revision]);
+  }
   const hasConversations = await sql.query("SELECT to_regclass('public.assistant_task_conversations') IS NOT NULL AS present");
   if (hasConversations[0]?.present) {
     query("SELECT c.id FROM assistant_task_conversations c JOIN assistant_actions a ON a.conversation_id=c.id AND a.user_id=c.user_id WHERE a.user_id=$1 AND a.id=$2 FOR UPDATE OF c", [userId, actionId]);
@@ -386,7 +408,7 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
     const candidates = duplicateLedgerCandidates(userId, input);
     guard(`NOT EXISTS(${candidates.text})`, candidates.values);
   }
-  const previousIds = p.eventBefore ? p.eventBefore.payments ? (p.eventBefore.payments as PreparedEventPayment[]).map(payment => payment.transactionId) : p.eventBefore.transaction_id ? [String(p.eventBefore.transaction_id)] : [] : [];
+  const previousIds = p.receiptBefore ? p.receiptBefore.payments ? p.receiptBefore.payments.map(payment => payment.transactionId) : p.receiptBefore.transaction_id ? [p.receiptBefore.transaction_id] : [] : [];
   guard("(SELECT COUNT(*) FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3)=$4 AND NOT EXISTS(SELECT 1 FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3 AND NOT(transaction_id=ANY($5::varchar[])))", [userId, source.type, p.sourceId, previousIds.length, previousIds]);
   for (const payment of payments) {
     if (!previousIds.includes(payment.transactionId)) guard("NOT EXISTS(SELECT 1 FROM transaction_links WHERE transaction_id=$1)", [payment.transactionId]);
@@ -402,7 +424,6 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
   }
   const amount = input.amount_cents! / 100;
   const savedInput = { ...input, event_id: p.eventId, ...(p.payments ? { payments: payments.map(payment => ({ ...payment.input, transaction_id: payment.transactionId })) } : {}) };
-  const savedPayments = p.payments ? payments.map(({ input: paymentInput, transactionId, ownsTransaction, previousFlowKind }) => ({ input: { ...paymentInput, transaction_id: transactionId }, transactionId, ownsTransaction, previousFlowKind })) : null;
   const removePayment = (payment: PreparedEventPayment) => {
     query("DELETE FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3 AND transaction_id=$4", [userId, source.type, p.sourceId, payment.transactionId]);
     if (payment.ownsTransaction) query("DELETE FROM transactions WHERE user_id=$1 AND id=$2", [userId, payment.transactionId]);
@@ -412,7 +433,6 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
     query("DELETE FROM transaction_links WHERE user_id=$1 AND source_type=$2 AND source_id=$3", [userId, source.type, p.sourceId]);
     query(`DELETE FROM ${source.table} WHERE user_id=$1 AND id=$2`, [userId, p.sourceId]);
     for (const payment of payments) removePayment(payment);
-    query("UPDATE ledger_events SET state='undone',updated_at=NOW() WHERE user_id=$1 AND id=$2", [userId, p.eventId]);
   } else {
     const fields: Record<string, unknown> = kind === "gift_given" ? { recipient_name: input.counterparty, cash_amount: amount, items: JSON.stringify(input.items || []), occasion: input.occasion, gift_date: input.date, notes: input.note }
       : kind === "gift_received" ? { giftbook_id: input.book_id, group_id: p.sourceId, direction: "received", gift_type: "cash", counterparty_name: input.counterparty, amount, currency: "CNY", gift_date: input.date, notes: input.note }
@@ -432,8 +452,6 @@ export async function executeLedgerEvent(userId: string, actionId: string, p: Pr
       } else query("UPDATE transactions SET flow_kind=$3,updated_at=NOW() WHERE user_id=$1 AND id=$2", [userId, payment.transactionId, flowKind]);
       if (!previousIds.includes(payment.transactionId)) query("INSERT INTO transaction_links(user_id,source_type,source_id,transaction_id,given_gift_id,loan_id,repayment_id) VALUES($1,$2,$3,$4,$5,$6,$7)", [userId, source.type, p.sourceId, payment.transactionId, source.type === "given_gift" ? p.sourceId : null, source.type === "loan" ? p.sourceId : null, source.type === "repayment" ? p.sourceId : null]);
     }
-    if (input.operation === "create") query("INSERT INTO ledger_events(id,user_id,kind,source_type,source_id,transaction_id,owns_transaction,input,original_flow_kind,payments) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb)", [p.eventId, userId, kind, source.type, p.sourceId, p.payments ? null : p.transactionId, p.payments ? false : p.ownsTransaction, JSON.stringify(savedInput), p.previousFlowKind, JSON.stringify(savedPayments)]);
-    else query("UPDATE ledger_events SET input=$3::jsonb,payments=$4::jsonb,transaction_id=$5,updated_at=NOW() WHERE user_id=$1 AND id=$2", [userId, p.eventId, JSON.stringify(savedInput), JSON.stringify(savedPayments), p.payments ? null : p.transactionId]);
   }
 
   const result: AssistantActionResult = { id: actionId, status: "succeeded", completed: 1,

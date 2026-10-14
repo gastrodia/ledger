@@ -12,9 +12,10 @@ async function setup(t) {
   await f.db.query("INSERT INTO members(id,user_id,name) VALUES($1,'owner','本人')", [member]);
   await f.db.query("INSERT INTO categories(id,user_id,name,type) VALUES($1,'owner','明确支出','expense'),($2,'owner','明确收入','income')", [expenseCategory, incomeCategory]);
   const api = f.load('lib/ledger-event-server.ts'), actions = f.load('lib/assistant-command-server.ts');
-  return { ...f, ...api, ...actions, async prepare(input) { return api.prepareLedgerEvent('owner', randomUUID(), { ...base,
+  return { ...f, ...api, ...actions, async prepare(input) { return api.prepareLedgerEvent('owner', randomUUID(), { ...(input.operation && input.operation !== 'create' ? {} : base),
       ...(input.operation && input.operation !== 'create' ? {} : { member_id: member, category_id: ['gift_received','loan_borrowed','repayment_received'].includes(input.kind) ? incomeCategory : expenseCategory }),
       ...(input.cashflow === 'none' ? { cashflow_basis: '只登记台账，不计资金流水' } : {}), ...input }); },
+    async savedEvent(eventId) { const row = (await f.db.query("SELECT * FROM assistant_actions WHERE user_id='owner' AND event_id=$1 AND status='succeeded' ORDER BY event_revision DESC LIMIT 1", [eventId])).rows[0]; return { id: eventId, source_id: row.payload.sourceId, transaction_id: row.payload.transactionId, input: row.result.event_context.input, state: row.result.event_context.status, revision: row.event_revision }; },
     async approve(plan) { assert.ok(plan.approval, plan.reply); const r = await actions.decideAssistantAction('owner', plan.approval.id, 'approve'); assert.equal(r.status, 'succeeded', r.text); return r; } };
 }
 test('six cash scenarios commit ledger, cashflow and association once; loans stay out of daily statistics', { skip: !modulePath }, async t => {
@@ -69,7 +70,7 @@ test('stale dependencies roll back all writes; cancelled and cross-owner confirm
   await f.db.query("UPDATE members SET name='成员变动' WHERE id=$1", [member]);
   const result = await f.decideAssistantAction('owner', plan.approval.id, 'approve');
   assert.equal(result.status, 'failed'); assert.equal(result.completed, 0);
-  for (const table of ['giftbooks', 'gift_records', 'transactions', 'ledger_events']) assert.equal(Number((await f.db.query(`SELECT count(*) FROM ${table}`)).rows[0].count), 0, table);
+  for (const table of ['giftbooks', 'gift_records', 'transactions']) assert.equal(Number((await f.db.query(`SELECT count(*) FROM ${table}`)).rows[0].count), 0, table);
   const other = await f.prepare({ kind: 'gift_given' });
   await assert.rejects(() => f.decideAssistantAction('foreign', other.approval.id, 'approve'), /不存在/);
   assert.equal((await f.decideAssistantAction('owner', other.approval.id, 'cancel')).status, 'cancelled');
@@ -95,7 +96,7 @@ test('failure after source and cashflow inserts rolls back everything, including
   const plan = await f.prepare({ kind: 'gift_received', book_name: '回滚验证', create_book: true });
   await f.db.query("ALTER TABLE transaction_links ADD CONSTRAINT fixture_failure CHECK(source_type!='gift_group')");
   assert.equal((await f.decideAssistantAction('owner', plan.approval.id, 'approve')).status, 'failed');
-  for (const table of ['giftbooks','gift_records','transactions','transaction_links','ledger_events']) assert.equal(Number((await f.db.query(`SELECT COUNT(*) FROM ${table}`)).rows[0].count), 0, table);
+  for (const table of ['giftbooks','gift_records','transactions','transaction_links']) assert.equal(Number((await f.db.query(`SELECT COUNT(*) FROM ${table}`)).rows[0].count), 0, table);
 });
 test('parallel approvals and a lost commit response recover the same event without duplicate financial writes', { skip: !modulePath }, async t => {
   const f = await setup(t);
@@ -350,7 +351,7 @@ test('stale second payment rolls back the whole multi-payment event', {skip:!mod
 test('legacy schema upgrade preserves original IDs, amount and approval; unrelated ledger sources stay one-to-one', {skip:!modulePath}, async t=>{
  const f=await setup(t),saved=await f.approve(await f.prepare({kind:'gift_given'}));
  const before=(await f.db.query('SELECT id,amount FROM transactions')).rows;
- await f.db.exec("ALTER TABLE transaction_links DROP CONSTRAINT transaction_links_pkey, ADD PRIMARY KEY(user_id,source_type,source_id); DROP INDEX transaction_links_single_source; ALTER TABLE ledger_events DROP COLUMN payments;");
+ await f.db.exec("ALTER TABLE transaction_links DROP CONSTRAINT transaction_links_pkey, ADD PRIMARY KEY(user_id,source_type,source_id); DROP INDEX transaction_links_single_source;");
  const ensure=f.load('lib/ledger-event-schema.ts').ensureLedgerEventsSchema;
  await ensure();await ensure();
  assert.deepEqual((await f.db.query('SELECT id,amount FROM transactions')).rows,before);
@@ -420,12 +421,12 @@ test('duplicate event review displays actual saved gift and each live linked pay
   const skip = review.event_choices.find(c=>c.decision==='skip_creation');
   assert.equal(skip.input.allow_duplicate,false);
   const record = skip.preview.records[0];
-  assert.equal(record.id,(await f.db.query('SELECT source_id FROM ledger_events WHERE id=$1',[saved.event_context.event_id])).rows[0].source_id);
+  assert.equal(record.id,(await f.savedEvent(saved.event_context.event_id)).source_id);
   const detail = JSON.stringify(record);
   for(const expected of ['生日','围巾','¥50.00','¥200.00','2026-10-08','买围巾','本人','明确支出','2 笔']) assert.ok(detail.includes(expected),expected);
   const positive = await f.prepare(review.event_choices.find(c=>!c.decision).input);
   assert.ok(positive.approval,positive.reply);
-  assert.equal(Number((await f.db.query('SELECT count(*) FROM ledger_events')).rows[0].count),1,'preparing either decision never writes');
+  assert.equal(Number((await f.db.query("SELECT count(*) FROM assistant_actions WHERE status='succeeded'")).rows[0].count),1,'preparing either decision never writes');
  });
 
 test('duplicate review excludes deleted ledger sources for all six kinds while retaining audit history', { skip: !modulePath }, async t => {
@@ -437,20 +438,20 @@ test('duplicate review excludes deleted ledger sources for all six kinds while r
       await f.approve(await f.prepare({ kind: kind === 'repayment_received' ? 'loan_lent' : 'loan_borrowed', counterparty: kind, cashflow: 'none' }));
     }
     const saved = await f.approve(await f.prepare(input));
-    const event = (await f.db.query('SELECT * FROM ledger_events WHERE id=$1', [saved.event_context.event_id])).rows[0];
+    const event = await f.savedEvent(saved.event_context.event_id);
     const review = await f.prepare(input);
     assert.equal(review.event_choices[0].preview.records[0].id, event.source_id, `${kind}: live ledger-only records still count`);
     const table = f.load('lib/ledger-event.ts').eventSource(kind).table;
     await f.db.query(`DELETE FROM ${table} WHERE id=$1`, [event.source_id]);
     await f.approve(await f.prepare(input));
-    assert.equal((await f.db.query('SELECT state FROM ledger_events WHERE id=$1', [event.id])).rows[0].state, 'saved', 'audit history is retained');
+    assert.equal((await f.savedEvent(event.id)).state, 'saved', 'execution receipt is retained');
   }
 });
 
 test('deleting a gift through its API removes it from duplicate candidates without concealing surviving cashflow', { skip: !modulePath }, async t => {
   const f = await setup(t);
   const saved = await f.approve(await f.prepare({ kind: 'gift_given' }));
-  const event = (await f.db.query('SELECT * FROM ledger_events WHERE id=$1', [saved.event_context.event_id])).rows[0];
+  const event = await f.savedEvent(saved.event_context.event_id);
   const { NextRequest } = require('next/server');
   const response = await f.load('app/api/gifts-given/[id]/route.ts').DELETE(new NextRequest(`http://test/api/gifts-given/${event.source_id}`, { method: 'DELETE' }), { params: Promise.resolve({ id: event.source_id }) });
   assert.equal(response.status, 200);
@@ -477,15 +478,14 @@ test('duplicate matching and displayed details use current ledger fields after i
   assert.ok((await f.prepare({ kind: 'loan_lent', cashflow: 'none' })).approval, 'changed direction cannot be displayed under its historical kind');
 });
 
-test('orphan audit events cannot crowd out live duplicate candidates or inflate their total', { skip: !modulePath }, async t => {
+test('receipts for deleted sources cannot crowd out live duplicate candidates or inflate their total', { skip: !modulePath }, async t => {
   const f = await setup(t);
   const live = await f.approve(await f.prepare({ kind: 'gift_given', cashflow: 'none' }));
-  const original = (await f.db.query('SELECT * FROM ledger_events WHERE id=$1', [live.event_context.event_id])).rows[0];
-  // Newer deleted events occupy every slot under the former LIMIT-before-live-source lookup.
+  const original = await f.savedEvent(live.event_context.event_id);
   for (let i = 0; i < 6; i++) {
-    await f.db.query(`INSERT INTO ledger_events(id,user_id,kind,source_type,source_id,owns_transaction,state,input,created_at)
-      VALUES($1,'owner','gift_given','given_gift',$2,false,'saved',$3::jsonb,CURRENT_TIMESTAMP+INTERVAL '1 hour')`,
-    [randomUUID(), randomUUID(), JSON.stringify(original.input)]);
+    const saved = await f.approve(await f.prepare({kind:'gift_given',cashflow:'none',allow_duplicate:true}));
+    const event = await f.savedEvent(saved.event_context.event_id);
+    await f.db.query('DELETE FROM given_gifts WHERE id=$1',[event.source_id]);
   }
   const preview = (await f.prepare({ kind: 'gift_given', cashflow: 'none' })).event_choices[0].preview;
   assert.deepEqual(Array.from(preview.records, record => record.id), [original.source_id]);
@@ -500,8 +500,18 @@ test('ordinary ledger records without event history are duplicate candidates, in
     if (kind.startsWith('repayment')) {
       await f.approve(await f.prepare({ kind: kind === 'repayment_received' ? 'loan_lent' : 'loan_borrowed', counterparty: kind, cashflow: 'none' }));
     }
-    const saved = await f.approve(await f.prepare(input));
-    const event = (await f.db.query('DELETE FROM ledger_events WHERE id=$1 RETURNING source_id', [saved.event_context.event_id])).rows[0];
+    const table = f.load('lib/ledger-event.ts').eventSource(kind).table, sourceId = randomUUID();
+    if (kind === 'gift_given') await f.db.query("INSERT INTO given_gifts(id,user_id,recipient_name,cash_amount,gift_date) VALUES($1,'owner',$2,50,'2026-10-09')",[sourceId,kind]);
+    else if (kind === 'gift_received') {
+      const book = randomUUID(); await f.db.query("INSERT INTO giftbooks(id,user_id,name) VALUES($1,'owner','礼簿')",[book]);
+      await f.db.query("INSERT INTO gift_records(id,user_id,giftbook_id,direction,gift_type,counterparty_name,amount,gift_date) VALUES($1,'owner',$2,'received','cash',$3,50,'2026-10-09')",[sourceId,book,kind]);
+    } else if (kind.startsWith('loan_')) await f.db.query("INSERT INTO loans(id,user_id,direction,subject_type,counterparty_name,amount,occurred_at) VALUES($1,'owner',$2,'money',$3,50,'2026-10-09')",[sourceId,kind==='loan_lent'?'lent':'owed',kind]);
+    else {
+      const parent = (await f.db.query('SELECT id FROM loans WHERE counterparty_name=$1',[kind])).rows[0];
+      await f.db.query("INSERT INTO loan_repayments(id,user_id,loan_id,repaid_amount,repaid_at) VALUES($1,'owner',$2,50,'2026-10-09')",[sourceId,parent.id]);
+    }
+    const event = {source_id:sourceId};
+    assert.equal((await f.db.query(`SELECT count(*) FROM ${table} WHERE id=$1`,[sourceId])).rows[0].count,1);
     const review = await f.prepare(input);
     assert.equal(review.event_choices[0].preview.records[0].id, event.source_id, kind);
     if (kind.startsWith('repayment')) {
@@ -519,6 +529,122 @@ test('a matching ordinary ledger record arriving after preview blocks commit ato
   const result = await f.decideAssistantAction('owner', plan.approval.id, 'approve');
   assert.equal(result.status, 'failed');
   assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count), 0);
-  assert.equal(Number((await f.db.query('SELECT count(*) FROM ledger_events')).rows[0].count), 0);
+  assert.equal(Number((await f.db.query("SELECT count(*) FROM assistant_actions WHERE status='succeeded'")).rows[0].count), 0);
   assert.deepEqual((await f.db.query('SELECT id FROM given_gifts')).rows.map(row => row.id), [id]);
+});
+
+async function legacySchema(f, eventIds) {
+  await f.db.exec(`CREATE TABLE ledger_events (
+    id varchar(36) PRIMARY KEY,user_id varchar(36) NOT NULL,kind text NOT NULL,source_type text NOT NULL,
+    source_id varchar(36) NOT NULL,transaction_id varchar(36),owns_transaction boolean NOT NULL,payments jsonb,
+    state text NOT NULL,input jsonb NOT NULL,original_flow_kind text,
+    created_at timestamptz NOT NULL DEFAULT NOW(),updated_at timestamptz NOT NULL DEFAULT NOW())`);
+  for (const eventId of eventIds) {
+    const row = (await f.db.query("SELECT * FROM assistant_actions WHERE event_id=$1 AND status='succeeded' ORDER BY event_revision DESC LIMIT 1",[eventId])).rows[0];
+    const p = row.payload, context = row.result.event_context;
+    await f.db.query(`INSERT INTO ledger_events(id,user_id,kind,source_type,source_id,transaction_id,owns_transaction,payments,state,input,original_flow_kind)
+      VALUES($1,'owner',$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10)`,[eventId,p.input.kind,f.load('lib/ledger-event.ts').eventSource(p.input.kind).type,
+      p.sourceId,p.payments?null:p.transactionId,p.payments?false:p.ownsTransaction,JSON.stringify(p.payments||null),context.status,JSON.stringify(context.input),p.previousFlowKind]);
+  }
+}
+
+test('receipt migration removes the old table and preserves create/update/undo history, IDs and finances', { skip: !modulePath }, async t => {
+  const f = await setup(t), existing = randomUUID();
+  await f.db.query("INSERT INTO transactions(id,user_id,type,amount,transaction_date,category_id,member_id) VALUES($1,'owner','expense',200,'2026-10-09',$2,$3)",[existing,expenseCategory,member]);
+  const saved = await f.approve(await f.prepare(giftPayments({payments:[payment({}),payment({transaction_id:existing,cashflow:'existing',amount_cents:20000,description:'购买'})]})));
+  const edited = await f.approve(await f.prepare({operation:'update',event_id:saved.event_context.event_id,note:'已修改'}));
+  const removed = await f.approve(await f.prepare({kind:'loan_lent',counterparty:'另一事项',cashflow:'none'}));
+  await f.approve(await f.prepare({operation:'undo',event_id:removed.event_context.event_id}));
+  const before = (await f.db.query('SELECT id,amount,flow_kind FROM transactions ORDER BY id')).rows;
+  const receipts = (await f.db.query("SELECT id,result FROM assistant_actions WHERE status='succeeded' ORDER BY id")).rows;
+  await legacySchema(f,[saved.event_context.event_id,removed.event_context.event_id]);
+  await f.db.exec('ALTER TABLE assistant_actions DROP COLUMN event_id CASCADE, DROP COLUMN event_revision CASCADE');
+  await f.ensureAssistantActionsSchema(); await f.ensureAssistantActionsSchema();
+  assert.equal((await f.db.query("SELECT to_regclass('public.ledger_events') AS name")).rows[0].name,null);
+  assert.deepEqual((await f.db.query('SELECT id,amount,flow_kind FROM transactions ORDER BY id')).rows,before);
+  assert.deepEqual((await f.db.query("SELECT id,result FROM assistant_actions WHERE status='succeeded' ORDER BY id")).rows,receipts);
+  assert.equal((await f.savedEvent(saved.event_context.event_id)).revision,2);
+  assert.equal((await f.savedEvent(removed.event_context.event_id)).state,'undone');
+  await assert.rejects(()=>f.prepare({operation:'undo',event_id:removed.event_context.event_id}),/已撤销/);
+  await f.approve(await f.prepare({operation:'undo',event_id:edited.event_context.event_id}));
+  assert.deepEqual((await f.db.query('SELECT id FROM transactions')).rows.map(row=>row.id),[existing]);
+  assert.equal((await f.savedEvent(saved.event_context.event_id)).revision,3);
+});
+
+test('migration preserves legacy pending approvals and never recreates the deleted table', { skip: !modulePath }, async t => {
+  const f = await setup(t), saved = await f.approve(await f.prepare({kind:'gift_given'}));
+  const pending = await f.prepare({operation:'update',event_id:saved.event_context.event_id,amount_cents:60000});
+  const create = await f.prepare({kind:'loan_borrowed',counterparty:'待确认'});
+  await legacySchema(f,[saved.event_context.event_id]);
+  const old = (await f.db.query('SELECT e.*,md5(to_jsonb(e)::text) AS _revision FROM ledger_events e')).rows[0];
+  const action = (await f.db.query('SELECT payload FROM assistant_actions WHERE id=$1',[pending.approval.id])).rows[0];
+  const p = action.payload; delete p.receiptBefore; delete p.eventRevision;
+  p.eventBefore=old;p.snapshots.push({table:'ledger_events',row:old});
+  await f.db.query('UPDATE assistant_actions SET payload=$2::jsonb WHERE id=$1',[pending.approval.id,JSON.stringify(p)]);
+  await f.db.exec('ALTER TABLE assistant_actions DROP COLUMN event_id CASCADE, DROP COLUMN event_revision CASCADE');
+  await f.ensureAssistantActionsSchema();
+  await f.approve(pending); await f.approve(pending); await f.approve(create);
+  assert.equal(Number((await f.db.query('SELECT cash_amount FROM given_gifts')).rows[0].cash_amount),600);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count),2);
+  assert.equal((await f.db.query("SELECT to_regclass('public.ledger_events') AS name")).rows[0].name,null);
+  await f.approve(await f.prepare({operation:'undo',event_id:saved.event_context.event_id}));
+});
+
+test('migration keeps old single-payment approvals working when the legacy payments column is absent', { skip: !modulePath }, async t => {
+  const f = await setup(t), saved = await f.approve(await f.prepare({kind:'loan_lent'}));
+  await legacySchema(f,[saved.event_context.event_id]);
+  await f.db.exec('ALTER TABLE ledger_events DROP COLUMN payments; ALTER TABLE assistant_actions DROP COLUMN event_id CASCADE, DROP COLUMN event_revision CASCADE');
+  await f.ensureAssistantActionsSchema();
+  await f.approve(await f.prepare({operation:'undo',event_id:saved.event_context.event_id}));
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM loans')).rows[0].count),0);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM transactions')).rows[0].count),0);
+});
+
+test('migration invalidates an old preview whose legacy version changed without touching business records', { skip: !modulePath }, async t => {
+  const f=await setup(t),saved=await f.approve(await f.prepare({kind:'gift_given'}));
+  const pending=await f.prepare({operation:'update',event_id:saved.event_context.event_id,amount_cents:60000});
+  await legacySchema(f,[saved.event_context.event_id]);
+  const old=(await f.db.query('SELECT e.*,md5(to_jsonb(e)::text) AS _revision FROM ledger_events e')).rows[0];
+  const payload=(await f.db.query('SELECT payload FROM assistant_actions WHERE id=$1',[pending.approval.id])).rows[0].payload;
+  payload.eventBefore=old;delete payload.receiptBefore;
+  await f.db.query('UPDATE assistant_actions SET payload=$2::jsonb WHERE id=$1',[pending.approval.id,JSON.stringify(payload)]);
+  await f.db.exec("UPDATE ledger_events SET updated_at=updated_at+INTERVAL '1 second'; ALTER TABLE assistant_actions DROP COLUMN event_id CASCADE,DROP COLUMN event_revision CASCADE");
+  await f.ensureAssistantActionsSchema();
+  assert.equal((await f.decideAssistantAction('owner',pending.approval.id,'approve')).status,'failed');
+  assert.equal(Number((await f.db.query('SELECT cash_amount FROM given_gifts')).rows[0].cash_amount),500);
+  assert.equal(Number((await f.db.query('SELECT amount FROM transactions')).rows[0].amount),500);
+});
+
+test('migration refuses to drop an orphan legacy record without its execution receipt and rolls back schema changes', { skip: !modulePath }, async t => {
+  const f = await setup(t);
+  await f.ensureAssistantActionsSchema(); await legacySchema(f,[]);
+  await f.db.query("INSERT INTO ledger_events(id,user_id,kind,source_type,source_id,owns_transaction,state,input) VALUES($1,'owner','gift_given','given_gift',$2,false,'saved','{}')",[randomUUID(),randomUUID()]);
+  await f.db.exec('ALTER TABLE assistant_actions DROP COLUMN event_id CASCADE, DROP COLUMN event_revision CASCADE');
+  await assert.rejects(()=>f.ensureAssistantActionsSchema(),/execution receipt is missing/);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM ledger_events')).rows[0].count),1);
+  assert.equal((await f.db.query("SELECT count(*)::int AS count FROM information_schema.columns WHERE table_name='assistant_actions' AND column_name='event_revision'")).rows[0].count,0);
+});
+
+test('concurrent whole-event revisions execute only once; stale receipt cannot be revived by restoring old business fields', { skip: !modulePath }, async t => {
+  const f = await setup(t), saved=await f.approve(await f.prepare({kind:'gift_given'}));
+  await f.db.exec('CREATE TEMP TABLE original_gift AS SELECT * FROM given_gifts; CREATE TEMP TABLE original_flow AS SELECT * FROM transactions');
+  const a=await f.prepare({operation:'update',event_id:saved.event_context.event_id,amount_cents:60000});
+  const b=await f.prepare({operation:'undo',event_id:saved.event_context.event_id});
+  await f.approve(a);
+  await f.db.exec('UPDATE given_gifts SET (cash_amount,updated_at)=(SELECT cash_amount,updated_at FROM original_gift); UPDATE transactions SET (amount,updated_at)=(SELECT amount,updated_at FROM original_flow)');
+  assert.equal((await f.db.query('SELECT md5(to_jsonb(g)::text)=(SELECT md5(to_jsonb(o)::text) FROM original_gift o) AS restored FROM given_gifts g')).rows[0].restored,true);
+  assert.equal((await f.decideAssistantAction('owner',b.approval.id,'approve')).status,'failed');
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM given_gifts')).rows[0].count),1);
+  assert.equal((await f.savedEvent(saved.event_context.event_id)).revision,2);
+});
+
+test('parallel whole-event approvals have one successful successor and preserve one coherent ledger', { skip: !modulePath }, async t => {
+  const f=await setup(t), saved=await f.approve(await f.prepare({kind:'gift_given'}));
+  const a=await f.prepare({operation:'update',event_id:saved.event_context.event_id,amount_cents:60000});
+  const b=await f.prepare({operation:'update',event_id:saved.event_context.event_id,amount_cents:70000});
+  const results=await Promise.all([f.decideAssistantAction('owner',a.approval.id,'approve'),f.decideAssistantAction('owner',b.approval.id,'approve')]);
+  assert.deepEqual(results.map(r=>r.status).sort(),['failed','succeeded']);
+  assert.equal((await f.savedEvent(saved.event_context.event_id)).revision,2);
+  const amount=Number((await f.db.query('SELECT cash_amount FROM given_gifts')).rows[0].cash_amount);
+  assert.ok([600,700].includes(amount));assert.equal(Number((await f.db.query('SELECT amount FROM transactions')).rows[0].amount),amount);
 });

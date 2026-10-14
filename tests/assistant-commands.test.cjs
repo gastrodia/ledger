@@ -70,7 +70,7 @@ function fixture(seed = {}, options = {}) {
       if (name === '@/lib/db') return { sql };
       if (name === '@/lib/assistant-commands') return commands;
       if (name === '@/lib/assistant-action-preview') return contract(name);
-      if (name.endsWith('-schema')) return { ensureLoansSchema: async () => {}, ensureCategoriesSchema: async () => {}, ensureGiftsGivenSchema: async () => {}, ensureGiftBooksSchema: async () => {}, ensureNotesSchema: async () => {} };
+      if (name.endsWith('-schema')) return { ensureAssistantEventReceiptsSchema: async () => {}, ensureLoansSchema: async () => {}, ensureCategoriesSchema: async () => {}, ensureGiftsGivenSchema: async () => {}, ensureGiftBooksSchema: async () => {}, ensureNotesSchema: async () => {} };
       if (name.startsWith('@/app/api/')) return route(name.split('/')[3]);
       throw Error(name);
     } });

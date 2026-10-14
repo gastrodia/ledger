@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AssistantPlan } from "@/lib/assistant";
 import { NextRequest } from "next/server";
 import { sql } from "@/lib/db";
+import { ensureAssistantEventReceiptsSchema } from "@/lib/assistant-event-receipts-schema";
 import { commandValues, fieldNames, resourceNames, validateCommandRow, validateLedgerCommand, type AssistantActionResult, type AssistantApproval, type LedgerCommand, type LedgerResource, type LedgerRow } from "@/lib/assistant-commands";
 
 const resources: Record<LedgerResource, { table: string; text: string[]; date?: string; type?: string; amount?: string; parent?: string }> = {
@@ -151,6 +152,7 @@ export async function ensureAssistantActionsSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
   }
+  await ensureAssistantEventReceiptsSchema();
 }
 async function ensureResource(resource: LedgerResource) {
   if (resource === "loans" || resource === "repayments") await (await import("@/lib/loans-schema")).ensureLoansSchema();
@@ -323,15 +325,24 @@ export async function prepareLedgerCommand(userId: string, conversationId: strin
     return { reply: reply + (listed.length && command.operation !== "duplicates" ? totals(command.resource, listed) : ""), record_context: { resource: command.resource, rows: listed.map(row => Object.fromEntries(Object.entries(row).filter(([key]) => key !== "attachment_key" && (key === "id" || key in fieldNames || ["loan_id", "giftbook_id", "group_id", "repaid_total", "archived_at", "pinned_at"].includes(key))))) }, ...(command.operation === "export" ? { export_file: { name: `${resourceNames[command.resource]}.csv`, csv: "\uFEFF" + fields.map(key => csvCell(fieldNames[key] || key)).join(",") + "\r\n" + rows.map(row => fields.map(key => csvCell(row[key])).join(",")).join("\r\n") } } : {}) };
   }
   // An event-owned source/flow must be changed as a unit, even when found through a normal ledger query.
-  const eventTable = await sql.query("SELECT to_regclass('public.ledger_events') IS NOT NULL AS present");
-  if (eventTable[0]?.present && rows.length) {
+  if (rows.length) {
+    await ensureAssistantActionsSchema();
     const sourceType = ({ loans: "loan", repayments: "repayment", gift_records: "gift_group", gifts_given: "given_gift" } as Record<string, string>)[command.resource];
     const ids = rows.map(row => String(row.group_id || row.id));
+    const latest = `WITH latest AS (SELECT DISTINCT ON(event_id) * FROM assistant_actions
+      WHERE user_id=$1 AND status='succeeded' AND event_id IS NOT NULL ORDER BY event_id,event_revision DESC)`;
     const events = command.resource === "transactions"
-      ? await sql.query("SELECT id,input FROM ledger_events WHERE user_id=$1 AND state='saved' AND (transaction_id=ANY($2::varchar[]) OR EXISTS(SELECT 1 FROM transaction_links l WHERE l.user_id=ledger_events.user_id AND l.source_type=ledger_events.source_type AND l.source_id=ledger_events.source_id AND l.transaction_id=ANY($2::varchar[])))", [userId, ids])
-      : sourceType ? await sql.query("SELECT id,input FROM ledger_events WHERE user_id=$1 AND state='saved' AND source_type=$2 AND source_id=ANY($3::varchar[])", [userId, sourceType, ids]) : [];
+      ? await sql.query(`${latest} SELECT event_id AS id,result->'event_context'->'input' AS input FROM latest a
+          WHERE result->'event_context'->>'status'='saved' AND EXISTS(SELECT 1 FROM transaction_links l
+            WHERE l.user_id=a.user_id AND l.source_id=a.payload->>'sourceId' AND l.transaction_id=ANY($2::varchar[]))`, [userId, ids])
+      : sourceType ? await sql.query(`${latest} SELECT event_id AS id,result->'event_context'->'input' AS input FROM latest
+          WHERE result->'event_context'->>'status'='saved' AND payload->>'sourceId'=ANY($3::varchar[])
+            AND CASE payload->'input'->>'kind' WHEN 'gift_given' THEN 'given_gift' WHEN 'gift_received' THEN 'gift_group'
+              WHEN 'loan_lent' THEN 'loan' WHEN 'loan_borrowed' THEN 'loan' ELSE 'repayment' END=$2`, [userId, sourceType, ids]) : [];
     if (command.resource === "giftbooks" && command.operation === "delete") {
-      const linked = await sql.query("SELECT e.id FROM ledger_events e JOIN gift_records r ON r.id=e.source_id AND r.user_id=e.user_id WHERE e.user_id=$1 AND e.state='saved' AND e.source_type='gift_group' AND r.giftbook_id=ANY($2::varchar[]) LIMIT 1", [userId, ids]);
+      const linked = await sql.query(`${latest} SELECT a.event_id FROM latest a JOIN gift_records r
+        ON r.id=a.payload->>'sourceId' AND r.user_id=a.user_id WHERE a.result->'event_context'->>'status'='saved'
+        AND a.payload->'input'->>'kind'='gift_received' AND r.giftbook_id=ANY($2::varchar[]) LIMIT 1`, [userId, ids]);
       if (linked.length) throw new Error("礼簿中包含联动事项，请先逐件整体撤销收礼，再删除礼簿，避免留下孤立流水。");
     }
     if (events.length) {
@@ -439,9 +450,10 @@ export async function saveAssistantApproval(userId: string, conversationId: stri
   await ensureAssistantActionsSchema();
   if (await conversationCleared(userId, conversationId)) throw new Error("原对话已清空，本次操作未执行。");
   // Each preview remains independently reviewable until explicitly decided.
+  const event = payload as Partial<PreparedLedgerEvent>;
   if (key) {
     const storedPayload = { ...(payload as object), preview, _agent_preview: { goal_id: key.goalId, fingerprint: key.fingerprint } };
-    await sql.query("INSERT INTO assistant_actions(id,user_id,conversation_id,payload,summary,expires_at) VALUES($1,$2,$3,$4::jsonb,$5,$6) ON CONFLICT (id) DO NOTHING", [id, userId, conversationId, JSON.stringify(storedPayload), summary, expires]);
+    await sql.query("INSERT INTO assistant_actions(id,user_id,conversation_id,payload,summary,expires_at,event_id,event_revision) VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING", [id, userId, conversationId, JSON.stringify(storedPayload), summary, expires, event.event ? event.eventId : null, event.event ? event.eventRevision : null]);
     if (key.signal.aborted) {
       await sql.query("UPDATE assistant_actions SET status='cancelled',updated_at=NOW() WHERE user_id=$1 AND id=$2 AND status='pending'", [userId, id]);
       key.signal.throwIfAborted();
@@ -450,7 +462,7 @@ export async function saveAssistantApproval(userId: string, conversationId: stri
     if (!rows[0]) throw new Error("确认方案暂未保存，请重试。");
     return replayAgentPreview(rows[0] as ActionRow, key);
   }
-  await sql.query("INSERT INTO assistant_actions(id,user_id,conversation_id,payload,summary,expires_at) VALUES($1,$2,$3,$4::jsonb,$5,$6)", [id, userId, conversationId, JSON.stringify({ ...(payload as object), preview }), summary, expires]);
+  await sql.query("INSERT INTO assistant_actions(id,user_id,conversation_id,payload,summary,expires_at,event_id,event_revision) VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8)", [id, userId, conversationId, JSON.stringify({ ...(payload as object), preview }), summary, expires, event.event ? event.eventId : null, event.event ? event.eventRevision : null]);
   return { reply: summary, approval: { id, summary, count, expires_at: null, preview } };
 }
 
