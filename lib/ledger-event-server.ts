@@ -230,9 +230,42 @@ export async function prepareLedgerEvent(userId: string, conversationId: string,
     input.book_id = parentBook?.id || bookCreate!.id;
   }
   if (input.operation === "create" && !input.allow_duplicate) {
-    const existing = await sql.query(`SELECT id FROM ledger_events WHERE user_id=$1 AND state='saved' AND kind=$2
-      AND input->>'counterparty'=$3 AND (input->>'amount_cents')::bigint=$4 AND input->>'date'=$5 LIMIT 1`, [userId, kind, input.counterparty, input.amount_cents, input.date]);
-    if (existing.length) return clarify("发现同一天、同对方、同金额的已登记事项。请核对是不是已经记过；确实又发生一笔才继续。", [choose("这是另外新发生的一笔，继续核对", { allow_duplicate: true })]);
+    const existing = await sql.query(`SELECT *,COUNT(*) OVER() AS total FROM ledger_events WHERE user_id=$1 AND state='saved' AND kind=$2
+      AND input->>'counterparty'=$3 AND (input->>'amount_cents')::bigint=$4 AND input->>'date'=$5 ORDER BY created_at DESC,id LIMIT 5`, [userId, kind, input.counterparty, input.amount_cents, input.date]);
+    if (existing.length) {
+      const records = await Promise.all(existing.map(async row => {
+        const registered = validateLedgerEvent(row.input);
+        const source = eventSource(registered.kind!);
+        const current = await rowById(userId, source.table, String(row.source_id));
+        const flows = await sql.query(`SELECT t.*,TO_CHAR(t.transaction_date,'YYYY-MM-DD') AS date,m.name AS member_name,c.name AS category_name
+          FROM transaction_links l JOIN transactions t ON t.id=l.transaction_id AND t.user_id=l.user_id
+          LEFT JOIN members m ON m.id=t.member_id AND m.user_id=t.user_id
+          LEFT JOIN categories c ON c.id=t.category_id AND c.user_id=t.user_id
+          WHERE l.user_id=$1 AND l.source_type=$2 AND l.source_id=$3 ORDER BY t.transaction_date DESC,t.created_at,t.id`, [userId, source.type, row.source_id]);
+        const detail = current ? { ...registered, amount_cents: sourceAmount(current, registered.kind!),
+          counterparty: String(current.recipient_name || current.counterparty_name || registered.counterparty),
+          date: calendar(current.gift_date || current.occurred_at || current.repaid_at),
+          ...(registered.kind === "gift_given" ? { items: current.items as LedgerEventInput["items"], occasion: current.occasion as string | null } : {}) } : registered;
+        const preview = eventActionPreview(detail, "", { rows: [] });
+        return { id: String(row.id), title: `${eventKinds[registered.kind!]} · ${detail.counterparty}`,
+          subtitle: [detail.date, detail.occasion].filter(Boolean).join(" · "),
+          amount: money(detail.amount_cents!), rows: [
+            { label: "登记时间", value: new Date(String(row.created_at)).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) },
+            ...preview.sections.filter(section => section.title === "送礼明细").flatMap(section => section.rows),
+            ...(detail.note ? [{ label: "备注", value: detail.note }] : []),
+            ...(!current ? [{ label: "台账状态", value: "原台账已不存在，以上为登记时信息" }] : []),
+            { label: "当前关联流水", value: flows.length ? `${flows.length} 笔` : "无" },
+            ...flows.map((flow, index) => ({ label: `流水 ${index + 1}`, value: `${flow.date} · ${flow.type === "income" ? "收入" : "支出"} ${money(cents(flow.amount))} · ${flow.description || "未填写用途"} · ${flow.member_name || "未指定成员"} · ${flow.category_name || "未指定分类"}` })),
+          ] };
+      }));
+      const total = Number(existing[0].total);
+      const preview: AssistantActionPreview = { title: "已登记的疑似重复事项", metrics: [], sections: [], records, notices: total > records.length
+        ? [{ text: `共找到 ${total} 件，展示最近 ${records.length} 件；其余请到对应台账核对。`, tone: "attention" }] : [] };
+      return clarify("发现同日、同对方、同台账金额的已登记事项，仅凭这些条件不能认定是同一件事。请核对以下记录及关联付款，再决定是否新增。", [
+        { ...choose("已记过，不再新增这件事", {}), decision: "skip_creation", preview },
+        choose("这是另外新发生的一笔，继续核对", { allow_duplicate: true }),
+      ]);
+    }
   }
   if (input.operation === "create" && input.cashflow === "none" && !input.cashflow_basis)
     return clarify("请明确是否仅登记台账，不计资金流水。", [choose("只登记台账，不计资金流水", { cashflow: "none", cashflow_basis: "只登记台账，不计资金流水" })]);

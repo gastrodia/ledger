@@ -43,6 +43,7 @@ export type AssistantTaskRequest = {
   draft_batch?: AssistantDraftBatch | null;
   saved_batch?: AssistantSavedBatch | null;
   event_context?: import("@/lib/ledger-event").LedgerEventContext;
+  event_decision?: import("@/lib/ledger-event").LedgerEventDecision;
   event_selection?: import("@/lib/ledger-event").LedgerEventInput;
   record_contexts?: NonNullable<AssistantPlan["record_context"]>[];
   control_contexts?: import("@/lib/assistant-control").AssistantControlContext[];

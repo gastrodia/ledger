@@ -17,7 +17,7 @@ import type { useAssistantTasks } from "./use-assistant-tasks";
 export function useAssistantSend(session: Pick<AssistantSession, "messages" | "setMessages" | "conversationId" | "setOutbox" | "setOutboxPersistable" | "outboxRef" | "input" | "setInput" | "configured" | "setSending" | "actionPendingRef" | "images" | "setImages" | "followReplyRef" | "confirmationsRef" | "undosRef" | "conversationEpochRef" | "saveLockRef" | "sendLockRef" | "draft" | "currentConversation">, taskRuntime: Pick<ReturnType<typeof useAssistantTasks>, "knownTasksRef" | "submitTask">, activity: () => AssistantActivity) {
   const { messages, setMessages, conversationId, setOutbox, setOutboxPersistable, outboxRef, input, setInput, configured, setSending, actionPendingRef, images, setImages, followReplyRef, confirmationsRef, undosRef, conversationEpochRef, saveLockRef, sendLockRef, draft, currentConversation } = session;
   const { knownTasksRef, submitTask } = taskRuntime;
-  async function send(override?: string, eventSelection?: import("@/lib/ledger-event").LedgerEventInput, draftBatchId?: string, eventCardId?: string) {
+  async function send(override?: string, eventSelection?: import("@/lib/ledger-event").LedgerEventInput, draftBatchId?: string, eventCardId?: string, eventDecision?: import("@/lib/ledger-event").LedgerEventDecision) {
     const originalInput = override ?? input;
     const sentImages = override ? [] : images;
     const text = originalInput.trim() || (sentImages.length ? "请按图片顺序识别截图里的收支，衔接重叠账目，生成待确认账单。" : "");
@@ -26,6 +26,7 @@ export function useAssistantSend(session: Pick<AssistantSession, "messages" | "s
     const answering = !sentImages.length
       ? eventCardId ? answerCandidates.find(task => restoreAssistantAgent(task.agent || task.result?.agent)?.output_id === eventCardId) : answerCandidates[0]
       : undefined;
+    if (eventDecision && !answering) { toast.info("原事项问题已变化，请刷新后核对最新卡片。"); return; }
     if (configured === false) { toast.error("请先在服务端配置百炼 API Key。"); return; }
     if (messages.length >= 78 && !answering) { toast.info("当前对话已较长，请先确认待处理账单，再清空对话。"); return; }
     const latestBatch = draftBatchId ? messages.find(m => m.id === draftBatchId) : [...messages].reverse().find(m => m.drafts?.length);
@@ -52,6 +53,7 @@ export function useAssistantSend(session: Pick<AssistantSession, "messages" | "s
       const request: AssistantTaskRequest = {
         id, ...(answering ? { continuation: { attempt: answering.attempt, output_id: restoreAssistantAgent(answering.agent || answering.result?.agent)!.output_id!, kind: "answer" as const } } : {}), conversation_id: conversationId, user_message_id: userMessage.id, message: text,
         display_text: userMessage.text, display_images: previews, ...(sentImages.length ? { images: sentImages.map(image => image.data) } : {}), today: localCalendarDate(), draft_batch: draftBatch, saved_batch: savedBatch,
+        ...(eventDecision ? { event_decision: eventDecision } : {}),
         ...(eventSelection ? { event_selection: eventSelection } : {}),
         ...(eventContext ? { event_context: eventContext } : {}),
         record_contexts: messages.flatMap(m => [...(m.taskHistory || []).flatMap(output => output.ledgerContext ? [output.ledgerContext] : []), ...(m.ledgerContext ? [m.ledgerContext] : [])]).slice(-3),

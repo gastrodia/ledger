@@ -117,7 +117,7 @@ function outputId(goal: string, step: number, receipt?: string) {
 function observedReply(c: AssistantAgentCheckpoint): string | undefined {
   const results = new Map<string, string>();
   for (const tool of c.tool_results) {
-    if (["approval_result", "delivery_result", "control_result"].includes(tool.name)) {
+    if (["approval_result", "delivery_result", "control_result", "event_decision_result"].includes(tool.name)) {
       const receipt = tool.result as AssistantActionResult;
       if (receipt?.id && (tool.name === "control_result" || ["succeeded", "failed", "cancelled", "expired"].includes(receipt.status))) results.set(receipt.id, receipt.text);
     } else if (["query", "records", "draft_matches"].includes(tool.name)) {
@@ -339,6 +339,8 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
       if (o.adapters.protocol === "native" && (!c.operations || c.operations.every(item => item.status === "completed")))
         return finish(safePlan(observedReply(c) || receipt.text), "completed", receipt.id);
     }
+    if (c.tool_results.some(tool => tool.name === "event_decision_result") && c.operations?.every(op => op.status === "completed"))
+      return finish(safePlan(observedReply(c)!), "completed", c.operations.map(op => op.receipt_id).join(":"));
     for (let i = 0; i < budget && c.steps < (c.operations || c.workflow_required ? MAX_TOTAL_STEPS : 24); i++) {
       signal.throwIfAborted();
       c.steps += 1;
@@ -645,7 +647,7 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
           if (reply) {
             // Read analysis is commentary, kept separate from observed results.
             if (c.tool_results.some(tool => ["query", "records", "draft_matches"].includes(tool.name))
-              && !c.tool_results.some(tool => ["approval_result", "delivery_result", "control_result"].includes(tool.name))) result.analysis = result.reply;
+              && !c.tool_results.some(tool => ["approval_result", "delivery_result", "control_result", "event_decision_result"].includes(tool.name))) result.analysis = result.reply;
             result.reply = reply;
           }
         }

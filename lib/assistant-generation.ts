@@ -6,7 +6,7 @@ import { validateLedgerCommand } from "@/lib/assistant-commands";
 import { validateLedgerEvent } from "@/lib/ledger-event";
 import { queryReplyView } from "@/lib/assistant-reply-view";
 import { assistantPlanExecutionDetails, assistantQueryExecutionDetails, assistantCommandExecutionDetails, type AssistantExecutionReporter } from "@/lib/assistant-execution";
-import { LEDGER_EVENT_PROMPT, eventContextSchema, ledgerEventSchema } from "@/lib/ledger-event";
+import { LEDGER_EVENT_PROMPT, eventContextSchema, ledgerEventSchema, ledgerEventDecisionSchema } from "@/lib/ledger-event";
 import { ensureCashflowSchema } from "@/lib/ledger-event-schema";
 import { ASSISTANT_COMMAND_PROMPT, assistantCardContextsSchema, recordContextsSchema } from "@/lib/assistant-commands";
 import { CATEGORY_ICON_OPTIONS, MEMBER_AVATAR_OPTIONS } from "@/lib/entity-icon-catalog";
@@ -32,6 +32,7 @@ export function validateAssistantInput(raw: unknown) {
   try {
     return { message: body.message, today: body.today as string,
       ...(body.event_context !== undefined ? { event_context: eventContextSchema.parse(body.event_context) } : {}),
+      ...(body.event_decision !== undefined ? { event_decision: ledgerEventDecisionSchema.parse(body.event_decision) } : {}),
       ...(body.event_selection !== undefined ? { event_selection: ledgerEventSchema.parse(body.event_selection) } : {}),
       ...(body.record_contexts !== undefined ? { record_contexts: recordContextsSchema.parse(body.record_contexts) } : {}),
       ...(body.control_contexts !== undefined ? { control_contexts: assistantCardControlContextsSchema.parse(body.control_contexts) } : {}),

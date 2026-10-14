@@ -161,7 +161,7 @@ test('old approvals remain executable, cleared conversations cannot execute; dup
   await f.approve(await f.prepare({kind:'gift_given'}));
   const duplicate=await f.prepare({kind:'gift_given'});
   assert.equal(duplicate.approval,undefined);
-  assert.equal(duplicate.event_choices[0].input.allow_duplicate,true);
+  assert.equal(duplicate.event_choices.find(choice => !choice.decision).input.allow_duplicate,true);
   assert.equal(Number((await f.db.query('SELECT COUNT(*) FROM transactions')).rows[0].count),1);
 });
 test('old database column migration is idempotent and preserves pre-existing ordinary transaction amounts', { skip: !modulePath }, async t => {
@@ -406,3 +406,24 @@ test('multi-payment review collects accounting fields together, preserves existi
   assert.equal(Number((await f.db.query('SELECT count(*) FROM transaction_links')).rows[0].count), 3);
   assert.equal(Number((await f.db.query('SELECT sum(amount) AS total FROM transactions')).rows[0].total), 280);
 });
+
+ test('duplicate event review displays actual saved gift and each live linked payment with both decisions', {skip:!modulePath}, async t => {
+  const f = await setup(t);
+  const saved = await f.approve(await f.prepare({kind:'gift_given',amount_cents:5000,occasion:'生日',
+    items:[{item_name:'围巾',quantity:1,unit:'条',estimated_value:200}],
+    payments:[{amount_cents:5000,date:'2026-10-09',description:'礼金',cashflow:'new',member_id:member,category_id:expenseCategory,basis:'实际支付',components:[{purpose:'gift_cash',amount_cents:5000,basis:'实际支付'}]},
+      {amount_cents:20000,date:'2026-10-08',description:'买围巾',cashflow:'new',member_id:member,category_id:expenseCategory,basis:'实际支付',components:[{purpose:'purchase',amount_cents:20000,basis:'实际支付'}]}]}));
+  const review = await f.prepare({kind:'gift_given',amount_cents:5000});
+  assert.equal(review.approval,undefined);
+  assert.match(review.reply,/不能认定/);
+  assert.equal(review.event_choices.length,2);
+  const skip = review.event_choices.find(c=>c.decision==='skip_creation');
+  assert.equal(skip.input.allow_duplicate,false);
+  const record = skip.preview.records[0];
+  assert.equal(record.id,saved.event_context.event_id);
+  const detail = JSON.stringify(record);
+  for(const expected of ['生日','围巾','¥50.00','¥200.00','2026-10-08','买围巾','本人','明确支出','2 笔']) assert.ok(detail.includes(expected),expected);
+  const positive = await f.prepare(review.event_choices.find(c=>!c.decision).input);
+  assert.ok(positive.approval,positive.reply);
+  assert.equal(Number((await f.db.query('SELECT count(*) FROM ledger_events')).rows[0].count),1,'preparing either decision never writes');
+ });

@@ -121,7 +121,8 @@ export function AssistantConversationMessage({ assistant, message }: Props) {
         onToggle={(id, open) => setExpandedDrafts(current => ({ ...current, [id]: open }))} />}
       {!eventReview && !!message.eventChoices?.length && <AssistantReplyShell label="补充事项信息" title="请选择下一步">
         <div className="space-y-3 p-4"><div className={bubbleClass}><ReactMarkdown components={markdownTableComponents} remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} disallowedElements={["img"]}>{message.text}</ReactMarkdown></div>
-          <div className="flex flex-col gap-2">{message.eventChoices.map((choice, index) => <Button key={index} type="button" variant="ghost" className={assistantChoiceClass} disabled={composerDisabled} onClick={() => void send(choice.label, choice.input, undefined, message.id)}>{choice.label}</Button>)}</div></div>
+          {message.eventChoices.map((choice, index) => choice.preview && <AssistantReplyCard key={index} preview={choice.preview} />)}
+          <div className="flex flex-col gap-2">{message.eventChoices.map((choice, index) => <Button key={index} type="button" variant="ghost" className={assistantChoiceClass} disabled={composerDisabled} onClick={() => void send(choice.label, choice.input, undefined, message.id, choice.decision)}>{choice.label}</Button>)}</div></div>
       </AssistantReplyShell>}
       {actionPreview ? <AssistantActionCard preview={actionPreview} status={message.actionResult?.status || (message.agent?.status === "stopped" ? "executing" : "pending")} pending={pendingPhase}
         resultText={message.actionResult?.text.split("\n")[0]}

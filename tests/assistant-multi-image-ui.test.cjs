@@ -1999,3 +1999,24 @@ test('payment review reuses bookkeeping components, supports per-row attribution
     assert.equal(h.all(n=>n.props?.['aria-label']==='选择记账成员').length,0);
   } finally {h.unmount();}
 });
+
+test('duplicate event review shows concrete records and sends one scoped negative decision after refresh',async()=>{
+  const {validateLedgerEvent}=require('./helpers/assistant-contracts.cjs')('@/lib/ledger-event');
+  const input=validateLedgerEvent({operation:'create',kind:'gift_given',counterparty:'朋友',amount_cents:5000,date:'2026-10-14'});
+  const output=uuid(995);
+  const h=await ready({post:async(_url,body)=>response(body.event_decision?chat('已选择不再新增，本次未写入账本。'):{action:'event',event:input,reply:'请核对疑似重复事项',drafts:[],query:null,
+    event_context:{status:'pending',event_id:null,input},event_choices:[{label:'已记过，不再新增这件事',input,decision:'skip_creation',preview:{title:'已登记的疑似重复事项',metrics:[],sections:[],notices:[],records:[{id:uuid(996),title:'送礼 · 朋友',subtitle:'2026-10-14 · 生日',amount:'¥50.00',rows:[{label:'流水 1',value:'2026-10-14 · 买围巾 · ¥200.00'}]}]}},{label:'这是另外新发生的一笔，继续核对',input:{...input,allow_duplicate:true}}],
+    agent:{goal_id:body.id,goal:body.message,status:'needs_input',steps:1,tool_calls:1,output_id:output,awaiting_answer:true,operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'needs_input'}]}})});
+  try {
+    h.restore({messages:[],input:'记录送礼'});h.click('发送');await settleDraft(h);
+    assert.ok(h.text.includes('买围巾'));assert.ok(h.text.includes('¥200.00'));assert.ok(h.text.includes('另发生')||h.text.includes('另外新发生'));
+    h.restore(h.value);await h.poll();await settleDraft(h);
+    const button=h.find(node=>node.type==='Button'&&text(node)==='已记过，不再新增这件事');
+    button.props.onClick();button.props.onClick();await settleDraft(h);
+    const requests=h.calls.filter(c=>c.body?.event_decision);
+    assert.equal(requests.length,1);assert.equal(requests[0].body.event_decision,'skip_creation');
+    assert.equal(requests[0].body.continuation.output_id,output);assert.equal(requests[0].body.continuation.kind,'answer');
+    assert.deepEqual(requests[0].body.event_selection,input);
+    assert.equal(h.calls.some(c=>c.url==='/api/assistant/confirm'||c.url.startsWith('/api/assistant/actions/')),false);
+  }finally{h.unmount();}
+});

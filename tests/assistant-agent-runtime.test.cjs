@@ -1052,3 +1052,25 @@ test('reviewed payment accounting resumes the original workflow without a model 
  assert.equal(result.agent.operations[0].status,'completed');
  assert.equal(f.checkpoints.at(-1).event_resolutions[0].pending,false);
 });
+
+test('a declined final event completes from its no-write receipt without a new model or event call', async () => {
+  const receipt={id:ACTION,status:'succeeded',text:'已按你的选择不再新增送礼，本次未写入账本。'};
+  const checkpoint={version:1,goal_id:ID,goal:'登记送礼',status:'running',steps:3,messages:[],pending_approval:null,preview_fingerprints:[],
+    operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'completed',receipt_id:ACTION}],
+    outputs:[],tool_results:[{call_id:'decline',name:'event_decision_result',operation_id:'gift',result:receipt}]};
+  const f=fixture([]);
+  const result=await f.run({checkpoint});
+  assert.equal(result.agent.status,'completed');assert.equal(result.reply,receipt.text);
+  assert.equal(f.calls.length,0);
+});
+test('a declined event leaves a dependent query runnable and retains its truthful no-write result', async () => {
+  const checkpoint={version:1,goal_id:ID,goal:'送礼然后查本月',status:'running',steps:3,messages:[],pending_approval:null,preview_fingerprints:[],
+    operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'completed',receipt_id:ACTION},
+      {id:'query',label:'本月',action:'query',effect:'read',depends_on:['gift'],status:'pending'}],
+    outputs:[],tool_results:[{call_id:'decline',name:'event_decision_result',operation_id:'gift',result:{id:ACTION,status:'succeeded',text:'不再新增送礼，本次未写入账本。'}}]};
+  const f=fixture([{...choose('read','query',query()),operation_id:'query'},respond('处理完成')]);
+  const result=await f.run({checkpoint});
+  assert.equal(result.agent.status,'completed');assert.match(result.reply,/未写入账本/);
+  assert.equal(f.calls.filter(c=>c[0]==='query').length,1);
+  assert.equal(f.calls.filter(c=>c[0]==='event').length,0);
+});

@@ -46,7 +46,9 @@ export const ledgerEventSchema = z.object({
 export type LedgerEventInput = z.infer<typeof ledgerEventSchema>;
 export type LedgerEventContext = { status: "pending" | "saved" | "undone"; event_id: string | null; input: LedgerEventInput; payment_review?: number[] };
 export const eventContextSchema = z.object({ status: z.enum(["pending", "saved", "undone"]), event_id: id, input: ledgerEventSchema, payment_review: z.array(z.number().int().min(-1)).optional() }).strict();
-export type LedgerEventChoice = { label: string; input: LedgerEventInput };
+export const ledgerEventDecisionSchema = z.literal("skip_creation");
+export type LedgerEventDecision = z.infer<typeof ledgerEventDecisionSchema>;
+export type LedgerEventChoice = { label: string; input: LedgerEventInput; decision?: LedgerEventDecision; preview?: import("@/lib/assistant-action-preview").AssistantActionPreview };
 /** Server-owned row indexes identify which payments may edit accounting attribution.
  * -1 is the single cashflow of an event without a payments collection.
  * Old persisted field choices carry the same permission through their structured inputs.

@@ -86,6 +86,7 @@ export async function createAssistantTask(userId: string, raw: unknown): Promise
     user_message_id: body.user_message_id, input, displayInput })).digest("hex");
   await ensureAssistantTaskSchema();
   if (body.continuation !== undefined) return answerAssistantTask(userId, body.id, body, input, displayInput);
+  if (input.event_decision) throw new AssistantTaskError(409, "事项决定必须接续原问题，请核对最新卡片。");
   // Reconcile an unbound ordinary reply against the server-owned question, even
   // when the browser lost its task snapshot or the question was paused.
   if (!input.images.length) {
@@ -203,9 +204,16 @@ async function answerAssistantTask(userId: string, id: string, body: Record<stri
     checkpoint.messages.push({ role: "user", content: `页面处理回执（不是新授权）：${JSON.stringify({ action: checkpoint.pending_plan?.action, ok: descriptor.ok })}。只继续原清单未完成事项；页面操作没有批准新的账本写入。` });
     delete checkpoint.pending_plan;
   } else {
-    const eventResolution = operation ? resolveAssistantEventChoice(checkpoint, operation.id, input.message, input.event_selection) : undefined;
-    if (input.event_selection && !eventResolution) throw new AssistantTaskError(409, "事项选择与当前问题不匹配，请核对最新选项。");
-    if (eventResolution) {
+    const eventResolution = operation ? resolveAssistantEventChoice(checkpoint, operation.id, input.message, input.event_selection, input.event_decision) : undefined;
+    if ((input.event_selection || input.event_decision) && (!eventResolution || eventResolution.source_output_id !== descriptor.output_id)) throw new AssistantTaskError(409, "事项选择与当前问题不匹配，请核对最新选项。");
+    if (eventResolution?.decision === "skip_creation") {
+      const receipt = { id: String(body.user_message_id), status: "succeeded" as const,
+        text: `已按你的选择不再新增“${operation!.label}”；原记录保持不变，本次未写入账本。` };
+      operation!.status = "completed"; operation!.questions = []; operation!.receipt_id = receipt.id;
+      checkpoint.tool_results.push({ call_id: `event_decision_${body.user_message_id}`, name: "event_decision_result", operation_id: operation!.id, result: receipt });
+      checkpoint.event_resolutions?.forEach(item => { if (item.operation_id === operation!.id) item.pending = false; });
+      checkpoint.messages.push({ role: "user", content: `用户通过当前事项卡片选择不再新增，服务端已结束此事项：${JSON.stringify({ operation_id: operation!.id, receipt })}。只继续其余未完成事项，不得重建此事项或宣称本次新增成功。` });
+    } else if (eventResolution) {
       checkpoint.event_resolutions = [...(checkpoint.event_resolutions || []).filter(item => item.operation_id !== operation!.id), eventResolution];
       checkpoint.messages.push({ role: "user", content: `服务端核实的已选事项条件（仅准备核对，不是入账批准）：${JSON.stringify(eventResolution)}。此选择已经解决，不得重复询问或复用旧事项。` });
     }

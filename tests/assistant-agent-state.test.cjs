@@ -315,3 +315,20 @@ test('event accounting review is bound to the current output and only edits offe
   c.outputs[0].receipt = { status: 'succeeded' };
   assert.equal(resolve(selection), undefined);
 });
+
+test('declining an event requires the offered structured decision and cannot be inferred from prose or input alone', () => {
+  const {validateLedgerEvent}=load('lib/ledger-event.ts');
+  const {resolveAssistantEventChoice}=load('lib/assistant-event-clarification.ts');
+  const input=validateLedgerEvent({operation:'create',kind:'loan_borrowed',counterparty:'同事',amount_cents:12000,date:'2026-10-14'});
+  const context={status:'pending',event_id:null,input};
+  const c=checkpoint();c.pending_approval=null;
+  c.operations=[{id:'loan',action:'event',status:'needs_input'}];
+  c.tool_results=[{name:'event_preview',operation_id:'loan',result:{event_context:context}}];
+  c.outputs=[{id:id(8),plan:{action:'event',event_context:context,event_choices:[{label:'任意文案',input,decision:'skip_creation'}]}}];
+  assert.equal(resolveAssistantEventChoice(c,'loan','已记过，不再新增',input),undefined);
+  assert.equal(resolveAssistantEventChoice(c,'loan','',input,'skip_creation').decision,'skip_creation');
+  assert.equal(resolveAssistantEventChoice(c,'other','',input,'skip_creation'),undefined);
+  assert.equal(resolveAssistantEventChoice(c,'loan','',{...input,amount_cents:1},'skip_creation'),undefined);
+  c.outputs[0].plan.event_choices=[];
+  assert.equal(resolveAssistantEventChoice(c,'loan','',input,'skip_creation'),undefined);
+});
