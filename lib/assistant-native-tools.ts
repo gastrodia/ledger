@@ -47,13 +47,13 @@ const plannedOperation = z.union([
   operation.omit({ action: true }).extend({ effect: z.literal("read"), action: z.enum(["query", "manage", "chat"]).optional().describe("已有reads时省略action，由reads.tool确定；草稿核对填chat；依赖前置结果或待澄清且暂无reads的事项填写query/manage。") }),
 ]);
 export const assistantNativeSchemas = {
-  set_workflow: z.object({ operations: z.array(plannedOperation).min(1).max(32), revision_answers: z.record(operationId, z.string().max(4000)).nullable().optional(),
+  set_workflow: z.object({ operations: z.array(plannedOperation).min(1).max(32),
     reads: z.array(z.discriminatedUnion("tool", [
       z.object({ operation_id: operationId, tool: z.literal("query").describe("完整统计汇总，附带按金额排序的最多20笔示例；查询全部明细或按日期列出记录用records及transactions/list/order，不能用query代替。"), parameters: query }).strict(),
       z.object({ operation_id: operationId, tool: z.literal("records"), parameters: records }).strict(),
     ])).max(32).describe("一次提供所有条件明确、无依赖的query/manage只读事项参数，程序执行查询、分页与排序，再由respond一次汇总。同一事项可有多个资源查询，例如送礼和收礼；统计用query，明细用records。写事项、待澄清或依赖前置结果的事项不放入reads，没有就填[]。") }).strict(),
   revise_workflow: z.object({ changes: z.array(operation.partial().required({ id: true })).min(1).max(32),
-    additions: z.array(operation).max(32).optional(), revision_answers: z.record(operationId, z.string().max(4000)).nullable().optional() }).strict(),
+    additions: z.array(operation).max(32).optional() }).strict(),
   query_statistics: z.object({ ...meta, query }).strict(),
   read_records: z.object({ ...meta, command: records }).strict(),
   match_drafts: z.object(meta).strict(),
@@ -73,7 +73,7 @@ export const assistantNativeSchemas = {
 };
 const descriptions: Record<keyof typeof assistantNativeSchemas, string> = {
   set_workflow: "一次理解完整目标，建立清单并提供所有独立只读查询的reads参数，程序直接执行，不逐项回到模型。只读事项effect=read且省略action，程序从reads.tool确定query/manage；草稿核对才填chat。sources逐字覆盖当前目标及已接受回答。写事项保留action，仍走预览和确认；纯聊天和单一control不建立清单。",
-  revise_workflow: "只修改当前未完成事项的必要条件或错误类型，保留事项ID；只传变动字段，已完成事项和凭据由程序保留。sources是原目标的授权证据，普通回答是追加条件，不能替换原目标或重写sources；只有重新拆分原目标才修订来源。事实回答可直接继续时无需修订，不能为继续任务重建清单。需要新增原目标中的事项可用additions；写变只读必须给出revision_answers。完整目标覆盖、不可变事项和依赖仍校验。",
+  revise_workflow: "只修改当前未完成事项的必要条件或错误类型，保留事项ID；只传变动字段，已完成事项和凭据由程序保留。sources是原目标的授权证据，普通回答是追加条件，不能替换原目标或重写sources；只有重新拆分原目标才修订来源。事实回答可直接继续时无需修订，不能为继续任务重建清单。需要新增原目标中的事项可用additions；写变只读的依据由服务端绑定该事项本轮已接受回答，不重复输出回答字段。完整目标覆盖、不可变事项和依赖仍校验。",
   query_statistics: "读取普通收支完整SQL汇总，daily排除借还本金，cashflow包含；只指定条件，不提供结果金额。附带明细仅为金额最大的20笔示例；用户要完整明细或按日期列出记录时使用read_records的transactions/list和order。",
   read_records: "查询真实记录、重复候选或导出；所有资源均可查询。收支明细用transactions/list，程序读取全部记录；日期排序使用order=desc/asc。不修改数据；values为空对象。",
   match_drafts: "逐笔核对当前草稿与真实账本，只返回候选；不会删除、跳过或确认。对应事项action=chat、effect=read，不是query统计或record记账。核对结果本身已完成查询，respond needs_input=false展示卡片，不要求用户先决定候选是否重复。",
@@ -198,8 +198,7 @@ export function assistantNativeDecision(call: AssistantNativeCall, controlContex
         return { ...input, ...changes.find(change => change.id === op.id) };
       });
       step.kind = "plan";
-      step.arguments_json = JSON.stringify({ operations: [...proposal, ...((p.additions as unknown[]) || [])],
-        ...(p.revision_answers !== undefined ? { revision_answers: p.revision_answers } : {}) }); break;
+      step.arguments_json = JSON.stringify({ operations: [...proposal, ...((p.additions as unknown[]) || [])] }); break;
     }
     case "query_statistics": step.kind = "read"; step.tool = "query"; step.arguments_json = JSON.stringify(p.query); break;
     case "read_records": step.kind = (p.command as { operation: string }).operation === "export" ? "preview" : "read"; step.tool = step.kind === "read" ? "records" : "command"; step.arguments_json = JSON.stringify(toCommand(p.command as Record<string, unknown>)); break;
@@ -289,7 +288,7 @@ sources分别引用各事项对应的原文片段，合起来覆盖全部目标�
 纯解释/能力询问/普通回应直接respond({reply:具体回答,needs_input:false})；没有业务调用不建立清单。可选标识无对应对象时省略或填null，不填空字符串。查当前草稿是否已录入属于chat/read事项，随后match_drafts；不建立record或query事项，不用reads替代草稿逐笔核对。核对成功后respond needs_input=false完成原只读任务；用户没要求处置候选时不追问删除/跳过/批准。
 effect：query/chat及manage只读为read；record/event/confirm/undo及manage写为write；edit/update/remove/navigate/control为local。未解决questions先读取或澄清，不能准备有歧义审批。分类和成员可由卡片选择，不单独造成业务问题。
 实物的金额、估值与本次实际购买付款分别核对。原文只提供实物及金额、但没有明确是否本次付款时，把这一资金流歧义保留在该事项questions并具体澄清；不能把金额默认当估值而漏掉本次付款，也不能把估值默认当现金支出。澄清只处理这项条件，保留其他已明确的礼金和普通收支。
-set_workflow必须一次填写所有条件明确、无依赖的query/manage只读事项的reads，不能留到逐项read_records/query_statistics调用。每个read引用对应事项ID，同一事项可有多个资源查询。程序按原范围自动分页与排序，不能为记录数量把月份拆成日期段；数据库明细使用records，不用统计query代替明细。借还未结清为outstanding，包含部分归还；notes未归档为active，置顶为pinned，两者独立。日期排序用command.order=desc/asc。参数填写parameters对象，values={}。成功读取直接完成对应事项；全部事项完成后只respond一次解释汇总，needs_input=false，不需control查询任务状态。写事项、待澄清和依赖前置结果的查询不放入reads，仍按既有单步流程处理。写变只读必须在revision_answers引用本轮已接受回答。
+set_workflow必须一次填写所有条件明确、无依赖的query/manage只读事项的reads，不能留到逐项read_records/query_statistics调用。每个read引用对应事项ID，同一事项可有多个资源查询。程序按原范围自动分页与排序，不能为记录数量把月份拆成日期段；数据库明细使用records，不用统计query代替明细。借还未结清为outstanding，包含部分归还；notes未归档为active，置顶为pinned，两者独立。日期排序用command.order=desc/asc。参数填写parameters对象，values={}。成功读取直接完成对应事项；全部事项完成后只respond一次解释汇总，needs_input=false，不需control查询任务状态。写事项、待澄清和依赖前置结果的查询不放入reads，仍按既有单步流程处理。写变只读须有该事项本轮已接受的回答，由服务端绑定原文，不输出revision_answers。
 prepare_records由系统从全部covered_operation_ids的sources及已接受回答提取事实，当前operation_id必须包含其中。日期按初始today；回答明确修订相对日期才用answer_today。不重建旧草稿或重复已处理事项。
 草稿与已保存记录是不同对象。edit只编辑未入账草稿字段，update只修改草稿成员；数据库中的金额修改必须用manage/prepare_command。审批ID不是记录ID，也不是草稿批次ID。对象不存在时不能使用对应工具；读取后发现自己的清单类型不符，修订同一事项再继续，不据清单猜对象类型。
 prepare_command/read_records.command.values是对象，按resource和operation的schema填写，不使用values_json。未改字段省略。已有确定ID或唯一名称/日期时直接prepare_command，服务端重新读取范围及快照；不要仅为取得ID额外list。需要未知的现有字段或关联信息时才先读。日期用YYYY-MM-DD，金额按工具单位，图标头像仅使用可用值。钱款借还及送收礼统一prepare_event；实物估值不形成流水，cashflow=none需完整事项明确不计流水的依据。

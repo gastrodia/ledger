@@ -2020,3 +2020,26 @@ test('duplicate event review shows concrete records and sends one scoped negativ
     assert.equal(h.calls.some(c=>c.url==='/api/assistant/confirm'||c.url.startsWith('/api/assistant/actions/')),false);
   }finally{h.unmount();}
 });
+
+test('retry replaces a prior interrupted status by turn identity while preserving real questions and receipts across refresh',async()=>{
+  const rootId=uuid(1100),old=uuid(1101),current=uuid(1102),userId=uuid(1103),conversationId=uuid(1104),question=uuid(1105);
+  const input={message:'新买的',display_text:'新买的',display_images:[]};
+  const chatPlan=reply=>({action:'chat',reply,drafts:[],query:null});
+  const agent={goal_id:rootId,goal:'登记送礼',status:'interrupted',steps:9,tool_calls:1,output_id:current,
+    operations:[{id:'gift',label:'送礼',action:'event',effect:'write',depends_on:[],status:'pending'}]};
+  const done={id:rootId,conversation_id:conversationId,user_message_id:userId,status:'succeeded',phase:'thinking',attempt:7,
+    created_at:'2026-10-14T03:00:00Z',updated_at:'2026-10-14T06:00:00Z',input,agent,result:{...chatPlan('本次中断，仍可继续'),agent},text:'',error:null,
+    output_history:[{id:question,user_message_id:uuid(1106),input,attempt:5,agent_status:'needs_input',result:chatPlan('这是实际付款还是估值？')},
+      {id:old,user_message_id:userId,input,attempt:6,agent_status:'interrupted',result:chatPlan('上次中断，文案不同')} ]};
+  const taskStore=new Map([[rootId,done]]),h=await ready({taskStore});
+  try{
+    h.restore({conversationId,messages:[{id:userId,role:'user',text:input.message},
+      {id:old,role:'assistant',text:'上次中断，文案不同',taskId:rootId,taskApplied:true,taskAttempt:6,taskStatus:'succeeded'}],input:''});
+    await h.flush();await h.poll();
+    assert.equal(h.value.messages.some(m=>m.id===old),false);
+    assert.ok(h.text.includes('这是实际付款还是估值？'));assert.ok(h.text.includes('本次中断，仍可继续'));
+    h.restore(h.value);await h.poll();
+    assert.equal(h.text.split('本次中断，仍可继续').length-1,1);
+    assert.equal(h.value.messages.some(m=>m.id===old),false);
+  }finally{h.unmount();}
+});

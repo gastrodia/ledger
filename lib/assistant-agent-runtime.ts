@@ -471,7 +471,9 @@ export async function runAssistantAgent(o: AssistantAgentOptions): Promise<Assis
                 && canonical({ ...previous, status: "pending", receipt_id: undefined, questions: undefined }) !== canonical({ ...next, receipt_id: undefined, questions: undefined })) throw new Error("已执行事项不可改写；更正已保存数据需另列操作并保留原凭据。");
               next.status = previous.status === "running" || previous.status === "needs_input" ? "pending" : previous.status;
               if (previous.effect === "write" && next.effect === "read") {
-                const quote = args.revision_answers?.[previous.id];
+                const quote = nativeCall?.name === "revise_workflow"
+                  ? c.clarification_answers?.find(answer => answer.operation_id === previous.id && answer.message_id === c.turn_message_id)?.text
+                  : args.revision_answers?.[previous.id];
                 if (typeof quote !== "string" || quote !== c.turn_input?.message
                   || !c.clarification_answers?.some(answer => answer.operation_id === previous.id && answer.text === quote))
                   throw new Error("写事项改为只读必须引用该事项本轮已接受的澄清回答；不能根据关键词或其他事项的回答取消原目标。");

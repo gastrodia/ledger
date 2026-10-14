@@ -66,7 +66,7 @@ export type AssistantTask = {
   image_progress?: AssistantImageProgress | null;
   approval_history?: import("@/lib/assistant-agent-state").AssistantAgentApprovalHistory;
   agent?: import("@/lib/assistant-agent-runtime").AssistantAgentMetadata;
-  output_history?: Array<{ id: string; user_message_id: string; input: { message: string; display_text: string; display_images: [] }; result: AssistantPlan; attempt: number; receipt?: import("@/lib/assistant-commands").AssistantActionResult }>;
+  output_history?: Array<{ agent_status?: import("@/lib/assistant-agent-runtime").AssistantAgentStatus; id: string; user_message_id: string; input: { message: string; display_text: string; display_images: [] }; result: AssistantPlan; attempt: number; receipt?: import("@/lib/assistant-commands").AssistantActionResult }>;
   execution_steps?: import("@/lib/assistant-execution").AssistantExecutionStep[];
   /** Included on creation or GET by ID with include_input=1; lists stay lightweight. */
   input?: { message: string; display_text: string; display_images: AssistantImage[] };

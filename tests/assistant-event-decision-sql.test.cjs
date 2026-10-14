@@ -49,3 +49,13 @@ test('decline rejects foreign owners, stale outputs, modified conditions and req
   await assert.rejects(f.api.createAssistantTask('owner',{...f.request,continuation:undefined}),/必须接续/);
   assert.equal((await f.stored()).attempt,1);
 });
+
+test('task snapshots retain historical agent status without restoring historical task controls', {skip:!modulePath},async t=>{
+  const f=await setup(t),row=await f.stored(),c=row.agent_checkpoint;
+  c.outputs[0].plan={action:'chat',reply:'原任务中断',drafts:[],query:null,agent:{goal_id:id(1),goal:c.goal,status:'interrupted',steps:2,tool_calls:0}};
+  c.output_id=id(8);
+  await f.db.query('UPDATE assistant_tasks SET agent_checkpoint=$2::jsonb WHERE id=$1',[id(1),JSON.stringify(c)]);
+  const task=await f.api.getAssistantTask('owner',id(1));
+  assert.equal(task.output_history[0].agent_status,'interrupted');
+  assert.equal(task.output_history[0].result.agent,undefined);
+});

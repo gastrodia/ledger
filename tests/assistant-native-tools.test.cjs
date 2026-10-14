@@ -269,3 +269,30 @@ test('v2 trace metadata is private and invalid native identities cannot restore'
   assert.equal(restoreAssistantAgentCheckpoint({ ...base, messages: [{ role: 'assistant', content: '', native_call: { id: '', name: 'respond', input: {} } }] }), null);
   assert.equal(restoreAssistantAgentCheckpoint({ ...base, version: 1, messages: [{ role: 'assistant', content: '', native_call: { id: 'call', name: 'respond', input: {} } }] }), null);
 });
+
+test('workflow tools do not ask the model to reproduce server-owned clarification evidence', async () => {
+  for(const tool of ['set_workflow','revise_workflow']) {
+    const schema=native.ASSISTANT_NATIVE_TOOLS[tool].inputSchema;
+    assert.equal(schema.jsonSchema.properties.revision_answers,undefined);
+  }
+  const schema=native.assistantNativeToolsForState([{...operation,action:'event',effect:'write'}]).revise_workflow.inputSchema;
+  assert.equal((await schema.validate({changes:[{id:'query',questions:[]}]})).success,true);
+  assert.equal((await schema.validate({changes:[{id:'query',questions:[]}],revision_answers:[]})).success,false,'arbitrary evidence is not silently coerced');
+});
+
+test('native workflow revision binds only the current item and current turn accepted answer before downgrading writes',async()=>{
+  for(const scope of ['current','other_item','old_turn','missing']) {
+    const goal='记录送礼',answer='只查看之前的记录';
+    const op={id:'gift',label:goal,action:'event',effect:'write',depends_on:[],sources:[goal],status:'pending'};
+    const checkpoint={version:2,goal_id:id(801),goal,status:'running',steps:1,messages:[],tool_results:[],pending_approval:null,preview_fingerprints:[],
+      turn_message_id:id(802),turn_input:{message:answer,display_text:answer,display_images:[]},authorized_answers:[answer],operations:[op],
+      clarification_answers:scope==='missing'?[]:[{operation_id:scope==='other_item'?'other':'gift',message_id:scope==='old_turn'?id(803):id(802),output_id:id(804),text:answer}]};
+    let saved,calls=0;
+    await runAssistantAgent({goalId:checkpoint.goal_id,goal,checkpoint,messages:[],maxSteps:1,signal:AbortSignal.timeout(1000),
+      adapters:{protocol:'native',chooseStep:async(_messages,_signal,operations)=>{calls++;return native.assistantNativeDecision({id:'revision',name:'revise_workflow',input:{changes:[{id:'gift',action:'manage',effect:'read'}]}},[],answer,operations);}},
+      onCheckpoint:c=>{saved=c;}});
+    assert.equal(calls,1);assert.equal(saved.operations[0].effect,scope==='current'?'read':'write',scope);
+    assert.equal(saved.tool_results.some(r=>r.name==='workflow'),scope==='current',scope);
+    if(scope!=='current')assert.match(saved.tool_results.at(-1).result.message,/已接受的澄清回答/);
+  }
+});

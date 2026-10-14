@@ -53,7 +53,7 @@ function snapshot(row: TaskRow, includeInput = false): AssistantTask {
     ...(includeInput ? { input: row.display_input } : {}),
     ...(checkpoint?.turn_message_id ? { user_message_id: checkpoint.turn_message_id, input: checkpoint.turn_input } : {}),
     ...(checkpoint?.outputs ? { output_history: checkpoint.outputs.filter(output => output.id !== checkpoint.output_id).map(output => ({ id: output.id, user_message_id: output.user_message_id, input: output.input,
-      result: { ...output.plan, agent: undefined }, attempt: output.attempt, ...(output.receipt ? { receipt: output.receipt } : {}) })) } : {}) };
+      result: { ...output.plan, agent: undefined }, attempt: output.attempt, agent_status: output.plan.agent?.status, ...(output.receipt ? { receipt: output.receipt } : {}) })) } : {}) };
 }
 async function readRow(userId: string, id: string) {
   const rows = await sql.query("SELECT * FROM assistant_tasks WHERE user_id=$1 AND id=$2", [userId, id]);

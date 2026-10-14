@@ -358,13 +358,14 @@ export function mergeAssistantTasks(
   for (const task of tasks) {
     if (task.conversation_id !== conversationId || !UUID_PATTERN.test(task.id) || !UUID_PATTERN.test(task.user_message_id)) continue;
     const agent = restoreAssistantAgent(task.agent || task.result?.agent);
-    // Older agents published a read summary before marking the last item done,
-    // then published the identical final result. Coalesce only the same turn's
-    // exact chat result; distinct requests, cards and receipts remain history.
-    const duplicateHistory = new Set((task.output_history || []).filter(history => task.status === "succeeded" && agent?.status === "completed"
-      && task.result && isReadSummary(task.result) && history.result && isReadSummary(history.result) && !history.receipt
-      && UUID_PATTERN.test(history.id) && history.user_message_id === task.user_message_id && history.id !== (agent.output_id || task.id)
-      && sameTaskValue({ ...history.result, agent: undefined }, { ...task.result, agent: undefined })).map(history => history.id));
+    // A retry replaces its own interrupted status, not business results or
+    // questions from other turns. Identity and saved state decide supersession.
+    const duplicateHistory = new Set((task.output_history || []).filter(history => task.status === "succeeded"
+      && task.result && history.result && !history.receipt && isReadSummary(history.result)
+      && UUID_PATTERN.test(history.id) && history.user_message_id === task.user_message_id && history.id !== (agent?.output_id || task.id)
+      && (history.agent_status === "interrupted" && !history.result.reply_view && !history.result.record_context && !history.result.read_results?.length
+        || agent?.status === "completed" && isReadSummary(task.result)
+          && sameTaskValue({ ...history.result, agent: undefined }, { ...task.result, agent: undefined }))).map(history => history.id));
     if (duplicateHistory.size) {
       const settled = next.filter(message => !(message.role === "assistant" && message.taskId === task.id && duplicateHistory.has(message.id)
         && !message.drafts?.length && !message.approval && !message.actionResult && !message.memberChoice
